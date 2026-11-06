@@ -1,6 +1,6 @@
 import { ArrowRight, Clapperboard, LoaderCircle, LockKeyhole } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { studioApi, subscribeToAuthenticationLoss, type StudioAuthSession } from "../api.js";
+import { authApi, subscribeToAuthenticationLoss, type StudioAuthSession } from "../auth-api.js";
 
 interface AuthenticatedStudio {
   username?: string;
@@ -14,7 +14,7 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
   const load = async () => {
     setLoadError("");
     try {
-      setSession(await studioApi.authSession());
+      setSession(await authApi.authSession());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "无法检查登录状态。");
     }
@@ -47,10 +47,10 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
   return children({
     username: session.username,
     logout: async () => {
-      await studioApi.logout();
+      await authApi.logout();
       for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
         const key = window.localStorage.key(index);
-        if (key?.startsWith("vf:creative-draft:") || key?.startsWith("vf:creative-command:")) {
+        if (key?.startsWith("vf:agent-")) {
           window.localStorage.removeItem(key);
         }
       }
@@ -69,7 +69,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
     setError("");
     const form = new FormData(event.currentTarget);
     try {
-      onAuthenticated(await studioApi.login(String(form.get("username") ?? ""), String(form.get("password") ?? "")));
+      onAuthenticated(await authApi.login(String(form.get("username") ?? ""), String(form.get("password") ?? "")));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "登录失败，请重试。");
     } finally {
@@ -81,11 +81,11 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
     <main className="auth-stage">
       <div className="auth-layout">
         <section className="auth-panel" aria-labelledby="auth-title">
-          <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>VideoFactory</strong></div>
+          <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>帧间 Frame</strong></div>
           <div className="auth-copy">
             <span className="auth-eyebrow">私人影像创作工作室</span>
             <h1 id="auth-title">回到创作现场</h1>
-            <p>你的选题、分镜与制作记录都在这里。</p>
+            <p>你的对话、作品与创作记录都在这里。</p>
           </div>
           <form className="auth-form" onSubmit={(event) => void submit(event)}>
             <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
@@ -93,7 +93,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
             {error ? <p className="auth-error" role="alert">{error}</p> : null}
             <button className="auth-submit" type="submit" disabled={pending}>
               {pending ? <LoaderCircle className="auth-spinner-inline" aria-hidden="true" size={18} /> : <LockKeyhole aria-hidden="true" size={18} />}
-              <span>{pending ? "正在进入" : "进入 VideoFactory"}</span>
+              <span>{pending ? "正在进入" : "进入 帧间 Frame"}</span>
               {!pending ? <ArrowRight aria-hidden="true" size={18} /> : null}
             </button>
           </form>

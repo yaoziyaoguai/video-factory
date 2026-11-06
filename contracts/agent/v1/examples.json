@@ -1,0 +1,6234 @@
+[
+  {
+    "name": "mixed three fixed audio roles with exact segments",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "mixed_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "startMs": 0,
+          "durationMs": 3000,
+          "originalGain": 0.4
+        },
+        {
+          "kind": "image",
+          "inputSlot": 1,
+          "durationMs": 3000
+        }
+      ],
+      "segmentIds": [
+        "rain",
+        "cup"
+      ],
+      "music": {
+        "inputSlot": 2,
+        "candidateId": "candidate_music",
+        "sourceStartMs": 1000,
+        "sourceDurationMs": 6000,
+        "timelineStartMs": 0,
+        "playDurationMs": 6000,
+        "repeat": false,
+        "gain": 0.2,
+        "fadeInMs": 200,
+        "fadeOutMs": 400,
+        "duckUnderNarration": true
+      },
+      "narration": {
+        "inputSlot": 3,
+        "timelineStartMs": 0,
+        "gain": 1
+      }
+    }
+  },
+  {
+    "name": "mixed gain cannot amplify",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "mixed_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "startMs": 0,
+          "durationMs": 3000,
+          "originalGain": 1.1
+        },
+        {
+          "kind": "image",
+          "inputSlot": 1,
+          "durationMs": 3000
+        }
+      ],
+      "segmentIds": [
+        "rain",
+        "cup"
+      ],
+      "music": {
+        "inputSlot": 2,
+        "candidateId": "candidate_music",
+        "sourceStartMs": 1000,
+        "sourceDurationMs": 6000,
+        "timelineStartMs": 0,
+        "playDurationMs": 6000,
+        "repeat": false,
+        "gain": 0.2,
+        "fadeInMs": 200,
+        "fadeOutMs": 400,
+        "duckUnderNarration": true
+      },
+      "narration": {
+        "inputSlot": 3,
+        "timelineStartMs": 0,
+        "gain": 1
+      }
+    }
+  },
+  {
+    "name": "audio search uses the existing materials tool",
+    "schema": "ToolSearchMaterials",
+    "valid": true,
+    "value": {
+      "kind": "audio",
+      "query": "relax",
+      "limit": 2,
+      "provider": "freetouse"
+    }
+  },
+  {
+    "name": "video plan keeps the exact narration separate from camera directions",
+    "schema": "MarkdownContent",
+    "valid": true,
+    "value": {
+      "format": "markdown",
+      "text": "两个现成画面，旁白从片头读。",
+      "narrationText": "窗外下雨，杯里回暖。"
+    }
+  },
+  {
+    "name": "exact narration cannot be an empty marker",
+    "schema": "MarkdownContent",
+    "valid": false,
+    "value": { "format": "markdown", "text": "方案", "narrationText": "" }
+  },
+  {
+    "name": "create conversation",
+    "schema": "CreateConversation",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_1",
+      "title": "今天的对话"
+    }
+  },
+  {
+    "name": "rename conversation",
+    "schema": "RenameConversation",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_2",
+      "title": "周末创作",
+      "expectedRevision": 1
+    }
+  },
+  {
+    "name": "conversation",
+    "schema": "Conversation",
+    "valid": true,
+    "value": {
+      "id": "conversation_1",
+      "title": "今天的对话",
+      "revision": 1,
+      "updatedAt": "2026-10-25T08:00:00Z"
+    }
+  },
+  {
+    "name": "conversation list",
+    "schema": "ConversationPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "id": "conversation_1",
+          "title": "今天的对话",
+          "revision": 1,
+          "updatedAt": "2026-10-25T08:00:00Z"
+        }
+      ],
+      "nextCursor": null,
+      "watermark": "cursor_1"
+    }
+  },
+  {
+    "name": "general chat has no work",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先给三条 Prompt，别生成视频。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null
+    }
+  },
+  {
+    "name": "steer original foreground request",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先保留第二条",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "steer",
+      "steerRequestId": "request_1"
+    }
+  },
+  {
+    "name": "bound confirmation",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "按这份开始",
+      "target": null,
+      "skillId": null,
+      "proposalRef": {
+        "proposalId": "proposal_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mode": "new",
+      "steerRequestId": null
+    }
+  },
+  {
+    "name": "persisted message accepted",
+    "schema": "RequestReceipt",
+    "valid": true,
+    "value": {
+      "receiptId": "receipt_1",
+      "requestId": "request_1",
+      "messageId": "message_1",
+      "state": "queued",
+      "replayed": false,
+      "runId": null
+    }
+  },
+  {
+    "name": "stop text only",
+    "schema": "StopRequest",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_stop"
+    }
+  },
+  {
+    "name": "message list",
+    "schema": "MessagePage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "id": "message_1",
+          "requestId": "request_1",
+          "role": "user",
+          "text": "先给三条 Prompt，别生成视频。",
+          "state": "completed",
+          "revision": 1,
+          "target": null,
+          "createdAt": "2026-10-25T08:00:00Z",
+          "references": {
+            "artifacts": [],
+            "proposalIds": [],
+            "runIds": [],
+            "materialBatchIds": []
+          },
+          "kind": "chat",
+          "feedback": null,
+          "createdSequence": 1
+        }
+      ],
+      "nextCursor": null,
+      "watermark": "cursor_1"
+    }
+  },
+  {
+    "name": "artifact list",
+    "schema": "ArtifactPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "id": "artifact_1",
+          "title": "旅行 Prompt",
+          "kind": "prompt",
+          "revisionId": "revision_1",
+          "revisionNumber": 1,
+          "workId": null,
+          "updatedAt": "2026-10-25T08:00:00Z"
+        }
+      ],
+      "nextCursor": null,
+      "watermark": "cursor_1"
+    }
+  },
+  {
+    "name": "empty lists have null next cursor",
+    "schema": "RunPage",
+    "valid": true,
+    "value": {
+      "items": [],
+      "nextCursor": null,
+      "watermark": "cursor_1"
+    }
+  },
+  {
+    "name": "standalone prompt revision",
+    "schema": "ArtifactRevision",
+    "valid": true,
+    "value": {
+      "artifactId": "artifact_1",
+      "revisionId": "revision_1",
+      "revisionNumber": 1,
+      "baseRevisionId": null,
+      "requestId": "request_1",
+      "runId": null,
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content": {
+        "format": "markdown",
+        "text": "雨后的山间，沿小路前进。"
+      },
+      "createdAt": "2026-10-25T08:00:00Z"
+    }
+  },
+  {
+    "name": "produced video revision",
+    "schema": "ArtifactRevision",
+    "valid": true,
+    "value": {
+      "artifactId": "artifact_video",
+      "revisionId": "revision_video",
+      "revisionNumber": 1,
+      "baseRevisionId": null,
+      "requestId": null,
+      "runId": "run_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content": {
+        "format": "media",
+        "blobId": "blob_1",
+        "mimeType": "video/mp4",
+        "durationMs": 8000
+      },
+      "createdAt": "2026-10-25T08:00:00Z"
+    }
+  },
+  {
+    "name": "feedback note",
+    "schema": "FeedbackInput",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_feedback",
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": null
+      },
+      "text": "下一版结尾安静一点"
+    }
+  },
+  {
+    "name": "feedback does not apply edit",
+    "schema": "FeedbackReceipt",
+    "valid": true,
+    "value": {
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": null
+      },
+      "applied": false,
+      "disposition": "next_version",
+      "replayed": false,
+      "messageId": "message_feedback",
+      "messageRevision": 1,
+      "workId": null,
+      "contentSource": null
+    }
+  },
+  {
+    "name": "model catalog no keys",
+    "schema": "Bootstrap",
+    "valid": true,
+    "value": {
+      "ownerId": "owner_1",
+      "displayName": "创作者",
+      "models": [
+        {
+          "binding": {
+            "providerId": "provider_demo",
+            "modelId": "model_demo",
+            "connectionId": "connection_demo",
+            "configurationRevisionId": "config_1"
+          },
+          "name": "演示视频通道",
+          "kind": "video",
+          "features": [
+            "8 秒 720p"
+          ],
+          "availability": "unverified",
+          "verificationNote": "未联调",
+          "isDefault": false
+        }
+      ],
+      "skills": []
+    }
+  },
+  {
+    "name": "prepare intent no client quote",
+    "schema": "PrepareProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_prepare",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      }
+    }
+  },
+  {
+    "name": "ready proposal with estimate disclosure",
+    "schema": "Proposal",
+    "valid": true,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "state": "ready",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": null,
+      "revision": 1
+    }
+  },
+  {
+    "name": "accepted proposal points to one run",
+    "schema": "Proposal",
+    "valid": true,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "state": "accepted",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": "run_1",
+      "revision": 1
+    }
+  },
+  {
+    "name": "accept proposal no self authorization",
+    "schema": "AcceptProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_accept",
+      "proposalDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "admission receipt",
+    "schema": "AdmissionReceipt",
+    "valid": true,
+    "value": {
+      "receiptId": "receipt_admit",
+      "replayed": false,
+      "run": {
+        "id": "run_1",
+        "conversationId": "conversation_1",
+        "workId": "work_1",
+        "snapshotId": "snapshot_1",
+        "proposalId": "proposal_1",
+        "revision": 1,
+        "state": "queued",
+        "finance": {
+          "state": "reserved",
+          "currency": "CNY",
+          "reservedMinor": 500,
+          "pendingUnknownMinor": 0,
+          "settledMinor": 0,
+          "priceKind": "estimate"
+        },
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "outputRevisions": [],
+        "createdAt": "2026-10-25T08:00:00Z",
+        "updatedAt": "2026-10-25T08:00:00Z",
+        "issue": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_video_1",
+            "kind": "video",
+            "state": "pending",
+            "media": null
+          }
+        ],
+        "segments": []
+      }
+    }
+  },
+  {
+    "name": "cancel command",
+    "schema": "CancelRun",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_cancel",
+      "expectedRevision": 1
+    }
+  },
+  {
+    "name": "cancel is only requested",
+    "schema": "CancelReceipt",
+    "valid": true,
+    "value": {
+      "receiptId": "receipt_cancel",
+      "replayed": false,
+      "run": {
+        "id": "run_1",
+        "conversationId": "conversation_1",
+        "workId": "work_1",
+        "snapshotId": "snapshot_1",
+        "proposalId": "proposal_1",
+        "revision": 2,
+        "state": "cancel_requested",
+        "finance": {
+          "state": "reserved",
+          "currency": "CNY",
+          "reservedMinor": 500,
+          "pendingUnknownMinor": 0,
+          "settledMinor": 0,
+          "priceKind": "estimate"
+        },
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "outputRevisions": [],
+        "createdAt": "2026-10-25T08:00:00Z",
+        "updatedAt": "2026-10-25T08:00:00Z",
+        "issue": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_video_1",
+            "kind": "video",
+            "state": "succeeded",
+            "media": {
+              "format": "media",
+              "blobId": "blob_video_1",
+              "mimeType": "video/mp4",
+              "durationMs": 6100
+            }
+          }
+        ],
+        "segments": []
+      },
+      "cancellation": "requested"
+    }
+  },
+  {
+    "name": "cancelled stops local continuation, provider result unconfirmed",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 3,
+      "state": "cancelled",
+      "finance": {
+        "state": "pending_reconciliation",
+        "currency": "CNY",
+        "reservedMinor": 0,
+        "pendingUnknownMinor": 48,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "CANCEL_UNSUPPORTED",
+        "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+      },
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state queued",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "queued",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "pending",
+          "media": null
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "pending",
+          "media": null
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state running",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "running",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state unknown",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "unknown",
+      "finance": {
+        "state": "pending_reconciliation",
+        "currency": "CNY",
+        "reservedMinor": 0,
+        "pendingUnknownMinor": 500,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "PROVIDER_UNKNOWN",
+        "message": "原请求受理状态待核对。"
+      },
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state cancel_requested",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "cancel_requested",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state succeeded",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "succeeded",
+      "finance": {
+        "state": "pending_reconciliation",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [
+        {
+          "artifactId": "artifact_video",
+          "revisionId": "revision_video"
+        }
+      ],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": [
+        {
+          "segmentId": "sec_opening",
+          "title": "开场山路",
+          "plan": {
+            "artifactId": "artifact_plan",
+            "revisionId": "revision_plan_2"
+          },
+          "content": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_script",
+            "revisionId": "revision_script_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "sourceSectionIds": [
+            "sec_script_opening"
+          ],
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 3000
+          },
+          "revision": null,
+          "state": "succeeded",
+          "startMs": null,
+          "durationMs": null
+        },
+        {
+          "segmentId": "sec_ridge",
+          "title": "山脊与风",
+          "plan": {
+            "artifactId": "artifact_plan",
+            "revisionId": "revision_plan_2"
+          },
+          "content": null,
+          "sourceSectionIds": [],
+          "media": null,
+          "revision": null,
+          "state": "pending",
+          "startMs": null,
+          "durationMs": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "run state failed",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "failed",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "run state cancelled",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "cancelled",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "snapshot and matching cursor",
+    "schema": "Snapshot",
+    "valid": true,
+    "value": {
+      "conversation": {
+        "id": "conversation_1",
+        "title": "今天的对话",
+        "revision": 1,
+        "updatedAt": "2026-10-25T08:00:00Z"
+      },
+      "eventCursor": "cursor_1",
+      "messages": {
+        "items": [
+          {
+            "id": "message_1",
+            "requestId": "request_1",
+            "role": "user",
+            "text": "先给三条 Prompt，别生成视频。",
+            "state": "completed",
+            "revision": 1,
+            "target": null,
+            "createdAt": "2026-10-25T08:00:00Z",
+            "references": {
+              "artifacts": [],
+              "proposalIds": [],
+              "runIds": [],
+              "materialBatchIds": []
+            },
+            "kind": "chat",
+            "feedback": null,
+            "createdSequence": 1
+          }
+        ],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "artifacts": {
+        "items": [
+          {
+            "id": "artifact_1",
+            "title": "旅行 Prompt",
+            "kind": "prompt",
+            "revisionId": "revision_1",
+            "revisionNumber": 1,
+            "workId": null,
+            "updatedAt": "2026-10-25T08:00:00Z"
+          }
+        ],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "runs": {
+        "items": [
+          {
+            "id": "run_1",
+            "conversationId": "conversation_1",
+            "workId": "work_1",
+            "snapshotId": "snapshot_1",
+            "proposalId": "proposal_1",
+            "revision": 1,
+            "state": "queued",
+            "finance": {
+              "state": "reserved",
+              "currency": "CNY",
+              "reservedMinor": 500,
+              "pendingUnknownMinor": 0,
+              "settledMinor": 0,
+              "priceKind": "estimate"
+            },
+            "inputRevisions": [
+              {
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1"
+              }
+            ],
+            "outputRevisions": [],
+            "createdAt": "2026-10-25T08:00:00Z",
+            "updatedAt": "2026-10-25T08:00:00Z",
+            "issue": null,
+            "title": "旅行片段",
+            "operations": [
+              {
+                "operationId": "op_video_1",
+                "kind": "video",
+                "state": "pending",
+                "media": null
+              }
+            ],
+            "segments": []
+          }
+        ],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "activeRequestId": null,
+      "proposals": {
+        "items": [],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "works": [],
+      "materialBatches": []
+    }
+  },
+  {
+    "name": "new output notification",
+    "schema": "BusinessEvent",
+    "valid": true,
+    "value": {
+      "eventId": "event_1",
+      "cursor": "cursor_2",
+      "conversationId": "conversation_1",
+      "kind": "artifact.delivered",
+      "entityId": "artifact_1",
+      "entityVersion": 1,
+      "notification": "new_output",
+      "createdAt": "2026-10-25T08:00:00Z"
+    }
+  },
+  {
+    "name": "ephemeral text delta",
+    "schema": "TextDelta",
+    "valid": true,
+    "value": {
+      "requestId": "request_1",
+      "messageId": "message_2",
+      "sequence": 0,
+      "text": "这里有三个方向"
+    }
+  },
+  {
+    "name": "stream cursor reset",
+    "schema": "ResetRequired",
+    "valid": true,
+    "value": {
+      "reason": "cursor_expired"
+    }
+  },
+  {
+    "name": "one request batch of three",
+    "schema": "ToolDelivery",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "targeted revision",
+    "schema": "ToolDelivery",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "mode": "revise",
+          "artifactId": "artifact_1",
+          "baseRevisionId": "revision_1",
+          "title": "旅行 Prompt",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "结尾留白"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "delivery receipt closed",
+    "schema": "DeliveryReceipt",
+    "valid": true,
+    "value": {
+      "receiptId": "receipt_delivery",
+      "requestId": "request_1",
+      "replayed": false,
+      "revisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "deliveryClosed": true
+    }
+  },
+  {
+    "name": "tool prepares no authorization",
+    "schema": "ToolPrepareProposal",
+    "valid": true,
+    "value": {
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      }
+    }
+  },
+  {
+    "name": "tool reads exact revision",
+    "schema": "ToolReadArtifact",
+    "valid": true,
+    "value": {
+      "artifactId": "artifact_1",
+      "revisionId": "revision_1"
+    }
+  },
+  {
+    "name": "private worker frozen input",
+    "schema": "ExecutionInput",
+    "valid": true,
+    "value": {
+      "runId": "run_1",
+      "snapshotId": "snapshot_1",
+      "operationId": "op_1",
+      "attemptId": "attempt_1",
+      "requestIdentity": "request_identity_1",
+      "operation": {
+        "operationId": "op_1",
+        "outputSlot": "video",
+        "kind": "video",
+        "model": {
+          "providerId": "provider_demo",
+          "modelId": "model_demo",
+          "connectionId": "connection_demo",
+          "configurationRevisionId": "config_1"
+        },
+        "inputs": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "parameters": {
+          "durationSeconds": 8,
+          "aspectRatio": "16:9",
+          "resolution": "720p",
+          "audioMode": "none"
+        },
+        "maxCreateAttempts": 1,
+        "quotePerAttempt": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "priceKind": "estimate"
+      },
+      "resolvedInputs": []
+    }
+  },
+  {
+    "name": "query original external task",
+    "schema": "RecoveryQuery",
+    "valid": true,
+    "value": {
+      "runId": "run_1",
+      "operationId": "op_1",
+      "attemptId": "attempt_1",
+      "requestIdentity": "request_identity_1",
+      "providerTaskId": "tasks/provider:123",
+      "accountBinding": {
+        "providerId": "provider_demo",
+        "modelId": "model_demo",
+        "connectionId": "connection_demo",
+        "configurationRevisionId": "config_1"
+      },
+      "kind": "provider"
+    }
+  },
+  {
+    "name": "provider observation no fabricated result",
+    "schema": "ExecutionObservation",
+    "valid": true,
+    "value": {
+      "observationId": "observation_1",
+      "attemptId": "attempt_1",
+      "state": "accepted",
+      "providerTaskId": "tasks/provider:123",
+      "blob": null,
+      "observedAt": "2026-10-25T08:00:00Z",
+      "message": null,
+      "billing": null
+    }
+  },
+  {
+    "name": "documented error INVALID_INPUT",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "INVALID_INPUT",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error UNAUTHENTICATED",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "UNAUTHENTICATED",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error FORBIDDEN",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "FORBIDDEN",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error NOT_FOUND",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "NOT_FOUND",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error STALE_REVISION",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "STALE_REVISION",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error IDEMPOTENCY_CONFLICT",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "IDEMPOTENCY_CONFLICT",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error DELIVERY_CLOSED",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "DELIVERY_CLOSED",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error RUN_BUSY",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "RUN_BUSY",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error AUTHORIZATION_REQUIRED",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "AUTHORIZATION_REQUIRED",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error PROPOSAL_STALE",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "PROPOSAL_STALE",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error BUDGET_INSUFFICIENT",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "BUDGET_INSUFFICIENT",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error CAPABILITY_UNAVAILABLE",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "CAPABILITY_UNAVAILABLE",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error QUEUE_FULL",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "QUEUE_FULL",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error CURSOR_EXPIRED",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "CURSOR_EXPIRED",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error REQUEST_NOT_RUNNING",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "REQUEST_NOT_RUNNING",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "documented error TEMPORARILY_UNAVAILABLE",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "message": "示例错误说明",
+      "requestId": "request_http",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "forged actor",
+    "schema": "AcceptProposal",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_accept",
+      "proposalDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "actorId": "someone_else"
+    }
+  },
+  {
+    "name": "model self approval",
+    "schema": "ToolPrepareProposal",
+    "valid": false,
+    "value": {
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "authorized": true
+    }
+  },
+  {
+    "name": "client forged price",
+    "schema": "PrepareProposal",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_fake",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 0
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      }
+    }
+  },
+  {
+    "name": "new message cannot covertly steer",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先给三条 Prompt，别生成视频。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": "request_1"
+    }
+  },
+  {
+    "name": "steer needs target request",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先给三条 Prompt，别生成视频。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "steer",
+      "steerRequestId": null
+    }
+  },
+  {
+    "name": "steer cannot also confirm production",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先给三条 Prompt，别生成视频。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": {
+        "proposalId": "proposal_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mode": "steer",
+      "steerRequestId": "request_1"
+    }
+  },
+  {
+    "name": "message forged owner",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "text": "先给三条 Prompt，别生成视频。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "ownerId": "owner_2"
+    }
+  },
+  {
+    "name": "numeric opaque ID",
+    "schema": "AcceptProposal",
+    "valid": false,
+    "value": {
+      "commandId": 9007199254740992,
+      "proposalDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "unsafe integer money",
+    "schema": "Money",
+    "valid": false,
+    "value": {
+      "currency": "CNY",
+      "amountMinor": 9007199254740992
+    }
+  },
+  {
+    "name": "floating money",
+    "schema": "Money",
+    "valid": false,
+    "value": {
+      "currency": "CNY",
+      "amountMinor": 0.5
+    }
+  },
+  {
+    "name": "negative quote",
+    "schema": "Money",
+    "valid": false,
+    "value": {
+      "currency": "CNY",
+      "amountMinor": -1
+    }
+  },
+  {
+    "name": "unimplemented settlement currency",
+    "schema": "Money",
+    "valid": false,
+    "value": {
+      "currency": "USD",
+      "amountMinor": 100
+    }
+  },
+  {
+    "name": "invalid digest",
+    "schema": "AcceptProposal",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "proposalDigest": "approved"
+    }
+  },
+  {
+    "name": "missing exact proposal digest",
+    "schema": "AcceptProposal",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1"
+    }
+  },
+  {
+    "name": "extra automatic stage",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        }
+      ],
+      "continueTo": "video"
+    }
+  },
+  {
+    "name": "empty formal delivery",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": []
+    }
+  },
+  {
+    "name": "unbounded batch",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "tool cannot claim video file created",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "假视频",
+          "kind": "video",
+          "content": {
+            "format": "markdown",
+            "text": "video.mp4"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "revise without base",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "revise",
+          "artifactId": "artifact_1",
+          "title": "t",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "t"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "accepted proposal needs run",
+    "schema": "Proposal",
+    "valid": false,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "state": "accepted",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": null,
+      "revision": 1
+    }
+  },
+  {
+    "name": "unaccepted proposal cannot have run",
+    "schema": "Proposal",
+    "valid": false,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "state": "ready",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": "run_1",
+      "revision": 1
+    }
+  },
+  {
+    "name": "unknown run state",
+    "schema": "Run",
+    "valid": false,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "proposalId": "proposal_1",
+      "revision": 1,
+      "state": "done",
+      "finance": {
+        "state": "reserved",
+        "currency": "CNY",
+        "reservedMinor": 500,
+        "pendingUnknownMinor": 0,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 6100
+          }
+        }
+      ],
+      "segments": []
+    }
+  },
+  {
+    "name": "worker payload must not contain secret",
+    "schema": "ExecutionObservation",
+    "valid": false,
+    "value": {
+      "observationId": "observation_1",
+      "attemptId": "attempt_1",
+      "state": "accepted",
+      "providerTaskId": "tasks/provider:123",
+      "blob": null,
+      "observedAt": "2026-10-25T08:00:00Z",
+      "message": null,
+      "apiKey": "forbidden-example",
+      "billing": null
+    }
+  },
+  {
+    "name": "arbitrary local path",
+    "schema": "ExecutionInput",
+    "valid": false,
+    "value": {
+      "runId": "run_1",
+      "snapshotId": "snapshot_1",
+      "operationId": "op_1",
+      "attemptId": "attempt_1",
+      "requestIdentity": "request_identity_1",
+      "operation": {
+        "operationId": "op_1",
+        "outputSlot": "video",
+        "kind": "video",
+        "model": {
+          "providerId": "provider_demo",
+          "modelId": "model_demo",
+          "connectionId": "connection_demo",
+          "configurationRevisionId": "config_1"
+        },
+        "inputs": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "parameters": {
+          "durationSeconds": 8,
+          "aspectRatio": "16:9",
+          "resolution": "720p",
+          "audioMode": "none"
+        },
+        "maxCreateAttempts": 1,
+        "quotePerAttempt": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "priceKind": "estimate"
+      },
+      "resolvedInputs": [],
+      "path": "../../another-user"
+    }
+  },
+  {
+    "name": "false feedback applies edit",
+    "schema": "FeedbackReceipt",
+    "valid": false,
+    "value": {
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": null
+      },
+      "applied": true,
+      "disposition": "noted",
+      "replayed": false,
+      "messageId": "message_feedback",
+      "messageRevision": 1,
+      "workId": null,
+      "contentSource": null
+    }
+  },
+  {
+    "name": "invalid UTC timestamp",
+    "schema": "Time",
+    "valid": false,
+    "value": "tomorrow"
+  },
+  {
+    "name": "empty title",
+    "schema": "RenameConversation",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_1",
+      "title": "",
+      "expectedRevision": 1
+    }
+  },
+  {
+    "name": "snapshot missing event cursor",
+    "schema": "Snapshot",
+    "valid": false,
+    "value": {
+      "conversation": {
+        "id": "conversation_1",
+        "title": "今天的对话",
+        "revision": 1,
+        "updatedAt": "2026-10-25T08:00:00Z"
+      },
+      "messages": {
+        "items": [],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "artifacts": {
+        "items": [],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "runs": {
+        "items": [],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "activeRequestId": null,
+      "proposals": {
+        "items": [],
+        "nextCursor": null,
+        "watermark": "cursor_1"
+      },
+      "works": [],
+      "materialBatches": []
+    }
+  },
+  {
+    "name": "pending proposals are discoverable after reload",
+    "schema": "ProposalPage",
+    "valid": true,
+    "value": {
+      "items": [],
+      "nextCursor": null,
+      "watermark": "cursor_1"
+    }
+  },
+  {
+    "name": "artifact head for background event refresh",
+    "schema": "ArtifactHead",
+    "valid": true,
+    "value": {
+      "id": "artifact_1",
+      "title": "旅行 Prompt",
+      "kind": "prompt",
+      "revisionId": "revision_1",
+      "revisionNumber": 1,
+      "workId": null,
+      "updatedAt": "2026-10-25T08:00:00Z"
+    }
+  },
+  {
+    "name": "confirmation_with_different_feedback_target",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_probe",
+      "text": "确认制作",
+      "target": {
+        "artifactId": "other_artifact",
+        "revisionId": "other_revision",
+        "workId": null
+      },
+      "skillId": null,
+      "proposalRef": {
+        "proposalId": "proposal_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mode": "new",
+      "steerRequestId": null
+    }
+  },
+  {
+    "name": "settled_finance_retains_reservation",
+    "schema": "Finance",
+    "valid": false,
+    "value": {
+      "state": "settled",
+      "currency": "CNY",
+      "reservedMinor": 500,
+      "pendingUnknownMinor": 0,
+      "settledMinor": 0,
+      "priceKind": "estimate"
+    }
+  },
+  {
+    "name": "confirmation cannot change skill",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_probe",
+      "text": "确认制作",
+      "target": null,
+      "skillId": "skill_other",
+      "proposalRef": {
+        "proposalId": "proposal_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mode": "new",
+      "steerRequestId": null
+    }
+  },
+  {
+    "name": "settled finance has no open reservation",
+    "schema": "Finance",
+    "valid": true,
+    "value": {
+      "state": "settled",
+      "currency": "CNY",
+      "reservedMinor": 0,
+      "pendingUnknownMinor": 0,
+      "settledMinor": 500,
+      "priceKind": "estimate"
+    }
+  },
+  {
+    "name": "message by event identity",
+    "schema": "Message",
+    "valid": true,
+    "value": {
+      "id": "message_1",
+      "requestId": "request_1",
+      "role": "user",
+      "text": "先给三条 Prompt，别生成视频。",
+      "state": "completed",
+      "revision": 1,
+      "target": null,
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": null,
+      "createdSequence": 1
+    }
+  },
+  {
+    "name": "feedback is a durable readable message",
+    "schema": "Message",
+    "valid": true,
+    "value": {
+      "id": "message_feedback",
+      "requestId": null,
+      "role": "user",
+      "text": "结尾缩短两秒",
+      "state": "completed",
+      "revision": 1,
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": "work_1"
+      },
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "feedback",
+      "feedback": {
+        "applied": false,
+        "disposition": "next_version",
+        "workId": null,
+        "contentSource": null
+      },
+      "createdSequence": 1
+    }
+  },
+  {
+    "name": "local render recovery without fictional account",
+    "schema": "RecoveryQuery",
+    "valid": true,
+    "value": {
+      "kind": "local",
+      "runId": "run_1",
+      "operationId": "op_render",
+      "attemptId": "attempt_render",
+      "requestIdentity": "identity_render"
+    }
+  },
+  {
+    "name": "local recovery cannot carry account field",
+    "schema": "RecoveryQuery",
+    "valid": false,
+    "value": {
+      "kind": "local",
+      "runId": "run_1",
+      "operationId": "op_render",
+      "attemptId": "attempt_render",
+      "requestIdentity": "identity_render",
+      "accountBinding": null
+    }
+  },
+  {
+    "name": "provider recovery requires original account",
+    "schema": "RecoveryQuery",
+    "valid": false,
+    "value": {
+      "runId": "run_1",
+      "operationId": "op_1",
+      "attemptId": "attempt_1",
+      "requestIdentity": "request_identity_1",
+      "providerTaskId": "tasks/provider:123",
+      "accountBinding": null,
+      "kind": "provider"
+    }
+  },
+  {
+    "name": "authoritative corrected cumulative net bill",
+    "schema": "BillingFact",
+    "valid": true,
+    "value": {
+      "kind": "authoritative",
+      "billingFactId": "provider_bill_attempt_1",
+      "sourceRevision": "2",
+      "netAmount": {
+        "currency": "CNY",
+        "amountMinor": 80
+      },
+      "final": true,
+      "evidenceId": "evidence_invoice_2"
+    }
+  },
+  {
+    "name": "unverified bill does not imply settled",
+    "schema": "BillingFact",
+    "valid": true,
+    "value": {
+      "kind": "unverified",
+      "reportedNetAmount": {
+        "currency": "CNY",
+        "amountMinor": 100
+      },
+      "evidenceId": "evidence_poll"
+    }
+  },
+  {
+    "name": "billing revision preserves integer precision as string",
+    "schema": "BillingFact",
+    "valid": false,
+    "value": {
+      "kind": "authoritative",
+      "billingFactId": "provider_bill_attempt_1",
+      "sourceRevision": 2,
+      "netAmount": {
+        "currency": "CNY",
+        "amountMinor": 80
+      },
+      "final": true,
+      "evidenceId": "evidence_invoice_2"
+    }
+  },
+  {
+    "name": "billing evidence must state finality",
+    "schema": "BillingFact",
+    "valid": false,
+    "value": {
+      "kind": "authoritative",
+      "billingFactId": "provider_bill_attempt_1",
+      "sourceRevision": "2",
+      "netAmount": {
+        "currency": "CNY",
+        "amountMinor": 80
+      },
+      "evidenceId": "evidence_invoice_2"
+    }
+  },
+  {
+    "name": "proposal cannot lose merge version",
+    "schema": "Proposal",
+    "valid": false,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "state": "ready",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": null
+    }
+  },
+  {
+    "name": "feedback message cannot claim auto application",
+    "schema": "Message",
+    "valid": false,
+    "value": {
+      "id": "message_feedback",
+      "requestId": null,
+      "role": "user",
+      "text": "结尾缩短两秒",
+      "state": "completed",
+      "revision": 1,
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": "work_1"
+      },
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "feedback",
+      "feedback": {
+        "applied": true,
+        "disposition": "next_version",
+        "workId": null,
+        "contentSource": null
+      },
+      "createdSequence": 1
+    }
+  },
+  {
+    "name": "documented target scope conflict",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "TARGET_SCOPE_MISMATCH",
+      "message": "改稿对象与本次请求不一致",
+      "requestId": "http_1",
+      "retryAction": "none",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "valid image operation shape",
+    "schema": "OperationSpec",
+    "valid": true,
+    "value": {
+      "operationId": "op_image",
+      "outputSlot": "out_image",
+      "inputs": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 100
+      },
+      "priceKind": "bounded",
+      "kind": "image",
+      "model": {
+        "providerId": "provider_demo",
+        "modelId": "model_demo",
+        "connectionId": "connection_demo",
+        "configurationRevisionId": "config_1"
+      },
+      "parameters": {
+        "aspectRatio": "16:9",
+        "resolution": "1024"
+      }
+    }
+  },
+  {
+    "name": "valid speech operation shape",
+    "schema": "OperationSpec",
+    "valid": true,
+    "value": {
+      "operationId": "op_speech",
+      "outputSlot": "out_speech",
+      "inputs": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 100
+      },
+      "priceKind": "bounded",
+      "kind": "speech",
+      "model": {
+        "providerId": "provider_demo",
+        "modelId": "model_demo",
+        "connectionId": "connection_demo",
+        "configurationRevisionId": "config_1"
+      },
+      "parameters": {
+        "voiceId": "voice_1",
+        "format": "mp3"
+      }
+    }
+  },
+  {
+    "name": "speech operation with supplier voice id containing spaces and parentheses",
+    "schema": "OperationSpec",
+    "valid": true,
+    "value": {
+      "operationId": "op_speech",
+      "outputSlot": "out_speech",
+      "inputs": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 100
+      },
+      "priceKind": "bounded",
+      "kind": "speech",
+      "model": {
+        "providerId": "provider_demo",
+        "modelId": "model_demo",
+        "connectionId": "connection_demo",
+        "configurationRevisionId": "config_1"
+      },
+      "parameters": {
+        "voiceId": "Chinese (Mandarin)_News_Anchor",
+        "format": "mp3"
+      }
+    }
+  },
+  {
+    "name": "speech voice id longer than 200 characters is rejected",
+    "schema": "OperationSpec",
+    "valid": false,
+    "value": {
+      "operationId": "op_speech",
+      "outputSlot": "out_speech",
+      "inputs": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 100
+      },
+      "priceKind": "bounded",
+      "kind": "speech",
+      "model": {
+        "providerId": "provider_demo",
+        "modelId": "model_demo",
+        "connectionId": "connection_demo",
+        "configurationRevisionId": "config_1"
+      },
+      "parameters": {
+        "voiceId": "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv",
+        "format": "mp3"
+      }
+    }
+  },
+  {
+    "name": "valid render operation shape",
+    "schema": "OperationSpec",
+    "valid": true,
+    "value": {
+      "operationId": "op_render",
+      "outputSlot": "out_render",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_video",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 0
+      },
+      "priceKind": "bounded",
+      "kind": "render",
+      "model": null,
+      "parameters": {
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "assembly": "ordered_concat"
+      }
+    }
+  },
+  {
+    "name": "local render submit without provider identity",
+    "schema": "ExecutionInput",
+    "valid": true,
+    "value": {
+      "runId": "run_1",
+      "snapshotId": "snapshot_1",
+      "operationId": "op_render",
+      "attemptId": "attempt_render",
+      "requestIdentity": "identity_render",
+      "operation": {
+        "operationId": "op_render",
+        "outputSlot": "out_render",
+        "inputs": [
+          {
+            "kind": "blob",
+            "blobId": "blob_video",
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "maxCreateAttempts": 1,
+        "quotePerAttempt": {
+          "currency": "CNY",
+          "amountMinor": 0
+        },
+        "priceKind": "bounded",
+        "kind": "render",
+        "model": null,
+        "parameters": {
+          "format": "mp4",
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "assembly": "ordered_concat"
+        }
+      },
+      "resolvedInputs": [
+        {
+          "slot": 0,
+          "blobId": "blob_video",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    }
+  },
+  {
+    "name": "local render cannot masquerade as a paid provider",
+    "schema": "OperationSpec",
+    "valid": false,
+    "value": {
+      "operationId": "op_render",
+      "outputSlot": "out_render",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_video",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "maxCreateAttempts": 1,
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 50
+      },
+      "priceKind": "bounded",
+      "kind": "render",
+      "model": null,
+      "parameters": {
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "assembly": "ordered_concat"
+      }
+    }
+  },
+  {
+    "name": "tool reads proposal detail",
+    "schema": "ToolReadProposal",
+    "valid": true,
+    "value": {
+      "proposalId": "prop_1"
+    }
+  },
+  {
+    "name": "tool proposal read cannot widen scope",
+    "schema": "ToolReadProposal",
+    "valid": false,
+    "value": {
+      "proposalId": "prop_1",
+      "ownerId": "owner_1"
+    }
+  },
+  {
+    "name": "tool reads run detail",
+    "schema": "ToolReadRun",
+    "valid": true,
+    "value": {
+      "runId": "run_1"
+    }
+  },
+  {
+    "name": "tool run read needs exact id",
+    "schema": "ToolReadRun",
+    "valid": false,
+    "value": {
+      "run": "run_1"
+    }
+  },
+  {
+    "name": "tool lists production index first page",
+    "schema": "ToolListProduction",
+    "valid": true,
+    "value": {
+      "kind": "proposals"
+    }
+  },
+  {
+    "name": "tool list continues with cursor",
+    "schema": "ToolListProduction",
+    "valid": true,
+    "value": {
+      "kind": "runs",
+      "cursor": "b3FwLTItcnVucy01",
+      "limit": 20
+    }
+  },
+  {
+    "name": "tool list rejects free-form filters",
+    "schema": "ToolListProduction",
+    "valid": false,
+    "value": {
+      "kind": "proposals",
+      "state": "ready"
+    }
+  },
+  {
+    "name": "tool list limit out of range",
+    "schema": "ToolListProduction",
+    "valid": false,
+    "value": {
+      "kind": "runs",
+      "limit": 0
+    }
+  },
+  {
+    "name": "proposal index page",
+    "schema": "ProductionIndexPage",
+    "valid": true,
+    "value": {
+      "kind": "proposals",
+      "items": [
+        {
+          "id": "prop_1",
+          "title": "旅行开场配音",
+          "state": "ready",
+          "revision": 1,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expiresAt": "2026-10-26T08:30:00Z",
+          "acceptedRunId": null
+        }
+      ],
+      "nextCursor": null,
+      "watermark": "ZXZlbnQtd2F0ZXJtYXJr"
+    }
+  },
+  {
+    "name": "run index page with next cursor",
+    "schema": "ProductionIndexPage",
+    "valid": true,
+    "value": {
+      "kind": "runs",
+      "items": [
+        {
+          "id": "run_1",
+          "title": "旅行开场配音",
+          "state": "unknown",
+          "revision": 1,
+          "proposalId": "prop_1",
+          "createdAt": "2026-10-26T08:00:00Z",
+          "updatedAt": "2026-10-26T08:05:00Z"
+        }
+      ],
+      "nextCursor": "cnVucy0xMA",
+      "watermark": "ZXZlbnQtd2F0ZXJtYXJr"
+    }
+  },
+  {
+    "name": "index page kind must match tool contract",
+    "schema": "ProductionIndexPage",
+    "valid": false,
+    "value": {
+      "kind": "works",
+      "items": [],
+      "nextCursor": null,
+      "watermark": "w"
+    }
+  },
+  {
+    "name": "draft item partially streamed",
+    "schema": "ArtifactDraftItem",
+    "valid": true,
+    "value": {
+      "itemIndex": 0,
+      "title": null,
+      "kind": null,
+      "text": ""
+    }
+  },
+  {
+    "name": "draft item index beyond batch",
+    "schema": "ArtifactDraftItem",
+    "valid": false,
+    "value": {
+      "itemIndex": 8,
+      "title": null,
+      "kind": null,
+      "text": ""
+    }
+  },
+  {
+    "name": "artifact draft streaming snapshot",
+    "schema": "ArtifactDraft",
+    "valid": true,
+    "value": {
+      "requestId": "req_1",
+      "messageId": "msg_1",
+      "draftId": "dft_1",
+      "sequence": 3,
+      "state": "streaming",
+      "items": [
+        {
+          "itemIndex": 0,
+          "title": "城市夜景延时开场",
+          "kind": "prompt",
+          "text": "以夜间城市天际线的延时镜头开场……"
+        }
+      ]
+    }
+  },
+  {
+    "name": "artifact draft cleared stays empty",
+    "schema": "ArtifactDraft",
+    "valid": false,
+    "value": {
+      "requestId": "req_1",
+      "messageId": "msg_1",
+      "draftId": "dft_1",
+      "sequence": 4,
+      "state": "cleared",
+      "items": [
+        {
+          "itemIndex": 0,
+          "title": null,
+          "kind": null,
+          "text": "x"
+        }
+      ]
+    }
+  },
+  {
+    "name": "artifact draft is not a business event",
+    "schema": "ArtifactDraft",
+    "valid": false,
+    "value": {
+      "requestId": "req_1",
+      "messageId": "msg_1",
+      "draftId": "dft_1",
+      "sequence": 4,
+      "state": "cleared",
+      "items": [],
+      "cursor": "ZXZlbnQtY3Vyc29y"
+    }
+  },
+  {
+    "name": "context status compaction start",
+    "schema": "ContextStatus",
+    "valid": true,
+    "value": {
+      "requestId": "req_1",
+      "sequence": 0,
+      "phase": "compacting",
+      "reason": "threshold",
+      "willRetry": null
+    }
+  },
+  {
+    "name": "context status compaction end",
+    "schema": "ContextStatus",
+    "valid": true,
+    "value": {
+      "requestId": "req_1",
+      "sequence": 1,
+      "phase": "compacted",
+      "reason": "overflow",
+      "willRetry": false
+    }
+  },
+  {
+    "name": "context status only automatic reasons",
+    "schema": "ContextStatus",
+    "valid": false,
+    "value": {
+      "requestId": "req_1",
+      "sequence": 0,
+      "phase": "compacting",
+      "reason": "manual",
+      "willRetry": null
+    }
+  },
+  {
+    "name": "proposal index rejects run items",
+    "schema": "ProductionIndexPage",
+    "valid": false,
+    "value": {
+      "kind": "proposals",
+      "items": [
+        {
+          "id": "run_1",
+          "title": "旅行开场配音",
+          "state": "unknown",
+          "revision": 1,
+          "proposalId": "prop_1",
+          "createdAt": "2026-10-26T08:00:00Z",
+          "updatedAt": "2026-10-26T08:05:00Z"
+        }
+      ],
+      "nextCursor": "cnVucy0xMA",
+      "watermark": "ZXZlbnQtd2F0ZXJtYXJr"
+    }
+  },
+  {
+    "name": "context start rejects retry boolean",
+    "schema": "ContextStatus",
+    "valid": false,
+    "value": {
+      "requestId": "req_1",
+      "sequence": 0,
+      "phase": "compacting",
+      "reason": "threshold",
+      "willRetry": false
+    }
+  },
+  {
+    "name": "context end requires retry boolean",
+    "schema": "ContextStatus",
+    "valid": false,
+    "value": {
+      "requestId": "req_1",
+      "sequence": 0,
+      "phase": "failed",
+      "reason": "threshold",
+      "willRetry": null
+    }
+  },
+  {
+    "name": "draft cleared valid",
+    "schema": "ArtifactDraft",
+    "valid": true,
+    "value": {
+      "requestId": "req_1",
+      "messageId": "msg_1",
+      "draftId": "dft_1",
+      "sequence": 8,
+      "state": "cleared",
+      "items": []
+    }
+  },
+  {
+    "name": "message creation sequence required",
+    "schema": "Message",
+    "valid": false,
+    "value": {
+      "id": "message_1",
+      "requestId": "request_1",
+      "role": "user",
+      "text": "先给三条 Prompt，别生成视频。",
+      "state": "completed",
+      "revision": 1,
+      "target": null,
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": null
+    }
+  },
+  {
+    "name": "message creation sequence positive",
+    "schema": "Message",
+    "valid": false,
+    "value": {
+      "id": "message_1",
+      "requestId": "request_1",
+      "role": "user",
+      "text": "先给三条 Prompt，别生成视频。",
+      "state": "completed",
+      "revision": 1,
+      "target": null,
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": null,
+      "createdSequence": 0
+    }
+  },
+  {
+    "name": "user profile",
+    "schema": "UserProfile",
+    "valid": true,
+    "value": {
+      "revision": 1,
+      "displayName": "山间创作者",
+      "bio": "拍山、走路、写脚本。"
+    }
+  },
+  {
+    "name": "save user profile empty bio",
+    "schema": "SaveUserProfile",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_p1",
+      "expectedRevision": 1,
+      "displayName": "山间创作者",
+      "bio": ""
+    }
+  },
+  {
+    "name": "save user profile long bio",
+    "schema": "SaveUserProfile",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_p2",
+      "expectedRevision": 1,
+      "displayName": "山间创作者",
+      "bio": "长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长"
+    }
+  },
+  {
+    "name": "save user profile receipt",
+    "schema": "SaveUserProfileReceipt",
+    "valid": true,
+    "value": {
+      "profile": {
+        "revision": 2,
+        "displayName": "山间创作者",
+        "bio": ""
+      },
+      "replayed": false
+    }
+  },
+  {
+    "name": "free service settings pexels default",
+    "schema": "FreeServiceSettings",
+    "valid": true,
+    "value": {
+      "serviceId": "pexels",
+      "revision": 0,
+      "enabled": false,
+      "credentialConfigured": false,
+      "endpoint": "https://api.pexels.com/v1",
+      "writeUnavailableReason": null
+    }
+  },
+  {
+    "name": "free service settings newsnow enabled",
+    "schema": "FreeServiceSettings",
+    "valid": true,
+    "value": {
+      "serviceId": "newsnow",
+      "revision": 3,
+      "enabled": true,
+      "endpoint": "https://news.example-selfhost.dev",
+      "sourceIds": [
+        "github",
+        "hackernews",
+        "weibo"
+      ],
+      "topics": [
+        "AI",
+        "独立开发"
+      ]
+    }
+  },
+  {
+    "name": "free service settings unknown service",
+    "schema": "FreeServiceSettings",
+    "valid": false,
+    "value": {
+      "serviceId": "unsplash",
+      "revision": 1,
+      "enabled": true,
+      "credentialConfigured": true,
+      "endpoint": "https://api.pexels.com/v1",
+      "writeUnavailableReason": null
+    }
+  },
+  {
+    "name": "save pexels settings first enable",
+    "schema": "SaveFreeServiceSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_fs1",
+      "expectedRevision": 0,
+      "enabled": true,
+      "apiKey": "pexels-key-value"
+    }
+  },
+  {
+    "name": "save newsnow settings",
+    "schema": "SaveFreeServiceSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_fs2",
+      "expectedRevision": 2,
+      "enabled": true,
+      "endpoint": "https://news.example-selfhost.dev",
+      "sourceIds": [
+        "github",
+        "weibo"
+      ],
+      "topics": []
+    }
+  },
+  {
+    "name": "save free service settings mixed fields",
+    "schema": "SaveFreeServiceSettings",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_fs3",
+      "expectedRevision": 1,
+      "enabled": true,
+      "apiKey": "k",
+      "endpoint": "https://news.example-selfhost.dev",
+      "sourceIds": [
+        "github"
+      ],
+      "topics": []
+    }
+  },
+  {
+    "name": "save free service settings six sources",
+    "schema": "SaveFreeServiceSettings",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_fs4",
+      "expectedRevision": 1,
+      "enabled": true,
+      "endpoint": "https://news.example-selfhost.dev",
+      "sourceIds": [
+        "a1",
+        "b2",
+        "c3",
+        "d4",
+        "e5",
+        "f6"
+      ],
+      "topics": []
+    }
+  },
+  {
+    "name": "save pexels settings receipt",
+    "schema": "SaveFreeServiceSettingsReceipt",
+    "valid": true,
+    "value": {
+      "settings": {
+        "serviceId": "pexels",
+        "revision": 1,
+        "enabled": true,
+        "credentialConfigured": true,
+        "endpoint": "https://api.pexels.com/v1",
+        "writeUnavailableReason": null
+      },
+      "replayed": false
+    }
+  },
+  {
+    "name": "save newsnow settings replayed receipt",
+    "schema": "SaveFreeServiceSettingsReceipt",
+    "valid": true,
+    "value": {
+      "settings": {
+        "serviceId": "newsnow",
+        "revision": 4,
+        "enabled": false,
+        "endpoint": null,
+        "sourceIds": [],
+        "topics": []
+      },
+      "replayed": true
+    }
+  },
+  {
+    "name": "save free service settings receipt without replayed",
+    "schema": "SaveFreeServiceSettingsReceipt",
+    "valid": false,
+    "value": {
+      "settings": {
+        "serviceId": "pexels",
+        "revision": 1,
+        "enabled": true,
+        "credentialConfigured": true,
+        "endpoint": "https://api.pexels.com/v1",
+        "writeUnavailableReason": null
+      }
+    }
+  },
+  {
+    "name": "tool search materials",
+    "schema": "ToolSearchMaterials",
+    "valid": true,
+    "value": {
+      "query": "雨后山路",
+      "kind": "image",
+      "limit": 5
+    }
+  },
+  {
+    "name": "tool search materials zero limit",
+    "schema": "ToolSearchMaterials",
+    "valid": false,
+    "value": {
+      "query": "雨后山路",
+      "kind": "video",
+      "limit": 0
+    }
+  },
+  {
+    "name": "tool read trends configured set",
+    "schema": "ToolReadTrends",
+    "valid": true,
+    "value": {
+      "sourceIds": [
+        "github",
+        "weibo"
+      ],
+      "limit": 10
+    }
+  },
+  {
+    "name": "tool read trends without sources",
+    "schema": "ToolReadTrends",
+    "valid": true,
+    "value": {
+      "limit": 8
+    }
+  },
+  {
+    "name": "tool read trends empty sources",
+    "schema": "ToolReadTrends",
+    "valid": false,
+    "value": {
+      "sourceIds": [],
+      "limit": 8
+    }
+  },
+  {
+    "name": "tool import material",
+    "schema": "ToolImportMaterial",
+    "valid": true,
+    "value": {
+      "candidateId": "cand_7f3k"
+    }
+  },
+  {
+    "name": "tool import material bad id",
+    "schema": "ToolImportMaterial",
+    "valid": false,
+    "value": {
+      "candidateId": "not a id!"
+    }
+  },
+  {
+    "name": "material candidate",
+    "schema": "MaterialCandidate",
+    "valid": true,
+    "value": {
+      "candidateId": "cand_7f3k",
+      "provider": "pexels",
+      "providerAssetId": "2018293",
+      "kind": "video",
+      "title": "Rainy mountain road",
+      "sourceUrl": "https://www.pexels.com/video/rainy-mountain-road-2018293/",
+      "creatorName": "Alex Green",
+      "creatorUrl": "https://www.pexels.com/@alex-green/",
+      "previewUrl": "https://images.pexels.com/videos/2018293/pictures/preview-0.jpg",
+      "width": 1280,
+      "height": 720,
+      "durationMs": 9600,
+      "licenseUrl": "https://www.pexels.com/license/"
+    }
+  },
+  {
+    "name": "material candidate zero width",
+    "schema": "MaterialCandidate",
+    "valid": false,
+    "value": {
+      "candidateId": "cand_bad",
+      "provider": "pexels",
+      "providerAssetId": "1",
+      "kind": "image",
+      "title": "Broken",
+      "sourceUrl": "https://www.pexels.com/photo/1/",
+      "creatorName": "A",
+      "creatorUrl": "https://www.pexels.com/@a/",
+      "previewUrl": "https://images.pexels.com/photos/1/p.jpg",
+      "width": 0,
+      "height": 400,
+      "durationMs": null,
+      "licenseUrl": "https://www.pexels.com/license/"
+    }
+  },
+  {
+    "name": "material search result",
+    "schema": "MaterialSearchResult",
+    "valid": true,
+    "value": {
+      "results": [
+        {
+          "candidateId": "cand_7f3k",
+          "provider": "pexels",
+          "providerAssetId": "2018293",
+          "kind": "image",
+          "title": "Rainy mountain road",
+          "sourceUrl": "https://www.pexels.com/photo/rainy-mountain-road-2018293/",
+          "creatorName": "Alex Green",
+          "creatorUrl": "https://www.pexels.com/@alex-green/",
+          "previewUrl": "https://images.pexels.com/photos/2018293/pexels-photo-2018293.jpeg",
+          "width": 4000,
+          "height": 2667,
+          "durationMs": null,
+          "licenseUrl": "https://www.pexels.com/license/"
+        }
+      ],
+      "retrievedAt": "2026-10-27T09:30:00Z",
+      "batchId": "batch_1"
+    }
+  },
+  {
+    "name": "material import result",
+    "schema": "MaterialImportResult",
+    "valid": true,
+    "value": {
+      "blobId": "blob_5k2m",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mimeType": "image/jpeg",
+      "durationMs": null,
+      "provenance": {
+        "provider": "pexels",
+        "assetId": "2018293",
+        "sourceUrl": "https://www.pexels.com/photo/rainy-mountain-road-2018293/",
+        "creatorName": "Alex Green",
+        "creatorUrl": "https://www.pexels.com/@alex-green/",
+        "licenseUrl": "https://www.pexels.com/license/",
+        "acquiredAt": "2026-10-27T09:31:20Z"
+      }
+    }
+  },
+  {
+    "name": "media provenance",
+    "schema": "MediaProvenance",
+    "valid": true,
+    "value": {
+      "provider": "pexels",
+      "assetId": "2018293",
+      "sourceUrl": "https://www.pexels.com/video/2018293/",
+      "creatorName": "Alex Green",
+      "creatorUrl": "https://www.pexels.com/@alex-green/",
+      "licenseUrl": "https://www.pexels.com/license/",
+      "acquiredAt": "2026-10-27T09:31:20Z"
+    }
+  },
+  {
+    "name": "media reference content",
+    "schema": "MediaReferenceContent",
+    "valid": true,
+    "value": {
+      "format": "media_reference",
+      "blobId": "blob_5k2m"
+    }
+  },
+  {
+    "name": "media reference content extra field",
+    "schema": "MediaReferenceContent",
+    "valid": false,
+    "value": {
+      "format": "media_reference",
+      "blobId": "blob_5k2m",
+      "mimeType": "image/jpeg"
+    }
+  },
+  {
+    "name": "media content with sources",
+    "schema": "MediaContent",
+    "valid": true,
+    "value": {
+      "format": "media",
+      "blobId": "blob_5k2m",
+      "mimeType": "image/jpeg",
+      "durationMs": null,
+      "sources": [
+        {
+          "provider": "pexels",
+          "assetId": "2018293",
+          "sourceUrl": "https://www.pexels.com/photo/2018293/",
+          "creatorName": "Alex Green",
+          "creatorUrl": "https://www.pexels.com/@alex-green/",
+          "licenseUrl": "https://www.pexels.com/license/",
+          "acquiredAt": "2026-10-27T09:31:20Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "delivery item media create",
+    "schema": "DeliveryItem",
+    "valid": true,
+    "value": {
+      "mode": "create",
+      "title": "雨后山路",
+      "kind": "image",
+      "content": {
+        "format": "media_reference",
+        "blobId": "blob_5k2m"
+      }
+    }
+  },
+  {
+    "name": "delivery item media kind with markdown",
+    "schema": "DeliveryItem",
+    "valid": false,
+    "value": {
+      "mode": "create",
+      "title": "雨后山路",
+      "kind": "image",
+      "content": {
+        "format": "markdown",
+        "text": "假装是图片"
+      }
+    }
+  },
+  {
+    "name": "trend snapshot unavailable",
+    "schema": "TrendSnapshot",
+    "valid": true,
+    "value": {
+      "sourceId": "github",
+      "status": "unavailable",
+      "sourceUpdatedAt": null,
+      "items": [],
+      "error": "上游暂时不可用"
+    }
+  },
+  {
+    "name": "trend item",
+    "schema": "TrendItem",
+    "valid": true,
+    "value": {
+      "id": "github-1",
+      "title": "某开源项目发布 1.0",
+      "url": "https://github.com/example/repo",
+      "publishedAt": "2026-10-27T08:00:00Z",
+      "rank": 1
+    }
+  },
+  {
+    "name": "trend read result partial failure",
+    "schema": "TrendReadResult",
+    "valid": true,
+    "value": {
+      "sources": [
+        {
+          "sourceId": "github",
+          "status": "cache",
+          "sourceUpdatedAt": "2026-10-27T08:05:00Z",
+          "items": [
+            {
+              "id": "github-1",
+              "title": "某开源项目发布 1.0",
+              "url": "https://github.com/example/repo",
+              "publishedAt": null,
+              "rank": 1
+            }
+          ],
+          "error": null
+        },
+        {
+          "sourceId": "weibo",
+          "status": "unavailable",
+          "sourceUpdatedAt": null,
+          "items": [],
+          "error": "读取超时"
+        }
+      ],
+      "retrievedAt": "2026-10-27T09:40:00Z",
+      "topics": [
+        "AI"
+      ]
+    }
+  },
+  {
+    "name": "render parameters narrated concat",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "narrated_concat",
+      "videoInputSlots": [
+        1,
+        0
+      ],
+      "narrationInputSlot": 2,
+      "durationPolicy": "preserve_all"
+    }
+  },
+  {
+    "name": "render parameters ordered concat unchanged",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "ordered_concat"
+    }
+  },
+  {
+    "name": "render parameters ordered concat preserve original audio",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "ordered_concat",
+      "audioMode": "preserve"
+    }
+  },
+  {
+    "name": "render parameters narrated duplicate video slots",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "narrated_concat",
+      "videoInputSlots": [
+        0,
+        0
+      ],
+      "narrationInputSlot": 1,
+      "durationPolicy": "preserve_all"
+    }
+  },
+  {
+    "name": "render parameters narrated empty video slots",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "narrated_concat",
+      "videoInputSlots": [],
+      "narrationInputSlot": 0,
+      "durationPolicy": "preserve_all"
+    }
+  },
+  {
+    "name": "imported configuration display",
+    "schema": "ImportedSettings",
+    "valid": true,
+    "value": [
+      {
+        "id": "pixabay",
+        "kind": "material",
+        "name": "Pixabay",
+        "endpoint": "https://pixabay.com/api/",
+        "modelId": null,
+        "apiKey": "synthetic-local-key",
+        "details": []
+      }
+    ]
+  },
+  {
+    "name": "reject untyped imported entry",
+    "schema": "ImportedSettings",
+    "valid": false,
+    "value": [
+      {
+        "id": "pixabay"
+      }
+    ]
+  },
+  {
+    "name": "ConnectionModel",
+    "schema": "ConnectionModel",
+    "valid": true,
+    "value": {
+      "id": "model-1",
+      "kind": "text",
+      "name": "我的模型",
+      "modelId": "my-text-model",
+      "features": [
+        "工具调用"
+      ],
+      "contextWindowTokens": 32000,
+      "maxOutputTokens": 1000,
+      "enabled": true,
+      "isDefault": true,
+      "thinkingLevel": "high"
+    }
+  },
+  {
+    "name": "connection model thinking level unknown",
+    "schema": "ConnectionModel",
+    "valid": false,
+    "value": {
+      "id": "model-1",
+      "kind": "text",
+      "name": "我的模型",
+      "modelId": "my-text-model",
+      "features": [],
+      "contextWindowTokens": 32000,
+      "maxOutputTokens": 1000,
+      "enabled": true,
+      "isDefault": true,
+      "thinkingLevel": "adaptive"
+    }
+  },
+  {
+    "name": "ProviderConnection",
+    "schema": "ProviderConnection",
+    "valid": true,
+    "value": {
+      "id": "connection-1",
+      "name": "供应商",
+      "protocol": "openai-chat-completions",
+      "baseUrl": "https://example.com/v1",
+      "apiKey": "example-only-key",
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-1",
+          "kind": "text",
+          "name": "我的模型",
+          "modelId": "my-text-model",
+          "features": [
+            "工具调用"
+          ],
+          "contextWindowTokens": 32000,
+          "maxOutputTokens": 1000,
+          "enabled": true,
+          "isDefault": true,
+          "thinkingLevel": "default"
+        }
+      ]
+    }
+  },
+  {
+    "name": "openai connection shared by text image speech",
+    "schema": "ProviderConnection",
+    "valid": true,
+    "value": {
+      "id": "provider-openai",
+      "name": "OpenAI",
+      "protocol": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "example-only-key",
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-sol",
+          "kind": "text",
+          "name": "GPT-6.1 Sol",
+          "modelId": "gpt-6.1-sol",
+          "features": [],
+          "contextWindowTokens": 272000,
+          "maxOutputTokens": 16384,
+          "enabled": true,
+          "isDefault": true,
+          "thinkingLevel": "default"
+        },
+        {
+          "id": "model-flare",
+          "kind": "image",
+          "name": "Flare 横图",
+          "modelId": "gpt-image-2.5-flare",
+          "features": [],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": true
+        },
+        {
+          "id": "model-realtime-mini",
+          "kind": "speech",
+          "name": "Realtime 旁白",
+          "modelId": "gpt-realtime-2.1-mini",
+          "features": [],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "minimax connection carrying speech and video",
+    "schema": "ProviderConnection",
+    "valid": true,
+    "value": {
+      "id": "provider-minimax",
+      "name": "MiniMax",
+      "protocol": "minimax",
+      "baseUrl": "https://api.minimax.io",
+      "apiKey": "example-only-key",
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-mm-speech",
+          "kind": "speech",
+          "name": "MiniMax 配音 Turbo",
+          "modelId": "speech-2.8-turbo",
+          "features": [
+            "中文系统声线"
+          ],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": true
+        },
+        {
+          "id": "model-h3",
+          "kind": "video",
+          "name": "MiniMax H3",
+          "modelId": "MiniMax-H3",
+          "features": [
+            "原生音画"
+          ],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "wan video connection uses media endpoint protocol",
+    "schema": "ProviderConnection",
+    "valid": true,
+    "value": {
+      "id": "provider-wan",
+      "name": "阿里万相",
+      "protocol": "wan",
+      "baseUrl": "https://dashscope-async.aliyuncs.com",
+      "apiKey": "example-only-key",
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-wan3",
+          "kind": "video",
+          "name": "万相 3.0",
+          "modelId": "wan3.0-video",
+          "features": [
+            "原生音画"
+          ],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "ProviderConnectionSettings",
+    "schema": "ProviderConnectionSettings",
+    "valid": true,
+    "value": {
+      "revision": 0,
+      "connections": [
+        {
+          "id": "connection-1",
+          "name": "供应商",
+          "protocol": "openai-chat-completions",
+          "baseUrl": "https://example.com/v1",
+          "apiKey": "example-only-key",
+          "enabled": true,
+          "models": [
+            {
+              "id": "model-1",
+              "kind": "text",
+              "name": "我的模型",
+              "modelId": "my-text-model",
+              "features": [
+                "工具调用"
+              ],
+              "contextWindowTokens": 32000,
+              "maxOutputTokens": 1000,
+              "enabled": true,
+              "isDefault": true,
+              "thinkingLevel": "high"
+            }
+          ]
+        }
+      ],
+      "modelStatuses": [
+        {
+          "modelEntryId": "model-1",
+          "unavailableReason": null,
+          "thinking": {
+            "levels": [
+              "off",
+              "low",
+              "high",
+              "max"
+            ],
+            "defaultLevel": "high"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "provider settings model status without thinking",
+    "schema": "ProviderConnectionSettings",
+    "valid": false,
+    "value": {
+      "revision": 0,
+      "connections": [],
+      "modelStatuses": [
+        {
+          "modelEntryId": "model-1",
+          "unavailableReason": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "SaveProviderConnection",
+    "schema": "SaveProviderConnection",
+    "valid": true,
+    "value": {
+      "commandId": "cmd-connection-1",
+      "expectedRevision": 0,
+      "connection": {
+        "id": "connection-1",
+        "name": "供应商",
+        "protocol": "openai-chat-completions",
+        "baseUrl": "https://example.com/v1",
+        "apiKey": "example-only-key",
+        "enabled": true,
+        "models": [
+          {
+            "id": "model-1",
+            "kind": "text",
+            "name": "我的模型",
+            "modelId": "my-text-model",
+            "features": [
+              "工具调用"
+            ],
+            "contextWindowTokens": 32000,
+            "maxOutputTokens": 1000,
+            "enabled": true,
+            "isDefault": true,
+            "thinkingLevel": "default"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "SaveProviderConnectionReceipt",
+    "schema": "SaveProviderConnectionReceipt",
+    "valid": true,
+    "value": {
+      "revision": 1,
+      "replayed": false
+    }
+  },
+  {
+    "name": "AvailableProviderModels",
+    "schema": "AvailableProviderModels",
+    "valid": true,
+    "value": {
+      "models": [
+        {
+          "id": "my-text-model",
+          "name": "我的文本型号",
+          "kinds": [
+            "text"
+          ],
+          "status": "listed",
+          "contextWindowTokens": 32000,
+          "maxOutputTokens": 1000
+        }
+      ],
+      "hasMore": false,
+      "syncedAt": "2026-10-28T00:00:00Z"
+    }
+  },
+  {
+    "name": "unknown connection protocol",
+    "schema": "ProviderConnection",
+    "valid": false,
+    "value": {
+      "id": "connection-1",
+      "name": "供应商",
+      "protocol": "guess",
+      "baseUrl": "https://example.com/v1",
+      "apiKey": "example-only-key",
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-1",
+          "kind": "text",
+          "name": "我的模型",
+          "modelId": "my-text-model",
+          "features": [
+            "工具调用"
+          ],
+          "contextWindowTokens": 32000,
+          "maxOutputTokens": 1000,
+          "enabled": true,
+          "isDefault": true
+        }
+      ]
+    }
+  },
+  {
+    "name": "provider directory model",
+    "schema": "ProviderDirectoryModel",
+    "valid": true,
+    "value": {
+      "id": "my-text-model",
+      "name": "我的文本型号",
+      "kinds": [
+        "text"
+      ],
+      "status": "listed",
+      "contextWindowTokens": 32000,
+      "maxOutputTokens": 1000
+    }
+  },
+  {
+    "name": "unknown use is not a guessed text model",
+    "schema": "ProviderDirectoryModel",
+    "valid": true,
+    "value": {
+      "id": "unclassified",
+      "name": "我的文本型号",
+      "kinds": [],
+      "status": "listed",
+      "contextWindowTokens": null,
+      "maxOutputTokens": null
+    }
+  },
+  {
+    "name": "prepare from ordinary chat text without artifact",
+    "schema": "PrepareProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_prepare",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "text",
+                "text": "雨后山谷，镜头缓慢推进。"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      }
+    }
+  },
+  {
+    "name": "empty production text rejected",
+    "schema": "InputRef",
+    "valid": false,
+    "value": {
+      "kind": "text",
+      "text": ""
+    }
+  },
+  {
+    "name": "SkillSummary preserves Bootstrap wire shape",
+    "schema": "SkillSummary",
+    "valid": true,
+    "value": {
+      "id": "travel",
+      "name": "旅行脚本",
+      "description": "按本次明确要求撰写旅行脚本。"
+    }
+  },
+  {
+    "name": "SkillPackage builtin is read only",
+    "schema": "SkillPackage",
+    "valid": true,
+    "value": {
+      "id": "builtin_skills",
+      "source": "builtin",
+      "name": "内置 Skill",
+      "origin": "builtin",
+      "skillIds": [
+        "travel"
+      ],
+      "status": "ready",
+      "diagnostics": []
+    }
+  },
+  {
+    "name": "SkillPackagesView current discovered catalog",
+    "schema": "SkillPackagesView",
+    "valid": true,
+    "value": {
+      "packages": [
+        {
+          "id": "builtin_skills",
+          "source": "builtin",
+          "name": "内置 Skill",
+          "origin": "builtin",
+          "skillIds": [
+            "travel"
+          ],
+          "status": "ready",
+          "diagnostics": []
+        },
+        {
+          "id": "package_local",
+          "source": "/srv/fixtures/creative-skills",
+          "name": "creative-skills",
+          "origin": "installed",
+          "skillIds": [
+            "outline",
+            "revise"
+          ],
+          "status": "ready",
+          "diagnostics": []
+        },
+        {
+          "id": "package_empty",
+          "source": "npm:empty-skill-package@1.0.0",
+          "name": "empty-skill-package",
+          "origin": "installed",
+          "skillIds": [],
+          "status": "no_skills",
+          "diagnostics": [
+            "包中未发现 Skill。"
+          ]
+        },
+        {
+          "id": "package_invalid",
+          "source": "/srv/fixtures/missing-skill-package",
+          "name": "missing-skill-package",
+          "origin": "installed",
+          "skillIds": [],
+          "status": "invalid",
+          "diagnostics": [
+            "已配置来源不可用；刷新不会自动重新安装。"
+          ]
+        }
+      ],
+      "skills": [
+        {
+          "id": "travel",
+          "name": "旅行脚本",
+          "description": "按本次明确要求撰写旅行脚本。"
+        },
+        {
+          "id": "outline",
+          "name": "提纲",
+          "description": "整理文章提纲。"
+        },
+        {
+          "id": "revise",
+          "name": "修订",
+          "description": "按明确意见修订文字。"
+        }
+      ],
+      "mutation": null
+    }
+  },
+  {
+    "name": "SkillPackagesView empty catalog",
+    "schema": "SkillPackagesView",
+    "valid": true,
+    "value": {
+      "packages": [],
+      "skills": [],
+      "mutation": null
+    }
+  },
+  {
+    "name": "SkillPackageMutation install in progress",
+    "schema": "SkillPackageMutation",
+    "valid": true,
+    "value": {
+      "action": "install",
+      "source": "npm:example-skills@1.0.0"
+    }
+  },
+  {
+    "name": "SkillPackagesView installing source",
+    "schema": "SkillPackagesView",
+    "valid": true,
+    "value": {
+      "packages": [],
+      "skills": [],
+      "mutation": {
+        "action": "install",
+        "source": "npm:example-skills@1.0.0"
+      }
+    }
+  },
+  {
+    "name": "SkillPackagesView removing source",
+    "schema": "SkillPackagesView",
+    "valid": true,
+    "value": {
+      "packages": [],
+      "skills": [],
+      "mutation": {
+        "action": "remove",
+        "source": "/srv/fixtures/creative-skills"
+      }
+    }
+  },
+  {
+    "name": "InstallSkillPackage npm source without command receipt identity",
+    "schema": "InstallSkillPackage",
+    "valid": true,
+    "value": {
+      "source": "npm:example-skills@1.0.0"
+    }
+  },
+  {
+    "name": "InstallSkillPackage Git source",
+    "schema": "InstallSkillPackage",
+    "valid": true,
+    "value": {
+      "source": "https://example.invalid/team/skill-package.git"
+    }
+  },
+  {
+    "name": "InstallSkillPackage server local directory",
+    "schema": "InstallSkillPackage",
+    "valid": true,
+    "value": {
+      "source": "/srv/fixtures/creative-skills"
+    }
+  },
+  {
+    "name": "RemoveSkillPackage uses catalog packageId",
+    "schema": "RemoveSkillPackage",
+    "valid": true,
+    "value": {
+      "packageId": "package_local"
+    }
+  },
+  {
+    "name": "Skill package mutation busy waits before retry",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "RUN_BUSY",
+      "message": "当前对话还在处理，完成后再操作。",
+      "requestId": "request_http",
+      "retryAction": "wait",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "Skill package mutation failure reads current state first",
+    "schema": "Error",
+    "valid": true,
+    "value": {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "message": "Skill 包操作未完成，请先刷新目录核对当前状态。",
+      "requestId": "request_http",
+      "retryAction": "reload",
+      "currentRevisionId": null
+    }
+  },
+  {
+    "name": "InstallSkillPackage rejects empty source",
+    "schema": "InstallSkillPackage",
+    "valid": false,
+    "value": {
+      "source": ""
+    }
+  },
+  {
+    "name": "InstallSkillPackage does not coerce source",
+    "schema": "InstallSkillPackage",
+    "valid": false,
+    "value": {
+      "source": 123
+    }
+  },
+  {
+    "name": "InstallSkillPackage rejects invented commandId",
+    "schema": "InstallSkillPackage",
+    "valid": false,
+    "value": {
+      "source": "/srv/fixtures/creative-skills",
+      "commandId": "cmd_install"
+    }
+  },
+  {
+    "name": "RemoveSkillPackage rejects direct source",
+    "schema": "RemoveSkillPackage",
+    "valid": false,
+    "value": {
+      "source": "/srv/fixtures/creative-skills"
+    }
+  },
+  {
+    "name": "RemoveSkillPackage rejects file path as packageId",
+    "schema": "RemoveSkillPackage",
+    "valid": false,
+    "value": {
+      "packageId": "/srv/fixtures/creative-skills"
+    }
+  },
+  {
+    "name": "RemoveSkillPackage does not coerce packageId",
+    "schema": "RemoveSkillPackage",
+    "valid": false,
+    "value": {
+      "packageId": 123
+    }
+  },
+  {
+    "name": "SkillPackagesView requires explicit nullable mutation",
+    "schema": "SkillPackagesView",
+    "valid": false,
+    "value": {
+      "packages": [],
+      "skills": []
+    }
+  },
+  {
+    "name": "SkillPackagesView is not a command receipt",
+    "schema": "SkillPackagesView",
+    "valid": false,
+    "value": {
+      "packages": [],
+      "skills": [],
+      "mutation": null,
+      "replayed": true
+    }
+  },
+  {
+    "name": "SkillPackageMutation rejects automatic update action",
+    "schema": "SkillPackageMutation",
+    "valid": false,
+    "value": {
+      "action": "update",
+      "source": "npm:example-skills@1.0.0"
+    }
+  },
+  {
+    "name": "SkillPackage rejects guessed available status",
+    "schema": "SkillPackage",
+    "valid": false,
+    "value": {
+      "id": "package_local",
+      "source": "/srv/fixtures/creative-skills",
+      "name": "creative-skills",
+      "origin": "installed",
+      "skillIds": [],
+      "status": "available",
+      "diagnostics": []
+    }
+  },
+  {
+    "name": "SkillSummary rejects absolute read path field",
+    "schema": "SkillSummary",
+    "valid": false,
+    "value": {
+      "id": "travel",
+      "name": "旅行脚本",
+      "description": "按本次明确要求撰写旅行脚本。",
+      "path": "/srv/fixtures/creative-skills/travel/SKILL.md"
+    }
+  },
+  {
+    "name": "work with confirmed content and ready plan draft",
+    "schema": "Work",
+    "valid": true,
+    "value": {
+      "id": "work_1",
+      "title": "去山里，慢下来",
+      "stage": "plan",
+      "revision": 4,
+      "stages": {
+        "content": {
+          "stage": "content",
+          "draft": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_2",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approved": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_2",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approvedAt": "2026-10-30T08:10:00Z",
+          "confirmationId": "confirm_1",
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": "approve_content_continue"
+        },
+        "plan": {
+          "stage": "plan",
+          "draft": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_2",
+            "revisionId": "revision_3",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": "proposal_1",
+          "runId": null,
+          "confirmationAction": null
+        },
+        "video": {
+          "stage": "video",
+          "draft": null,
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": null
+        }
+      },
+      "createdAt": "2026-10-30T08:00:00Z",
+      "updatedAt": "2026-10-30T08:20:00Z"
+    }
+  },
+  {
+    "name": "work adopting exact chat text",
+    "schema": "Work",
+    "valid": true,
+    "value": {
+      "id": "work_2",
+      "title": "直接采用原文",
+      "stage": "content",
+      "revision": 1,
+      "stages": {
+        "content": {
+          "stage": "content",
+          "draft": {
+            "kind": "message_text",
+            "messageId": "message_9",
+            "text": "第一句原文。第二句原文。",
+            "author": "user"
+          },
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": "approve_content"
+        },
+        "plan": {
+          "stage": "plan",
+          "draft": null,
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": null
+        },
+        "video": {
+          "stage": "video",
+          "draft": null,
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": null
+        }
+      },
+      "createdAt": "2026-10-30T08:00:00Z",
+      "updatedAt": "2026-10-30T08:00:00Z"
+    }
+  },
+  {
+    "name": "material search batch with original order",
+    "schema": "MaterialBatch",
+    "valid": true,
+    "value": {
+      "batchId": "batch_1",
+      "revision": 1,
+      "requestId": "request_1",
+      "toolCallId": "call_1",
+      "query": {
+        "provider": "pexels",
+        "kind": "image",
+        "query": "雨后的山路",
+        "limit": 3
+      },
+      "retrievedAt": "2026-10-30T08:00:00Z",
+      "results": [
+        {
+          "candidateId": "cand_1",
+          "provider": "pexels",
+          "providerAssetId": "2018293",
+          "kind": "image",
+          "title": "Rainy mountain road",
+          "sourceUrl": "https://www.pexels.com/photo/rainy-mountain-road-2018293/",
+          "creatorName": "Alex Green",
+          "creatorUrl": "https://www.pexels.com/@alex-green/",
+          "previewUrl": "https://images.pexels.com/photos/2018293/pexels-photo-2018293.jpeg",
+          "width": 4000,
+          "height": 2667,
+          "durationMs": null,
+          "licenseUrl": "https://www.pexels.com/license/"
+        }
+      ],
+      "messageId": "message_2"
+    }
+  },
+  {
+    "name": "empty material search batch",
+    "schema": "MaterialBatch",
+    "valid": true,
+    "value": {
+      "batchId": "batch_2",
+      "revision": 1,
+      "requestId": "request_1",
+      "toolCallId": "call_2",
+      "query": {
+        "provider": "pexels",
+        "kind": "video",
+        "query": "不存在的素材",
+        "limit": 3
+      },
+      "retrievedAt": "2026-10-30T08:01:00Z",
+      "results": [],
+      "messageId": "message_2"
+    }
+  },
+  {
+    "name": "message approving content and continuing",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_1",
+      "text": "这版可以，继续画面。",
+      "target": null,
+      "skillId": "skill_1",
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_content_continue",
+        "subject": {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    }
+  },
+  {
+    "name": "stage confirmation cannot carry a target",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_1",
+      "text": "这版可以，继续画面。",
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": "work_1"
+      },
+      "skillId": "skill_1",
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_content_continue",
+        "subject": {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    }
+  },
+  {
+    "name": "plan approval queues one prepare request",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_plan_next",
+      "text": "方案认可，请准备制作费用。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_plan",
+        "subject": {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_plan_1",
+          "revisionId": "revision_plan_1",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "next": "prepare_production"
+      }
+    }
+  },
+  {
+    "name": "prepare next only pairs with plan approval",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_plan_next_bad",
+      "text": "内容认可并直接准备制作。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_content_continue",
+        "subject": {
+          "kind": "artifact_revision",
+          "artifactId": "artifact_plan_1",
+          "revisionId": "revision_plan_1",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "next": "prepare_production"
+      }
+    }
+  },
+  {
+    "name": "plan approval requires an artifact subject",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_1",
+      "text": "这版方案认可，先别制作。",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_plan",
+        "subject": {
+          "kind": "message_text",
+          "messageId": "message_9",
+          "text": "第一句原文。"
+        }
+      }
+    }
+  },
+  {
+    "name": "content approval only allows skill when continuing",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_1",
+      "text": "这版认可，先暂停。",
+      "target": null,
+      "skillId": "skill_1",
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "stageConfirmation": {
+        "workId": "work_1",
+        "action": "approve_content",
+        "subject": {
+          "kind": "message_text",
+          "messageId": "message_9",
+          "text": "第一句原文。"
+        }
+      }
+    }
+  },
+  {
+    "name": "delivery binds a plan draft to its proposal",
+    "schema": "ToolDelivery",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "画面与声音方案",
+          "kind": "script",
+          "content": {
+            "format": "markdown",
+            "text": "1. 山间晨雾。\n2. 林间小路。"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "候选素材说明",
+          "kind": "analysis",
+          "content": {
+            "format": "markdown",
+            "text": "采用雨后的山路照片。"
+          }
+        }
+      ],
+      "stageDrafts": [
+        {
+          "workId": "work_1",
+          "stage": "plan",
+          "itemIndex": 0,
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "proposalRef": {
+            "proposalId": "proposal_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "delivery stage drafts cannot be empty",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "方案",
+          "kind": "script",
+          "content": {
+            "format": "markdown",
+            "text": "方案。"
+          }
+        }
+      ],
+      "stageDrafts": []
+    }
+  },
+  {
+    "name": "timed narrated concat",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "timed_narrated_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "startMs": 1000,
+          "durationMs": 6000
+        },
+        {
+          "kind": "video",
+          "inputSlot": 1,
+          "startMs": 2000,
+          "durationMs": 6000
+        },
+        {
+          "kind": "image",
+          "inputSlot": 2,
+          "durationMs": 8000
+        }
+      ],
+      "narrationInputSlot": 3
+    }
+  },
+  {
+    "name": "timed concat video segment needs a source start",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "timed_narrated_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "durationMs": 6000
+        }
+      ],
+      "narrationInputSlot": 1
+    }
+  },
+  {
+    "name": "confirm stage tool",
+    "schema": "ToolConfirmStage",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "action": "approve_plan",
+      "subject": {
+        "kind": "artifact_revision",
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "start work tool",
+    "schema": "ToolStartWork",
+    "valid": true,
+    "value": {
+      "title": "去山里，慢下来"
+    }
+  },
+  {
+    "name": "read material batch tool",
+    "schema": "ToolReadMaterialBatch",
+    "valid": true,
+    "value": {
+      "batchId": "batch_1"
+    }
+  },
+  {
+    "name": "feedback note keeps artifact association out of contentSource",
+    "schema": "FeedbackNote",
+    "valid": true,
+    "value": {
+      "applied": false,
+      "disposition": "noted",
+      "workId": null,
+      "contentSource": null
+    }
+  },
+  {
+    "name": "feedback note carries work and adopted message source",
+    "schema": "FeedbackNote",
+    "valid": true,
+    "value": {
+      "applied": false,
+      "disposition": "next_version",
+      "workId": "work_1",
+      "contentSource": {
+        "kind": "message_text",
+        "messageId": "msg_1",
+        "text": "开头改成清晨的港口。",
+        "author": "user"
+      }
+    }
+  },
+  {
+    "name": "feedback note missing readback association",
+    "schema": "FeedbackNote",
+    "valid": false,
+    "value": {
+      "applied": false,
+      "disposition": "noted"
+    }
+  },
+  {
+    "name": "feedback receipt for work content without artifact copy",
+    "schema": "FeedbackReceipt",
+    "valid": true,
+    "value": {
+      "target": null,
+      "workId": "work_1",
+      "contentSource": {
+        "kind": "message_text",
+        "messageId": "msg_1",
+        "text": "开头改成清晨的港口。",
+        "author": "user"
+      },
+      "applied": false,
+      "disposition": "next_version",
+      "replayed": false,
+      "messageId": "msg_2",
+      "messageRevision": 2
+    }
+  },
+  {
+    "name": "feedback receipt without subject",
+    "schema": "FeedbackReceipt",
+    "valid": false,
+    "value": {
+      "target": null,
+      "workId": null,
+      "contentSource": null,
+      "applied": false,
+      "disposition": "noted",
+      "replayed": false,
+      "messageId": "msg_2",
+      "messageRevision": 2
+    }
+  },
+  {
+    "name": "work feedback targets current content draft",
+    "schema": "ToolRecordWorkFeedback",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "artifactId": null,
+      "baseRevisionId": null
+    }
+  },
+  {
+    "name": "work feedback with only one artifact coordinate",
+    "schema": "ToolRecordWorkFeedback",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "artifactId": "art_1",
+      "baseRevisionId": null
+    }
+  },
+  {
+    "name": "stage view exposes latest confirmation action",
+    "schema": "Work",
+    "valid": true,
+    "value": {
+      "id": "work_9",
+      "title": "港口清晨",
+      "stage": "plan",
+      "revision": 4,
+      "stages": {
+        "content": {
+          "stage": "content",
+          "draft": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_2",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approved": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_2",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approvedAt": "2026-10-30T08:10:00Z",
+          "confirmationId": "confirm_1",
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": "approve_content_continue"
+        },
+        "plan": {
+          "stage": "plan",
+          "draft": {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_2",
+            "revisionId": "revision_3",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": "proposal_1",
+          "runId": null,
+          "confirmationAction": "approve_plan"
+        },
+        "video": {
+          "stage": "video",
+          "draft": null,
+          "approved": null,
+          "approvedAt": null,
+          "confirmationId": null,
+          "upstreamStale": false,
+          "proposalId": null,
+          "runId": null,
+          "confirmationAction": null
+        }
+      },
+      "createdAt": "2026-10-30T08:00:00Z",
+      "updatedAt": "2026-10-30T08:20:00Z"
+    }
+  },
+  {
+    "name": "user-chat-recorded-feedback",
+    "schema": "Message",
+    "valid": true,
+    "value": {
+      "id": "message_feedback",
+      "requestId": "req-feedback-chat",
+      "role": "user",
+      "text": "结尾缩短两秒",
+      "state": "completed",
+      "revision": 1,
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": "work_1"
+      },
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": {
+        "applied": false,
+        "disposition": "next_version",
+        "workId": null,
+        "contentSource": null
+      },
+      "createdSequence": 1
+    }
+  },
+  {
+    "name": "assistant-cannot-own-recorded-feedback",
+    "schema": "Message",
+    "valid": false,
+    "value": {
+      "id": "message_feedback",
+      "requestId": "req-feedback-chat",
+      "role": "assistant",
+      "text": "结尾缩短两秒",
+      "state": "completed",
+      "revision": 1,
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": "work_1"
+      },
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": {
+        "applied": false,
+        "disposition": "next_version",
+        "workId": null,
+        "contentSource": null
+      },
+      "createdSequence": 1
+    }
+  },
+  {
+    "name": "content stage draft",
+    "schema": "StageDraft",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "stage": "content",
+      "itemIndex": 0,
+      "source": null,
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "plan discussion draft",
+    "schema": "StageDraft",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "stage": "plan",
+      "itemIndex": 0,
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "content draft cannot claim an upstream source",
+    "schema": "StageDraft",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "stage": "content",
+      "itemIndex": 0,
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "content draft cannot attach a production proposal",
+    "schema": "StageDraft",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "stage": "content",
+      "itemIndex": 0,
+      "source": null,
+      "proposalRef": {
+        "proposalId": "proposal_1",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  },
+  {
+    "name": "plan draft requires its content source",
+    "schema": "StageDraft",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "stage": "plan",
+      "itemIndex": 0,
+      "source": null,
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "video draft must come from production",
+    "schema": "StageDraft",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "stage": "video",
+      "itemIndex": 0,
+      "source": null,
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "PrepareProposal references delivered plan without a new revision",
+    "schema": "PrepareProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_prepare",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "planSource": {
+        "artifactId": "art-plan",
+        "revisionId": "rev-plan"
+      },
+      "replacesProposal": {
+        "proposalId": "proposal-old",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "ToolPrepareProposal references delivered plan without a new revision",
+    "schema": "ToolPrepareProposal",
+    "valid": true,
+    "value": {
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        }
+      },
+      "planSource": {
+        "artifactId": "art-plan",
+        "revisionId": "rev-plan"
+      },
+      "replacesProposal": {
+        "proposalId": "proposal-old",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "markdown content with ordered sections",
+    "schema": "MarkdownContent",
+    "valid": true,
+    "value": {
+      "format": "markdown",
+      "text": "四个镜头片段的文稿，按顺序拼接成片。",
+      "sections": [
+        {
+          "id": "sec_1",
+          "title": "片段一：入山口",
+          "text": "清晨薄雾中的灰白石阶向上延伸。"
+        },
+        {
+          "id": "sec_2",
+          "title": "片段二：半山雾带",
+          "text": "穿过雾带，山脊线第一次出现。"
+        }
+      ]
+    }
+  },
+  {
+    "name": "markdown plan sections may cite source sections",
+    "schema": "MarkdownContent",
+    "valid": true,
+    "value": {
+      "format": "markdown",
+      "text": "",
+      "sections": [
+        {
+          "id": "sec_shot_1",
+          "title": "镜头一",
+          "text": "固定机位，石阶推近。",
+          "sourceSectionIds": [
+            "sec_1"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "markdown without sections still needs non-empty text",
+    "schema": "MarkdownContent",
+    "valid": false,
+    "value": {
+      "format": "markdown",
+      "text": ""
+    }
+  },
+  {
+    "name": "markdown section needs a title",
+    "schema": "MarkdownContent",
+    "valid": false,
+    "value": {
+      "format": "markdown",
+      "text": "说明",
+      "sections": [
+        {
+          "id": "sec_1",
+          "text": "缺标题的段落"
+        }
+      ]
+    }
+  },
+  {
+    "name": "markdown sections are bounded by 24",
+    "schema": "MarkdownContent",
+    "valid": false,
+    "value": {
+      "format": "markdown",
+      "text": "说明",
+      "sections": [
+        {
+          "id": "sec_0",
+          "title": "段0",
+          "text": "正文"
+        },
+        {
+          "id": "sec_1",
+          "title": "段1",
+          "text": "正文"
+        },
+        {
+          "id": "sec_2",
+          "title": "段2",
+          "text": "正文"
+        },
+        {
+          "id": "sec_3",
+          "title": "段3",
+          "text": "正文"
+        },
+        {
+          "id": "sec_4",
+          "title": "段4",
+          "text": "正文"
+        },
+        {
+          "id": "sec_5",
+          "title": "段5",
+          "text": "正文"
+        },
+        {
+          "id": "sec_6",
+          "title": "段6",
+          "text": "正文"
+        },
+        {
+          "id": "sec_7",
+          "title": "段7",
+          "text": "正文"
+        },
+        {
+          "id": "sec_8",
+          "title": "段8",
+          "text": "正文"
+        },
+        {
+          "id": "sec_9",
+          "title": "段9",
+          "text": "正文"
+        },
+        {
+          "id": "sec_10",
+          "title": "段10",
+          "text": "正文"
+        },
+        {
+          "id": "sec_11",
+          "title": "段11",
+          "text": "正文"
+        },
+        {
+          "id": "sec_12",
+          "title": "段12",
+          "text": "正文"
+        },
+        {
+          "id": "sec_13",
+          "title": "段13",
+          "text": "正文"
+        },
+        {
+          "id": "sec_14",
+          "title": "段14",
+          "text": "正文"
+        },
+        {
+          "id": "sec_15",
+          "title": "段15",
+          "text": "正文"
+        },
+        {
+          "id": "sec_16",
+          "title": "段16",
+          "text": "正文"
+        },
+        {
+          "id": "sec_17",
+          "title": "段17",
+          "text": "正文"
+        },
+        {
+          "id": "sec_18",
+          "title": "段18",
+          "text": "正文"
+        },
+        {
+          "id": "sec_19",
+          "title": "段19",
+          "text": "正文"
+        },
+        {
+          "id": "sec_20",
+          "title": "段20",
+          "text": "正文"
+        },
+        {
+          "id": "sec_21",
+          "title": "段21",
+          "text": "正文"
+        },
+        {
+          "id": "sec_22",
+          "title": "段22",
+          "text": "正文"
+        },
+        {
+          "id": "sec_23",
+          "title": "段23",
+          "text": "正文"
+        },
+        {
+          "id": "sec_24",
+          "title": "段24",
+          "text": "正文"
+        }
+      ]
+    }
+  },
+  {
+    "name": "narrated render carries segment ids in slot order",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "narrated_concat",
+      "videoInputSlots": [
+        0,
+        1,
+        2
+      ],
+      "narrationInputSlot": 3,
+      "durationPolicy": "preserve_all",
+      "segmentIds": [
+        "sec_1",
+        "sec_2",
+        "sec_3"
+      ]
+    }
+  },
+  {
+    "name": "timed render carries segment ids in segment order",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "timed_narrated_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "startMs": 0,
+          "durationMs": 4000
+        },
+        {
+          "kind": "image",
+          "inputSlot": 1,
+          "durationMs": 2000
+        }
+      ],
+      "narrationInputSlot": 2,
+      "segmentIds": [
+        "sec_1",
+        "sec_2"
+      ]
+    }
+  },
+  {
+    "name": "render segment ids must be unique per timeline",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "narrated_concat",
+      "videoInputSlots": [
+        0,
+        1
+      ],
+      "narrationInputSlot": 2,
+      "durationPolicy": "preserve_all",
+      "segmentIds": [
+        "sec_1",
+        "sec_1"
+      ]
+    }
+  },
+  {
+    "name": "send target points at current plan draft plus watched run segment",
+    "schema": "Target",
+    "valid": true,
+    "value": {
+      "artifactId": "artifact_plan",
+      "revisionId": "revision_plan_2",
+      "workId": "work_1",
+      "segment": {
+        "runId": "run_1",
+        "segmentId": "sec_2"
+      }
+    }
+  },
+  {
+    "name": "run segment reference needs both ids",
+    "schema": "Target",
+    "valid": false,
+    "value": {
+      "artifactId": "artifact_plan",
+      "revisionId": "revision_plan_2",
+      "workId": "work_1",
+      "segment": {
+        "runId": "run_1"
+      }
+    }
+  },
+  {
+    "name": "paired revision plan cites same-batch content item",
+    "schema": "StageDraft",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "stage": "plan",
+      "itemIndex": 0,
+      "source": {
+        "kind": "delivery_item",
+        "itemIndex": 0
+      },
+      "proposalRef": null
+    }
+  },
+  {
+    "name": "confirmation subject cannot use batch-internal item reference",
+    "schema": "StageConfirmation",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "action": "approve_content_continue",
+      "subject": {
+        "kind": "delivery_item",
+        "itemIndex": 0
+      }
+    }
+  },
+  {
+    "name": "work feedback may pin the discussed run segment",
+    "schema": "ToolRecordWorkFeedback",
+    "valid": true,
+    "value": {
+      "workId": "work_1",
+      "artifactId": "artifact_plan",
+      "baseRevisionId": "revision_plan_2",
+      "segment": {
+        "runId": "run_1",
+        "segmentId": "sec_2"
+      }
+    }
+  },
+  {
+    "name": "library video entry",
+    "schema": "LibraryVideo",
+    "valid": true,
+    "value": {
+      "video": {
+        "artifactId": "art_2",
+        "revisionId": "rev_9"
+      },
+      "workId": "work_1",
+      "conversationId": "cnv_1",
+      "title": "山路短片 · 分段成片",
+      "finalizedAt": "2026-11-04T08:00:00Z",
+      "plan": {
+        "artifactId": "art_1",
+        "revisionId": "rev_5"
+      },
+      "content": {
+        "kind": "artifact_revision",
+        "artifactId": "art_0",
+        "revisionId": "rev_2",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "originMessageId": "msg_7",
+      "narrationText": "清晨，山路从云雾中醒来。"
+    }
+  },
+  {
+    "name": "library video entry without recorded sources",
+    "schema": "LibraryVideo",
+    "valid": true,
+    "value": {
+      "video": {
+        "artifactId": "art_2",
+        "revisionId": "rev_9"
+      },
+      "workId": "work_1",
+      "conversationId": "cnv_1",
+      "title": "旧作品",
+      "finalizedAt": "2026-10-20T08:00:00Z",
+      "plan": null,
+      "content": null,
+      "originMessageId": null,
+      "narrationText": null
+    }
+  },
+  {
+    "name": "library video page",
+    "schema": "LibraryVideoPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "video": {
+            "artifactId": "art_2",
+            "revisionId": "rev_9"
+          },
+          "workId": "work_1",
+          "conversationId": "cnv_1",
+          "title": "山路短片 · 分段成片",
+          "finalizedAt": "2026-11-04T08:00:00Z",
+          "plan": {
+            "artifactId": "art_1",
+            "revisionId": "rev_5"
+          },
+          "content": {
+            "kind": "artifact_revision",
+            "artifactId": "art_0",
+            "revisionId": "rev_2",
+            "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "originMessageId": "msg_7",
+          "narrationText": "清晨，山路从云雾中醒来。"
+        },
+        {
+          "video": {
+            "artifactId": "art_2",
+            "revisionId": "rev_9"
+          },
+          "workId": "work_1",
+          "conversationId": "cnv_1",
+          "title": "旧作品",
+          "finalizedAt": "2026-10-20T08:00:00Z",
+          "plan": null,
+          "content": null,
+          "originMessageId": null,
+          "narrationText": null
+        }
+      ],
+      "nextCursor": null
+    }
+  },
+  {
+    "name": "library video entry missing video identity",
+    "schema": "LibraryVideo",
+    "valid": false,
+    "value": {
+      "workId": "work_1",
+      "conversationId": "cnv_1",
+      "title": "缺视频",
+      "finalizedAt": "2026-11-04T08:00:00Z",
+      "plan": null,
+      "content": null,
+      "originMessageId": null,
+      "narrationText": null
+    }
+  },
+  {
+    "name": "tool search materials with provider",
+    "schema": "ToolSearchMaterials",
+    "valid": true,
+    "value": {
+      "query": "foggy mountain pass",
+      "kind": "video",
+      "limit": 3,
+      "workId": null,
+      "provider": "wikimedia"
+    }
+  },
+  {
+    "name": "keyed material settings enabled",
+    "schema": "KeyedMaterialSettings",
+    "valid": true,
+    "value": {
+      "serviceId": "pixabay",
+      "revision": 2,
+      "enabled": true,
+      "credentialConfigured": true,
+      "writeUnavailableReason": null
+    }
+  },
+  {
+    "name": "keyless material settings default",
+    "schema": "KeylessMaterialSettings",
+    "valid": true,
+    "value": {
+      "serviceId": "wikimedia",
+      "revision": 0,
+      "enabled": false,
+      "writeUnavailableReason": null
+    }
+  },
+  {
+    "name": "save keyed material settings keep key",
+    "schema": "SaveFreeServiceSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_1",
+      "expectedRevision": 1,
+      "enabled": true,
+      "apiKey": null
+    }
+  },
+  {
+    "name": "save keyless material settings",
+    "schema": "SaveKeylessServiceSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_2",
+      "expectedRevision": 0,
+      "enabled": true
+    }
+  },
+  {
+    "name": "save keyed material settings keep key",
+    "schema": "SaveFreeServiceSettings",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_3",
+      "expectedRevision": 0,
+      "enabled": true,
+      "apiKey": ""
+    }
+  },
+  {
+    "name": "keyed material settings missing credential flag",
+    "schema": "KeyedMaterialSettings",
+    "valid": false,
+    "value": {
+      "serviceId": "unsplash",
+      "revision": 1,
+      "enabled": true,
+      "writeUnavailableReason": null
+    }
+  }
+]

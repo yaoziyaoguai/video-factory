@@ -1,0 +1,2362 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Frame Agent first increment",
+    "version": "0.1.32",
+    "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
+  },
+  "servers": [
+    {
+      "url": "/api/agent/v1"
+    }
+  ],
+  "security": [
+    {
+      "studioSession": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "studioSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "vf_session"
+      }
+    },
+    "responses": {
+      "Error400": {
+        "description": "INVALID_INPUT",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error401": {
+        "description": "UNAUTHENTICATED",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error403": {
+        "description": "FORBIDDEN",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error404": {
+        "description": "NOT_FOUND",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error429": {
+        "description": "QUEUE_FULL",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error503": {
+        "description": "TEMPORARILY_UNAVAILABLE",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error409": {
+        "description": "State or idempotency conflict",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      },
+      "Error410": {
+        "description": "CURSOR_EXPIRED",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Error"
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/settings/services/{serviceId}": {
+      "get": {
+        "operationId": "getFreeServiceSettings",
+        "description": "本机设置视图；已保存 Key 可回显，响应不缓存。",
+        "responses": {
+          "200": {
+            "description": "当前公开设置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/FreeServiceSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pexels",
+                "pixabay",
+                "unsplash",
+                "coverr",
+                "wikimedia",
+                "nasa",
+                "met",
+                "cleveland",
+                "archive",
+                "freetouse",
+                "incompetech",
+                "douyin-music",
+                "tiktok-sounds",
+                "newsnow"
+              ]
+            },
+            "description": "Free service discriminator: 免费素材、平台热歌榜或 NewsNow 资讯来源。"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "saveFreeServiceSettings",
+        "description": "Save enablement and service credentials/source selection for one free service.",
+        "responses": {
+          "200": {
+            "description": "成功回执",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SaveFreeServiceSettingsReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pexels",
+                "pixabay",
+                "unsplash",
+                "coverr",
+                "wikimedia",
+                "nasa",
+                "met",
+                "cleveland",
+                "archive",
+                "freetouse",
+                "incompetech",
+                "douyin-music",
+                "tiktok-sounds",
+                "newsnow"
+              ]
+            },
+            "description": "Free service discriminator: 免费素材、平台热歌榜或 NewsNow 资讯来源。"
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/SaveFreeServiceSettings"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bootstrap": {
+      "get": {
+        "operationId": "getBootstrap",
+        "description": "Returns public model/skill metadata; credentials excluded.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Bootstrap"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/conversations": {
+      "post": {
+        "operationId": "createConversation",
+        "description": "",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Conversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/CreateConversation"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listConversations",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ConversationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}": {
+      "patch": {
+        "operationId": "renameConversation",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Conversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/RenameConversation"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{conversationId}/snapshot": {
+      "get": {
+        "operationId": "getSnapshot",
+        "description": "All initial pages and eventCursor from one consistent read transaction.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Snapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}/messages": {
+      "post": {
+        "operationId": "sendMessage",
+        "description": "Persist before dispatch. Bound exact confirmation may atomically admit a run; runId otherwise null.",
+        "responses": {
+          "202": {
+            "description": "Accepted or replayed result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/RequestReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/MessageInput"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listMessages",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/MessagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          },
+          {
+            "name": "anchorMessageId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            },
+            "description": "历史定位窗口：与 cursor 互斥；归属必须在本次 owner/conversation 内。返回包含锚点及它之前最近消息的一个有界页。"
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}/artifacts": {
+      "get": {
+        "operationId": "listArtifacts",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ArtifactPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/RunPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/requests/{requestId}/stop": {
+      "post": {
+        "operationId": "stopRequest",
+        "description": "Only stops foreground request; never cancels media.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/RequestReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/StopRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/artifacts/{artifactId}/revisions/{revisionId}": {
+      "get": {
+        "operationId": "readRevision",
+        "description": "Both IDs must belong together and to current owner.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ArtifactRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "revisionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}/feedback": {
+      "post": {
+        "operationId": "addFeedback",
+        "description": "Save a feedback-kind Message and receipt atomically, emit message.changed; no Pi inbox entry or media action.",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/FeedbackReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/FeedbackInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{conversationId}/proposals": {
+      "post": {
+        "operationId": "prepareProposal",
+        "description": "Normalize/validate and quote using local verified metadata; no paid provider call. No Work creation.",
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Proposal"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/PrepareProposal"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listProposals",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ProposalPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/proposals/{proposalId}": {
+      "get": {
+        "operationId": "readProposal",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Proposal"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/proposals/{proposalId}/acceptances": {
+      "post": {
+        "operationId": "acceptProposal",
+        "description": "Trusted user route only. Atomic authorization and admission; tools cannot invoke this route.",
+        "responses": {
+          "202": {
+            "description": "Accepted or replayed result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/AdmissionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/AcceptProposal"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/{runId}": {
+      "get": {
+        "operationId": "getRun",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Run"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/runs/{runId}/cancellations": {
+      "post": {
+        "operationId": "cancelRun",
+        "description": "Persist request and stop unsent work. Does not claim provider cancellation or refund.",
+        "responses": {
+          "202": {
+            "description": "Accepted or replayed result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/CancelReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/CancelRun"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{conversationId}/events": {
+      "get": {
+        "operationId": "subscribeEvents",
+        "description": "SSE business notifications. snapshot then cursor; 410 before stream, reset_required inside stream. No automatic tool execution.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-events": {
+                  "business": {
+                    "$ref": "./contracts.schema.json#/$defs/BusinessEvent"
+                  },
+                  "text.delta": {
+                    "$ref": "./contracts.schema.json#/$defs/TextDelta"
+                  },
+                  "artifact.draft": {
+                    "$ref": "./contracts.schema.json#/$defs/ArtifactDraft"
+                  },
+                  "context.status": {
+                    "$ref": "./contracts.schema.json#/$defs/ContextStatus"
+                  },
+                  "reset_required": {
+                    "$ref": "./contracts.schema.json#/$defs/ResetRequired"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          }
+        ]
+      }
+    },
+    "/blobs/{blobId}/content": {
+      "get": {
+        "operationId": "readBlob",
+        "description": "Authenticated immutable asset content; ownership enforced; generated storage path only; support Range.",
+        "parameters": [
+          {
+            "name": "blobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "schema": {
+              "type": "string",
+              "pattern": "^bytes=[0-9]*-[0-9]*$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full media",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Byte range; Content-Range and Accept-Ranges headers required",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "416": {
+            "description": "Unsatisfiable range"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "readArtifactHead",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ArtifactHead"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/messages/{messageId}": {
+      "get": {
+        "operationId": "readMessage",
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "messageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/profile": {
+      "get": {
+        "operationId": "getUserProfile",
+        "description": "Current user profile (display name and bio).",
+        "responses": {
+          "200": {
+            "description": "当前公开设置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/UserProfile"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": []
+      },
+      "patch": {
+        "operationId": "saveUserProfile",
+        "description": "Save display name and bio.",
+        "responses": {
+          "200": {
+            "description": "成功回执",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SaveUserProfileReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/SaveUserProfile"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/imported": {
+      "get": {
+        "operationId": "getImportedSettings",
+        "description": "读取显式导入的旧配置（含 Key）；只用于设置展示，不授予执行能力。",
+        "responses": {
+          "200": {
+            "description": "旧配置列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ImportedSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/settings/model-connections": {
+      "get": {
+        "operationId": "getProviderConnections",
+        "description": "连接与多个型号的本机配置；包含 Key，响应不缓存。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ProviderConnectionSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": []
+      },
+      "post": {
+        "operationId": "saveProviderConnection",
+        "description": "原子保存一份连接及其型号；全局 revision 并发控制。Key=null 保留已存 Key。同类只允许一个默认型号；在途执行版本保持不变。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SaveProviderConnectionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/SaveProviderConnection"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/skills": {
+      "get": {
+        "operationId": "readSkillPackages",
+        "description": "读取本应用当前已配置包、实际发现的 Skill、解析诊断与当前 mutation；只读，不安装、不升级。列表反映当前配置与发现结果，不能证明依赖命令从未执行。",
+        "responses": {
+          "200": {
+            "description": "当前 Skill 包目录",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SkillPackagesView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/settings/skills/install": {
+      "post": {
+        "operationId": "installSkillPackage",
+        "description": "使用 Pi 原生来源语义安装 npm、Git 或服务端本机目录包；拒绝 URL 内嵌凭据。相同已安装来源回读当前结果，不重跑安装；修改版本须先卸载。仅加载 Skill，安装不等于调用。前台有 queued/running 请求或已有管理操作时返回 409 RUN_BUSY、retryAction=wait；后台媒体运行不算前台忙。成功后目录与空闲会话已刷新；不返回 command receipt、不承诺 exactly-once。响应丢失或失败时先 GET 回读，不自动重发；实际状态不可回读时如实报错，不声明回滚。",
+        "responses": {
+          "200": {
+            "description": "安装、持久化与目录刷新完成后的当前视图",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SkillPackagesView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "description": "RUN_BUSY；当前对话还在处理，完成后再操作。retryAction=wait，不改变目录。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                },
+                "example": {
+                  "code": "RUN_BUSY",
+                  "message": "当前对话还在处理，完成后再操作。",
+                  "requestId": "request_http",
+                  "retryAction": "wait",
+                  "currentRevisionId": null
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "TEMPORARILY_UNAVAILABLE；原生安装、持久化或目录/会话刷新失败。先 GET 回读当前状态，不自动重发。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                },
+                "example": {
+                  "code": "TEMPORARILY_UNAVAILABLE",
+                  "message": "Skill 包操作未完成，请先刷新目录核对当前状态。",
+                  "requestId": "request_http",
+                  "retryAction": "reload",
+                  "currentRevisionId": null
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          },
+          {
+            "name": "x-video-factory-request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "studio"
+            },
+            "description": "Existing Studio mutation guard."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/InstallSkillPackage"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/skills/remove": {
+      "post": {
+        "operationId": "removeSkillPackage",
+        "description": "按当前列表中的 packageId 定位并移除整个已安装来源；拒绝任意路径，内置包返回 403 FORBIDDEN，不存在包返回 404 NOT_FOUND。本机目录只解除注册，不删除源文件；保留聊天与作品历史。前台有 queued/running 请求或已有管理操作时返回 409 RUN_BUSY、retryAction=wait；后台媒体照常。成功后目录与空闲会话已刷新，后续不能再选择或受控读取被移除 Skill；不承诺抹去既有模型历史。不返回 command receipt；响应丢失或失败时先 GET 回读，不自动重发，不声明回滚。",
+        "responses": {
+          "200": {
+            "description": "卸载、持久化与目录刷新完成后的当前视图",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SkillPackagesView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "description": "RUN_BUSY；当前对话还在处理，完成后再操作。retryAction=wait，不改变目录。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                },
+                "example": {
+                  "code": "RUN_BUSY",
+                  "message": "当前对话还在处理，完成后再操作。",
+                  "requestId": "request_http",
+                  "retryAction": "wait",
+                  "currentRevisionId": null
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "TEMPORARILY_UNAVAILABLE；原生移除、持久化或目录/会话刷新失败。先 GET 回读当前状态，不自动重发。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                },
+                "example": {
+                  "code": "TEMPORARILY_UNAVAILABLE",
+                  "message": "Skill 包操作未完成，请先刷新目录核对当前状态。",
+                  "requestId": "request_http",
+                  "retryAction": "reload",
+                  "currentRevisionId": null
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          },
+          {
+            "name": "x-video-factory-request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "studio"
+            },
+            "description": "Existing Studio mutation guard."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/RemoveSkillPackage"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/model-connections/{connectionId}/models": {
+      "get": {
+        "operationId": "listAvailableProviderModels",
+        "description": "实时同步供应商目录，返回用途、下线状态、厂商已提供的容量和同步时间。仅更新候选列表，不改已选型号/默认/运行快照；不以输入图片能力推断图片生成。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/AvailableProviderModels"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "connectionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/works/{workId}": {
+      "get": {
+        "operationId": "readWork",
+        "description": "Read one video creation work with its stage projections.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Work"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "workId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/material-batches/{batchId}": {
+      "get": {
+        "operationId": "readMaterialBatch",
+        "description": "Read one persisted material search batch in original order, including empty results.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/MaterialBatch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "batchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/library/videos": {
+      "get": {
+        "operationId": "listLibraryVideos",
+        "description": "当前用户已定稿的最终视频修订列表；按首次定稿时间倒序、revisionId 稳定排序，按 video.revisionId 去重。进入作品库时读取最新列表。",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/LibraryVideoPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    }
+  },
+  "x-commands": {
+    "identity": "(authenticated owner, operationId, targetId, commandId)",
+    "sameBody": "Return original receipt",
+    "differentBody": "409 IDEMPOTENCY_CONFLICT",
+    "retention": "Business record lifetime",
+    "safety": "Origin required and checked; application/json for mutations; no implicit coercion/removal/defaults",
+    "exceptions": {
+      "installSkillPackage": "Native package mutation; no commandId or receipt, no exactly-once guarantee. Read readSkillPackages before deciding whether to retry.",
+      "removeSkillPackage": "Native package mutation; no commandId or receipt, no exactly-once guarantee. Read readSkillPackages before deciding whether to retry."
+    }
+  },
+  "x-tool-schemas": {
+    "read_artifact": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadArtifact"
+    },
+    "read_proposal": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadProposal"
+    },
+    "read_run": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadRun"
+    },
+    "list_production": {
+      "$ref": "./contracts.schema.json#/$defs/ToolListProduction"
+    },
+    "deliver_artifacts": {
+      "$ref": "./contracts.schema.json#/$defs/ToolDelivery"
+    },
+    "prepare_production": {
+      "$ref": "./contracts.schema.json#/$defs/ToolPrepareProposal"
+    }
+  },
+  "x-private-worker-schemas": {
+    "submit": {
+      "$ref": "./contracts.schema.json#/$defs/ExecutionInput"
+    },
+    "query": {
+      "$ref": "./contracts.schema.json#/$defs/RecoveryQuery"
+    },
+    "observe": {
+      "$ref": "./contracts.schema.json#/$defs/ExecutionObservation"
+    }
+  },
+  "x-confirmation-policy": {
+    "normalization": "NFKC_then_trim",
+    "allowedTerminalPunctuation": [
+      "。",
+      "."
+    ],
+    "maxTerminalPunctuationRemoved": 1,
+    "wholeMessageAllowlist": [
+      "开始制作",
+      "按这份开始",
+      "确认制作"
+    ],
+    "requiresExplicitProposalRef": true,
+    "forbiddenWithProposalRef": [
+      "target",
+      "skillId",
+      "steerRequestId"
+    ],
+    "unmatched": "ordinary_conversation_no_authorization"
+  },
+  "x-event-read-models": {
+    "message.changed": {
+      "readOperation": "readMessage",
+      "versionField": "revision"
+    },
+    "artifact.delivered": {
+      "readOperation": "readArtifactHead",
+      "versionField": "revisionNumber"
+    },
+    "proposal.changed": {
+      "readOperation": "readProposal",
+      "versionField": "revision"
+    },
+    "run.changed": {
+      "readOperation": "getRun",
+      "versionField": "revision"
+    },
+    "conversation.changed": {
+      "readOperation": "getSnapshot",
+      "versionField": "conversation.revision"
+    },
+    "work.changed": {
+      "readOperation": "readWork",
+      "versionField": "revision"
+    },
+    "material.changed": {
+      "readOperation": "readMaterialBatch",
+      "versionField": "revision"
+    }
+  }
+}

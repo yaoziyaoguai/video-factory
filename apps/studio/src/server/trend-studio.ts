@@ -13,7 +13,6 @@ import type {
   StudioTopicGenerationReceipt,
 } from "../shared/api.js";
 import { canonicalizeSourceUrl, manualSupplementEvidence, StudioInputError } from "../shared/api.js";
-import { buildTrendSourceCatalog } from "./provider-catalog.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { TrendOpportunityAgent } from "./trend-opportunity-agent.js";
@@ -449,4 +448,104 @@ function isTopicGenerationReceipt(value: unknown): value is StudioTopicGeneratio
     && typeof receipt.modelInvoked === "boolean"
     && (receipt.source === "editor-model" || receipt.source === "rule-fallback")
     && Number.isInteger(receipt.candidateCount) && Number(receipt.candidateCount) >= 0;
+}
+
+// 免费趋势数据源目录（自托管/导入类）。原先位于旧供应商目录 provider-catalog.ts，
+// 该目录已随旧文本/图片/配音供应商退役删除；这里是它仅存的现行消费者。
+export function buildTrendSourceCatalog(
+  environment: NodeJS.ProcessEnv,
+  localServices: StudioTrendService[] = [],
+): StudioTrendSource[] {
+  const douyinCredentialsConfigured =
+    environment.DOUYIN_HOTSEARCH_ENABLED === "1" && Boolean(environment.DOUYIN_CLIENT_TOKEN);
+  const localReady = (id: StudioTrendService["id"]) => localServices.some((service) => service.id === id && service.status === "ready");
+  return [
+    {
+      id: "manual-research",
+      label: "人工研究",
+      kind: "native",
+      status: "ready",
+      description: "录入已经人工核验的热点、搜索词或评论信号。",
+      cadence: "随时",
+    },
+    {
+      id: "json-import",
+      label: "结构化 JSON",
+      kind: "import",
+      status: "ready",
+      description: "批量导入带来源声明、时间和证据链接的结构化信号。",
+      cadence: "按需",
+    },
+    {
+      id: "trendradar-import",
+      label: "TrendRadar 自托管",
+      kind: "import",
+      status: localReady("trendradar") ? "ready" : "needs_config",
+      description: "本地聚合中文热榜、RSS、排名轨迹与历史 SQLite，并为 Agent 提供 MCP 分析入口。",
+      cadence: "建议 30 分钟",
+      requirement: localReady("trendradar") ? "本地采集器与 Web 报告已通过健康检查" : "运行 make setup-local-trends",
+      docsUrl: "https://github.com/sansan0/TrendRadar",
+    },
+    {
+      id: "newsnow-import",
+      label: "NewsNow 自托管",
+      kind: "import",
+      status: localReady("newsnow") ? "ready" : "needs_config",
+      description: "本地热点快照接口，提供微博、知乎、B 站、财经与中文新闻源。",
+      cadence: "建议 30 分钟",
+      requirement: localReady("newsnow") ? "本地 API 已接入统一热点网关" : "运行 make setup-local-trends",
+      docsUrl: "https://github.com/ourongxing/newsnow",
+    },
+    {
+      id: "dailyhot-import",
+      label: "DailyHotApi",
+      kind: "import",
+      status: localReady("dailyhot") ? "ready" : "needs_config",
+      description: "本地统一 JSON / RSS 热榜接口，补充抖音、微博、快手、百度和垂类榜单。",
+      cadence: "建议 30-60 分钟",
+      requirement: localReady("dailyhot") ? "本地 API 已接入统一热点网关" : "运行 make setup-local-trends",
+      docsUrl: "https://github.com/imsyy/DailyHotApi",
+    },
+    {
+      id: "rsshub-import",
+      label: "RSSHub 中文世界",
+      kind: "import",
+      status: localReady("rsshub") ? "ready" : "needs_config",
+      description: "补充港台、新马、海外中文媒体和垂直社区，不把新闻更新误当成平台热度。",
+      cadence: "按 Feed 更新",
+      requirement: localReady("rsshub") ? "本地 RSS 路由服务已通过健康检查" : "运行 make setup-local-trends",
+      docsUrl: "https://docs.rsshub.app/deploy/",
+    },
+    {
+      id: "douyin-hotsearch",
+      label: "抖音官方热点",
+      kind: "native",
+      status: "needs_config",
+      description: "官方热点权限可作为后续数据源；当前版本尚未实现自动采集适配器。",
+      cadence: "约 2 小时",
+      requirement: douyinCredentialsConfigured
+        ? "已检测到授权配置；仍需实现并验证官方热点采集适配器"
+        : "需要获批 hotsearch scope、配置授权，并实现官方热点采集适配器",
+      docsUrl: "https://developer.open-douyin.com/capacity-center-page/capacity-detail/7180573594794065975",
+    },
+    {
+      id: "newrank-import",
+      label: "新榜数据",
+      kind: "commercial",
+      status: "manual_only",
+      description: "在商业 API 合同确定前，以 CSV/JSON 导入保存来源边界。",
+      cadence: "按购买方案",
+      requirement: "需要商业数据授权",
+      docsUrl: "https://data.newrank.cn/",
+    },
+    {
+      id: "ocean-engine-import",
+      label: "巨量算数",
+      kind: "import",
+      status: "manual_only",
+      description: "用于人工研究关键词趋势，暂不假设存在可公开自动调用的 API。",
+      cadence: "人工观察",
+      docsUrl: "https://www.oceanengine.com/insight/juliang-suanshu-yidongduan",
+    },
+  ];
 }

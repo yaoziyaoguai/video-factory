@@ -4,9 +4,18 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@video-factory/workflow-core": ["../../packages/workflow-core/src/index.ts"],
-      "@video-factory/production-pipeline": ["../../packages/production-pipeline/src/index.ts"]
+      "@video-factory/workflow-core": [
+        "../../packages/workflow-core/src/index.ts"
+      ],
+      "@video-factory/production-pipeline": [
+        "../../packages/production-pipeline/src/index.ts"
+      ]
     }
   },
-  "include": ["src/server/**/*.ts", "src/shared/**/*.ts", "test/server.test.ts"]
+  "include": [
+    "src/server/**/*.ts",
+    "src/shared/**/*.ts",
+    "test/agent-*.test.ts",
+    "test/helpers/agent-*.ts"
+  ]
 }

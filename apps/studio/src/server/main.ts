@@ -1,265 +1,153 @@
+import { connectedTextModels, connectedMediaEnabled, connectedSpeechChoices } from "./agent/provider-connections.js";
 import { access } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { loadEnvFile } from "node:process";
 import fastifyStatic from "@fastify/static";
+import { createAgentRuntime } from "./agent/assembly.js";
+import { buildFrameApp } from "./agent/app.js";
 import {
-  CodexBridgeClient,
-  CodexAssetSemanticRanker,
-  CodexReferenceGrammarAgent,
-  CodexPublishCopyWriter,
-  FallbackCodexTaskClient,
-  ProductionPipeline,
-  type ProductionPipelineOptions,
-} from "@video-factory/production-pipeline";
-import { buildStudioApp } from "./app.js";
+  defaultTextBindingOf, initializeTextModelSettings, textRegistrationOf, } from "./agent/text-model-settings.js";
+import { ArkMediaPort, RealMediaGateway } from "./agent/ark-media.js";
+import { MiniMaxSpeechPort } from "./agent/minimax-speech.js";
+import { MiniMaxVideoPort } from "./agent/minimax-video.js";
+import { WanVideoPort } from "./agent/wan-video.js";
+import { localRenderAvailability, LocalRenderPort } from "./agent/local-render.js";
+import {
+  arkVideoCatalog, arkVideoModelView, initializeArkVideoSettings, readArkVideoCurrent,
+  readLegacyArkConfig, resolveArkBinding,
+} from "./agent/ark-video-settings.js";
+import {
+  additionalMediaCatalog, additionalMediaModelViews, resolveMinimaxSpeechBinding, resolveMinimaxVideoBinding,
+  resolveImageBinding, resolveOpenAISpeechBinding, resolveWanVideoBinding,
+} from "./agent/additional-media-settings.js";
+import { ImageGenerationPort } from "./agent/image-generation.js";
+import { OpenAISpeechPort } from "./agent/openai-speech.js";
+import { validatorFor } from "./agent/validate.js";
+import type { ImportedSettings } from "../shared/agent/generated/contracts.js";
+import { systemClock } from "./agent/util.js";
+import type { AgentDatabase } from "./agent/db.js";
+import type { ProductionBlobs } from "./agent/production-blobs.js";
 import { readStudioAuthEnvironment } from "./auth.js";
-import {
-  readCodexProviderSettings,
-  readDeepseekCodexProviderSettings,
-} from "./codex-provider-settings.js";
-import { JsonCreatorSettingsStore } from "./creator-settings-store.js";
-import { JsonOpportunityStore } from "./opportunity-store.js";
-import {
-  buildDirectorAssetProviders,
-  buildProductionProviderRuntimeMetadata,
-  buildProductionWorker,
-  resolveProductionPython,
-} from "./production-worker.js";
-import { PythonReviewMediaPreprocessor } from "./review-media-preprocessor.js";
-import { buildRoleAgentAssembly } from "./role-agent-assembly.js";
-import { CodexSeriesPlanningAgent } from "./series-planning-agent.js";
-import { StudioService } from "./studio-service.js";
-import { TrendGateway } from "./trend-gateway.js";
-import { TrendArticleReader } from "./trend-article-reader.js";
-import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
-import { ModelConnections } from "./model-connections.js";
-import { AudioReviewService } from "./audio-review-service.js";
-import { LocalCapabilityService } from "./local-capabilities.js";
-import { MaintenanceGate, StudioMaintenanceError } from "./maintenance-gate.js";
-import { readPlanningMaintenanceIntegrity } from "./planning-operations.js";
-import { installStudioLifecycle } from "./server-lifecycle.js";
+import { MaintenanceGate } from "./maintenance-gate.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
-loadLocalEnvironment(repositoryRoot);
-// 模型供应商凭据只属于宿主机 broker；即使误放进 Studio 环境也立即移除。
-delete process.env.DEEPSEEK_API_KEY;
-const workspaceRoot = path.resolve(
-  process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace", "factory"),
-);
-const creatorSettings = new JsonCreatorSettingsStore(path.join(workspaceRoot, "settings", "creator-settings.json"));
-const pythonPath = process.env.PYTHONPATH
-  ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
-  : path.join(repositoryRoot, "src");
-// 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
-// ChatGPT/Codex 套餐已退役（用户指令 2026-09-18）：不再创建 codex broker 客户端，
-// 全部角色只走 DeepSeek broker。codex-* 的 provider id 作为遗留名保留以兼容历史 run。
-const [deepseekCodexSettings] = await Promise.all([
-  readDeepseekCodexProviderSettings(process.env),
-]);
-const deepseekCodexClient = deepseekCodexSettings.available
-  ? new CodexBridgeClient({ socketPath: deepseekCodexSettings.socketPath, timeoutMs: 2_460_000 })
-  : undefined;
-const modelConnections = new ModelConnections(deepseekCodexSettings.socketPath);
-await modelConnections.refresh().catch(() => { process.stderr.write("Model connection management is unavailable; existing configured models remain in use.\n"); });
-// 顺序即首选：DeepSeek 排在最前，所以 `auditedModelFor` 取到的默认模型是它。用户手动配置
-// 只影响候选的取舍，不改这里的顺序。
-const auditedTaskCandidates = [
-  ...(deepseekCodexClient && deepseekCodexSettings.taskKinds.includes("role-audit") ? [{
-    client: deepseekCodexClient,
-    providerId: "deepseek",
-    modelId: deepseekCodexSettings.modelId,
-    ...(deepseekCodexSettings.modelCandidates ? { modelCandidates: deepseekCodexSettings.modelCandidates } : {}),
-    taskKinds: deepseekCodexSettings.taskKinds,
-    sessionMode: "stateless" as const,
-    ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
-  }] : []),
-];
-const configuredTaskCandidates = () => modelConnections.connections.map(({ model, client }) => ({
-  client, providerId: model.id, modelId: model.id, enabled: model.enabled,
-  taskKinds: [
-    ...(model.capabilities.includes("text") ? ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "creative-discussion"] : []),
-    ...(model.capabilities.includes("image") ? ["asset-rank", "reference-grammar", "visual-review"] : []),
-    "role-audit",
-  ], sessionMode: "stateless" as const,
-}));
-const auditedTaskClient = new FallbackCodexTaskClient({ candidates: [...auditedTaskCandidates, ...configuredTaskCandidates()] });
-const auditedModelFor = (taskKind: string) => {
-  const candidate = [...auditedTaskCandidates, ...configuredTaskCandidates().filter((item) => item.enabled)].find((item) => item.taskKinds.includes(taskKind));
-  return (candidate && "taskModels" in candidate ? candidate.taskModels?.[taskKind] : undefined) || candidate?.modelId || "codex-default";
-};
-const publishCopyWriter = new CodexPublishCopyWriter({ client: auditedTaskClient });
-const assetSemanticRanker = new CodexAssetSemanticRanker({
-  client: auditedTaskClient,
-  modelId: auditedModelFor("asset-rank"),
-});
-const reviewMedia = new PythonReviewMediaPreprocessor({
-  repositoryRoot,
-  pythonPath,
-  pythonCommand: resolveProductionPython(repositoryRoot, process.env),
-  environment: process.env,
-});
-const referenceGrammarAgent = new CodexReferenceGrammarAgent({
-  client: auditedTaskClient,
-  media: reviewMedia,
-  modelId: auditedModelFor("reference-grammar"),
-});
-const soundReview = new AudioReviewService({ connections: () => modelConnections.connections, media: reviewMedia });
-const assembleRoles = () => {
-  const assembly = buildRoleAgentAssembly({
-  deepseekCodexSettings,
-  ...(deepseekCodexClient ? { deepseekCodexClient } : {}),
-  reviewMedia,
-  environment: process.env,
-  connectedModels: modelConnections.connections,
-  });
-  return { ...assembly, visualReviewAgents: assembly.visualReviewAgents.map((agent) => soundReview.wrap(agent)) };
-};
-const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = assembleRoles();
-const localCapabilities = new LocalCapabilityService({ repositoryRoot, workspaceRoot, environment: process.env });
-const pipelineOptions: ProductionPipelineOptions = {
-  workspaceRoot,
-  characterVoiceProfiles: (await localCapabilities.listVoices()).filter((voice) => voice.providerId === "minimax-tts-v1"),
-  worker: buildProductionWorker({
-    repositoryRoot,
-    pythonPath,
-    environment: process.env,
-    runsRoot: path.join(workspaceRoot, "runs"),
-    visualReviewAgents,
-  }),
-  ...(screenwriterAgent ? { screenwriterAgent } : {}),
-  ...(directorAgent ? { directorAgent } : {}),
-  ...(treatmentAgents.length > 0 ? { treatmentAgents } : {}),
-  ...(briefAuditAgents.length > 0 ? { briefAuditAgents } : {}),
-  ...(publishCopyWriter ? { publishCopyWriter } : {}),
-  ...(assetSemanticRanker ? { assetSemanticRanker } : {}),
-  ...(referenceGrammarAgent ? { referenceGrammarAgent } : {}),
-  referenceVideoRoot: path.join(workspaceRoot, "uploads", "reference-videos"),
-  ...(visualReviewAgents.length > 0 ? { visualReviewAgents } : {}),
-  assetProviders: buildDirectorAssetProviders({ environment: process.env }),
-  providerRuntimeMetadata: buildProductionProviderRuntimeMetadata(process.env),
-};
-const pipeline = new ProductionPipeline(pipelineOptions);
-modelConnections.onChange = () => {
-  const assembly = assembleRoles();
-  // 保持 worker 持有的数组引用；已开始的角色调用持有自己的候选快照。
-  visualReviewAgents.splice(0, visualReviewAgents.length, ...assembly.visualReviewAgents);
-  Object.assign(pipelineOptions, assembly, { visualReviewAgents });
-  if (!assembly.screenwriterAgent) delete pipelineOptions.screenwriterAgent;
-  if (!assembly.directorAgent) delete pipelineOptions.directorAgent;
-  auditedTaskClient?.updateCandidates([...auditedTaskCandidates, ...configuredTaskCandidates()]);
-};
-// 维护门禁（R3）：部署共享目录经 bind mount 暴露；未配置时门禁停用（本地开发）。
+const development = process.env.STUDIO_DEV === "1";
+const port = Number(process.env.STUDIO_PORT ?? (development ? 4318 : 4317));
+const host = process.env.STUDIO_HOST ?? "127.0.0.1";
+const workspaceRoot = path.resolve(process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace/factory"));
+const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
 const maintenanceDirectory = process.env.VIDEO_FACTORY_MAINTENANCE_DIR?.trim();
 const maintenanceGate = new MaintenanceGate(maintenanceDirectory ? { directory: maintenanceDirectory } : {});
 await maintenanceGate.announceStartup();
-try {
-  await maintenanceGate.withAdmission("startup-recovery", () => pipeline.recoverInterruptedRuns());
-} catch (error) {
-  if (!(error instanceof StudioMaintenanceError)) throw error;
-  process.stderr.write(`Maintenance gate is ${error.state}; startup recovery is paused.\n`);
-}
-const opportunities = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities", "opportunities.json"));
-const service = new StudioService({
-  localCapabilities,
-  registeredModels: () => modelConnections.connections.map(({ model }) => model),
-  repositoryRoot,
-  workspaceRoot,
-  pipeline,
-  audioReviewObserver: soundReview,
-  opportunities,
-  codexAvailability: {
-    available: false,
-    reason: "ChatGPT/Codex 套餐已退役：全部角色改用 DeepSeek 模型。",
-    taskKinds: [],
+// 文本连接由网页设置管理（SQLite）；旧 AGENT_TEXT_CONFIG_FILE 导入已随旧供应商退役移除，
+// 不再读取该文件。不扫描个人 Pi 目录或旧项目凭据。
+const agentDataDir = process.env.AGENT_DATA_DIR ?? path.join(workspaceRoot, "agent");
+const importedFile = path.join(agentDataDir, "imported-settings.json");
+const imported: unknown = existsSync(importedFile) ? JSON.parse(readFileSync(importedFile, "utf8")) : [];
+if (!validatorFor("ImportedSettings")(imported).ok) throw new Error("导入配置文件格式不符合 ImportedSettings 契约。");
+// 供应商端口按已受理的不可变绑定路由；当前能力来自统一连接投影。
+// 旧 JSON 仅在统一设置尚未建立时作受控导入源，凭据读取仍须显式授权与精确历史匹配。
+const legacyConfigFile = process.env.AGENT_MEDIA_CONFIG_FILE?.trim() || undefined;
+const legacyAuthorized = process.env.AGENT_MEDIA_CREDENTIALS_AUTHORIZED === "1";
+const render = await localRenderAvailability();
+console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}`);
+const workRoot = path.join(agentDataDir, "media-work");
+const runtime = await maintenanceGate.withAdmission("agent-startup", () => createAgentRuntime({
+  dataDir: agentDataDir,
+  providerConnections: true,
+  importedSettings: imported as ImportedSettings,
+  skillsRoot: path.join(repositoryRoot, "apps/studio/skills"),
+  host: {}, models: [], defaultModelId: "unconfigured",
+  text: {
+    // 初始化先于 host 与队列恢复；执行版本由统一连接保存投影生成，启动不再读取旧文本配置文件。
+    factory: async (db: AgentDatabase) => {
+      initializeTextModelSettings(db, systemClock);
+      return {
+        models: () => connectedTextModels(db),
+        defaultBinding: () => defaultTextBindingOf(db),
+        resolve: binding => textRegistrationOf(db, binding),
+      };
+    },
   },
-  deepseekCodexAvailability: {
-    available: deepseekCodexSettings.available,
-    reason: deepseekCodexSettings.reason,
-    taskKinds: deepseekCodexSettings.taskKinds,
-    modelId: deepseekCodexSettings.modelId,
-    ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
-    ...(deepseekCodexSettings.modelCandidates ? { modelCandidates: deepseekCodexSettings.modelCandidates } : {}),
+  media: {
+    factory: (db: AgentDatabase, blobs: ProductionBlobs) => {
+      const legacy = legacyConfigFile ? readLegacyArkConfig(db, legacyConfigFile, legacyAuthorized) : undefined;
+      initializeArkVideoSettings(db, { clock: systemClock, ...(legacy ? { legacy } : {}) });
+      // B1/B2/M2：图片/配音走 OpenAI 或 MiniMax 通道，视频按 Ark/MiniMax/万相冻结绑定路由；
+      // 全部通道由统一连接保存投影 additional_media/ark 版本，网关不做“否则就是 Ark”的默认分支。
+      const arkPort = new ArkMediaPort(db, blobs, systemClock, { resolve: binding => resolveArkBinding(db, binding), workRoot });
+      const imagePort = new ImageGenerationPort(db, blobs, systemClock, { resolve: binding => resolveImageBinding(db, binding), workRoot });
+      const openaiSpeechPort = new OpenAISpeechPort(db, blobs, systemClock, { resolve: binding => resolveOpenAISpeechBinding(db, binding), workRoot });
+      const minimaxSpeechPort = new MiniMaxSpeechPort(db, blobs, systemClock, { resolve: binding => resolveMinimaxSpeechBinding(db, binding), workRoot });
+      const minimaxVideoPort = new MiniMaxVideoPort(db, blobs, systemClock, { resolve: binding => resolveMinimaxVideoBinding(db, binding), workRoot });
+      const wanVideoPort = new WanVideoPort(db, blobs, systemClock, { resolve: binding => resolveWanVideoBinding(db, binding), workRoot });
+      return {
+        port: new RealMediaGateway(
+          new LocalRenderPort(db, blobs, systemClock, { workRoot }),
+          {
+            resolveProviderPort: binding => {
+              if (resolveImageBinding(db, binding)) return imagePort;
+              if (resolveOpenAISpeechBinding(db, binding)) return openaiSpeechPort;
+              if (resolveMinimaxSpeechBinding(db, binding)) return minimaxSpeechPort;
+              if (resolveMinimaxVideoBinding(db, binding)) return minimaxVideoPort;
+              if (resolveWanVideoBinding(db, binding)) return wanVideoPort;
+              if (resolveArkBinding(db, binding)) return arkPort;
+              return null;
+            },
+            clock: systemClock,
+          },
+        ),
+        catalog: () => ({
+          ...arkVideoCatalog(connectedMediaEnabled(db, "video") ? readArkVideoCurrent(db) : null, render),
+          ...additionalMediaCatalog(db, render.probeAvailable),
+          ...connectedSpeechChoices(db, render.probeAvailable).catalog,
+        }),
+        models: () => {
+          const entries = additionalMediaModelViews(db, render.probeAvailable);
+          for (const entry of entries) if (entry.kind === "speech") entry.features.push("当前默认配音");
+          for (const choice of connectedSpeechChoices(db, render.probeAvailable).models) {
+            if (!entries.some(entry => entry.binding.configurationRevisionId === choice.binding.configurationRevisionId)) entries.push(choice);
+          }
+          const video = readArkVideoCurrent(db);
+          if (video && connectedMediaEnabled(db, "video")) entries.unshift(arkVideoModelView(video, render));
+          return entries;
+        },
+      };
+    },
   },
-  ...{
-    seriesPlanningAgent: new CodexSeriesPlanningAgent(
-      auditedTaskClient,
-      path.join(workspaceRoot, "checkpoints", "series-showrunner"),
-      async () => (await creatorSettings.get()).modelDefaults?.["codex-series-showrunner-v1"],
-    ),
+}));
+const app = buildFrameApp({ logger: true, ...(auth ? { auth } : {}), maintenanceGate,
+  agent: {
+    service: runtime.service, resolveOwner: () => "local-owner", localOwnerOnly: !auth,
+    uiOrigin: process.env.AGENT_UI_ORIGIN ?? `http://127.0.0.1:${port}`,
   },
-  // 发布文案 AI 修订与主动再审复用同一个带首审合同的发布编辑 writer：
-  // revise 走单次 publish-copy 任务（零审计），auditCurrent 走单次 role-audit（零产稿）。
-  ...(publishCopyWriter ? { documentCopyTools: publishCopyWriter } : {}),
-  referenceGrammarTools: referenceGrammarAgent,
-  ...{
-    trendAgent: new TrendOpportunityAgent({
-      signals: new TrendGateway({ environment: process.env }),
-      articleReader: new TrendArticleReader({ cacheRoot: path.join(workspaceRoot, "cache", "trend-articles") }),
-      model: new CodexTopicIdeaModel(
-        auditedTaskClient,
-        path.join(workspaceRoot, "checkpoints", "topic-editor"),
-        async () => (await creatorSettings.get()).modelDefaults?.["api-topic-editor-v1"],
-      ),
-      strategy: async () => (await creatorSettings.get()).topicStrategy,
-    }),
-  },
-  creatorSettings,
 });
-const development = process.env.STUDIO_DEV === "1";
-const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
-const app = buildStudioApp({ service, modelConnections, logger: true, ...(auth ? { auth } : {}), maintenanceGate,
-  maintenanceIntegrity: async () => {
-    const reports = await Promise.all([pipeline.maintenanceIntegrity(), readPlanningMaintenanceIntegrity(workspaceRoot)]);
-    return { complete: reports.every((report) => report.complete), issues: reports.flatMap((report) => report.issues) };
-  },
-});
-installStudioLifecycle({
-  app,
-  maintenanceGate,
-  recoverInterruptedRuns: () => pipeline.recoverInterruptedRuns(),
-  activeWork: () => service.activeWork(),
-});
-
-if (!development) {
-  await app.register(fastifyStatic, {
-    root: path.join(repositoryRoot, "apps", "studio", "dist", "client"),
-    wildcard: false,
-  });
+app.addHook("onClose", runtime.close);
+const distDir = path.join(repositoryRoot, "apps/studio/dist/client");
+if (existsSync(distDir)) {
+  await app.register(fastifyStatic, { root: distDir, wildcard: false });
   app.setNotFoundHandler((request, reply) => {
-    if (request.url.startsWith("/api/")) {
-      return reply.code(404).send({ error: "API route was not found." });
-    }
-    if (request.url === "/favicon.ico") {
-      return reply.code(204).send();
-    }
+    if (request.method !== "GET" || request.url.startsWith("/api/")) return reply.code(404).send({ error: "未找到资源。" });
     return reply.sendFile("index.html");
   });
 }
-
-const port = Number(process.env.STUDIO_PORT ?? (development ? 4318 : 4317));
-const host = process.env.STUDIO_HOST ?? "127.0.0.1";
-await app.listen({ host, port });
-
-function loadLocalEnvironment(repositoryRoot: string): void {
-  try {
-    loadEnvFile(path.join(repositoryRoot, ".env"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
+let closing = false;
+const shutdown = () => {
+  if (closing) return;
+  closing = true;
+  void app.close().catch(() => { process.exitCode = 1; app.log.error("Frame shutdown failed."); });
+};
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+await app.listen({ port, host });
 
 async function findRepositoryRoot(start: string): Promise<string> {
   let current = path.resolve(start);
   while (true) {
-    try {
-      await access(path.join(current, "packages", "production-pipeline", "package.json"));
-      await access(path.join(current, "src", "video_factory"));
-      return current;
-    } catch {
+    try { await access(path.join(current, "apps/studio/package.json")); return current; }
+    catch {
       const parent = path.dirname(current);
-      if (parent === current) {
-        throw new Error(`Could not locate the VideoFactory repository above '${start}'.`);
-      }
+      if (parent === current) throw new Error(`Could not locate the Frame repository above '${start}'.`);
       current = parent;
     }
   }

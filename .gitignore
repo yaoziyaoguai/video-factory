@@ -22,13 +22,16 @@ tmp/
 .ua/
 graphify-out/
 
-# 公开文档只包含产品、使用与运维说明；历史研发记录与现场证据保留本地。
+# 仅发布维护者与用户需要的文档；执行包、现场记录和证据保留本机。
 docs/*
+!docs/agent/
+docs/agent/*
+!docs/agent/architecture.md
+!docs/agent/product-design.md
 !docs/guides/
 docs/guides/*
-!docs/guides/production-deployment.md
-!docs/guides/stock-sources.md
-!docs/guides/model-configuration.md
-!docs/guides/production-workflow.md
-!docs/guides/production-overview.md
-!docs/guides/production-overview.html
+!docs/guides/deployment.md
+!docs/过期文档/
+docs/过期文档/本机资料/
+apps/studio/test/evidence/
+contracts/agent/v1/evidence/

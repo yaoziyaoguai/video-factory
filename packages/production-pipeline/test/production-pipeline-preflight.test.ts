@@ -10,8 +10,6 @@ import type { CharacterScript } from "../src/character-script.js";
 import type { NarrationVisualDirectorPlan } from "../src/visual-director.js";
 import { contentSha256 } from "../src/creative-review.js";
 import { FileRunStore } from "../src/run-store.js";
-import { ProductionStudio } from "../../../apps/studio/src/server/production-studio.js";
-import { JsonRunArchiveStore } from "../../../apps/studio/src/server/run-archive-store.js";
 import { ProductionPipeline as StudioPipeline } from "@video-factory/production-pipeline";
 import {
   ProductionPipeline,
@@ -321,105 +319,6 @@ describe("ProductionPipeline production preflight", () => {
       assert.equal(worker.requests.filter(call => call.capability === "voice.synthesize").length, 1);
     });
   }
-
-  it("T11 does not project a voice timeline with corrupt bytes or a mismatched plan version", async () => {
-    const { pipeline, run, workspaceRoot } = await contentLedVoiceConflict();
-    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
-      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
-    assert.equal((await studio.get(run.id))?.voiceTimingPlan?.totalFrames, 945);
-    const artifact = run.artifacts.find(item => item.kind === "executable_plan")!;
-    const original = await readFile(artifact.uri!);
-    await writeFile(artifact.uri!, Buffer.concat([original, Buffer.from(" ")]));
-    assert.equal((await studio.get(run.id))?.voiceTimingPlan, undefined, "坏SHA不回退为参考目标");
-    await writeFile(artifact.uri!, original);
-    assert.equal((await studio.get(run.id))?.voiceTimingPlan?.totalFrames, 945);
-    // 明确损坏负例：只改变磁盘证据声明，不用于成功链或批准。
-    const store = new FileRunStore(path.join(workspaceRoot, "runs"));
-    const invalid = await pipeline.show(run.id);
-    invalid.artifacts.find(item => item.id === artifact.id)!.schemaVersion = "video-factory/executable-plan-v1";
-    await store.checkpoint(invalid);
-    assert.equal((await studio.get(run.id))?.voiceTimingPlan, undefined);
-  });
-
-  it("T06 reports a saved timing amendment when continuation fails, without allowing the old command twice", async () => {
-    const { pipeline, worker, run, workspaceRoot } = await contentLedVoiceConflict({ maxSeconds: 32 }, true);
-    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
-      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
-    const published: number[] = [];
-    const unsubscribe = studio.subscribe(run.id, detail => published.push(detail.revision));
-    const voice = run.nodeRuns.find(node => node.nodeId === "voice")!;
-    const input = { expectedRunRevision: run.revision, interventionId: voice.intervention!.id,
-      scenePosition: 1, durationSeconds: 12, actor: "editor",
-      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } };
-    const calls = worker.requests.length;
-    await assert.rejects(() => studio.decide(run.id, { action: "request_changes", expectedRunRevision: run.revision,
-      interventionId: input.interventionId, reviewEvidenceId: null,
-      voiceTiming: { scenePosition: input.scenePosition, durationSeconds: input.durationSeconds,
-        durationAmendment: input.durationAmendment } }, input.actor), /时长调整已保存/);
-    const accepted = await pipeline.show(run.id);
-    assert.equal(accepted.initialInput.durationRange, undefined);
-    assert.deepEqual(published, [accepted.revision], "保存后失败仍通知界面新的有效状态");
-    unsubscribe();
-    assert.equal(accepted.decisions.at(-1)?.interventionId, voice.intervention!.id);
-    const planPath = String((accepted.nodeRuns.find(node => node.nodeId === "production-preflight")!.output as Record<string, unknown>).executablePlanPath);
-    assert.equal(JSON.parse(await readFile(planPath, "utf8")).totalFrames, 1005);
-    assert.equal(worker.requests.length, calls, "后继受控中断前不能新增任何制作请求");
-    await assert.rejects(() => pipeline.requestVoiceTimingRevision(run.id, input), /revision|版本/i);
-    assert.equal(worker.requests.length, calls);
-  });
-
-  for (const joint of [false, true]) for (const range of [null, { maxSeconds: 40 }]) it(`T06 atomically amends the voice plan commitment (${joint ? "joint" : "preflight"}, ${range === null ? "clear" : "replace"})`, async () => {
-    const { pipeline, worker, run, workspaceRoot } = await contentLedVoiceConflict({ maxSeconds: 32 }, false, joint);
-    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
-      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
-    const shown = (await studio.get(run.id))!;
-    assert.equal(shown.durationIntent?.briefSha256, contentSha256(run.initialInput));
-    assert.deepEqual(shown.durationIntent?.commitment, { maxSeconds: 32 });
-    assert.equal(shown.voiceTimingPlan?.totalFrames, 945);
-    assert.deepEqual(shown.voiceTimingPlan?.cuts.map(cut => cut.frameCount), [300, 300, 345]);
-    const voice = run.nodeRuns.find(node => node.nodeId === "voice")!;
-    const input = { expectedRunRevision: run.revision, interventionId: voice.intervention!.id,
-      scenePosition: 1, durationSeconds: 12, actor: "editor" };
-    const before = JSON.stringify(await pipeline.show(run.id));
-    const calls = worker.requests.length;
-    await assert.rejects(() => pipeline.requestVoiceTimingRevision(run.id, input), /时长|冲突|duration/i);
-    assert.equal(JSON.stringify(await pipeline.show(run.id)), before);
-    assert.equal(worker.requests.length, calls);
-    await assert.rejects(() => pipeline.requestVoiceTimingRevision(run.id, { ...input,
-      durationAmendment: { expectedBriefSha256: "f".repeat(64), range } }), /当前|版本|身份|SHA/);
-    assert.equal(JSON.stringify(await pipeline.show(run.id)), before);
-    await studio.decide(run.id, { action: "request_changes", expectedRunRevision: run.revision,
-      interventionId: input.interventionId, reviewEvidenceId: null,
-      voiceTiming: { scenePosition: input.scenePosition, durationSeconds: input.durationSeconds,
-        durationAmendment: { expectedBriefSha256: shown.durationIntent!.briefSha256, range } } }, input.actor);
-    const revised = await pipeline.show(run.id);
-    assert.equal(revised.status, "needs_human");
-    assert.deepEqual(revised.initialInput.durationRange, range ?? undefined);
-    assert.equal(revised.initialInput.durationPolicy, "content-led-v1");
-    const owner = revised.nodeRuns.find(node => node.nodeId === (joint ? "creative-planning" : "production-preflight"))!;
-    if (joint) {
-      const oldInput = run.nodeRuns.find(node => node.nodeId === "creative-planning")!.inputState!;
-      const newInput = owner.inputState!;
-      const effectiveInput = newInput.versions.find(version => version.id === newInput.effectiveVersionId)!;
-      assert.notEqual(newInput.effectiveVersionId, oldInput.effectiveVersionId);
-      assert.equal(effectiveInput.parentVersionId, oldInput.effectiveVersionId);
-      assert.deepEqual((effectiveInput.value as { brief: unknown }).brief, revised.initialInput);
-      assert.deepEqual(newInput.versions.filter(version => version.id !== effectiveInput.id), oldInput.versions,
-        "新的有效输入不得回写旧规划合同历史");
-      assert.equal((await studio.get(run.id))!.durationIntent!.briefSha256, contentSha256(revised.initialInput));
-    }
-    const plan = JSON.parse(await readFile(String((owner.output as Record<string, unknown>).executablePlanPath), "utf8"));
-    assert.equal(plan.version, "video-factory/executable-plan-v2");
-    assert.equal(plan.totalFrames, 1005);
-    assert.deepEqual(plan.durationRange, range ?? undefined);
-    assert.equal(Object.hasOwn(revised.initialInput, "durationRange"), range !== null);
-    assert.equal(Object.hasOwn(plan, "durationRange"), range !== null);
-    const settledCalls = worker.requests.length;
-    await assert.rejects(() => pipeline.requestVoiceTimingRevision(run.id, { ...input,
-      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range } }), /revision|版本/i);
-    assert.equal(worker.requests.length, settledCalls);
-    assert.ok(revised.artifacts.some(artifact => artifact.id === voice.artifactIds[0]));
-  });
 
   it("T06 extends a content-led voice cut beyond the reference without a hidden range", async () => {
     const { pipeline, worker, run } = await contentLedVoiceConflict();

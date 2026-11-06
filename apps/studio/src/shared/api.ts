@@ -85,7 +85,7 @@ import type {
   RelayoutNarrationSource as StudioRelayoutNarrationSource,
 } from "@video-factory/production-pipeline";
 // parseNarrationRelayoutRequest 属服务端校验（依赖包内 Node 模块）；
-// 由 server/narration-revision-input.ts 导入，客户端 bundle 不引入包根。
+// 现由旧服务链之外无消费者，仅保留类型面；客户端 bundle 不引入包根。
 export type { StudioNarrationRelayoutRequest, StudioRelayoutNarrationSource };
 export type {
   NarrationConfirmReceiptV2 as StudioNarrationConfirmReceiptV2,
@@ -3032,7 +3032,7 @@ export function parseStudioSceneResourceRevisionInput(value: unknown): StudioSce
   };
 }
 
-// parseStudioNarrationRevisionInput 已移至 server/narration-revision-input.ts（服务端校验）。
+// parseStudioNarrationRevisionInput 的旧服务端校验入口已随旧服务链退役删除；此处仅保留共享类型。
 
 
 export function parseStudioVisualReinspectionInput(value: unknown): StudioVisualReinspectionInput {

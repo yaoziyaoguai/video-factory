@@ -1,0 +1,12 @@
+:root { color-scheme:light; --bg:#f5f7f5; --surface:#fff; --text:#293a32; --muted:#758478; --border:#dce5dc; --accent:#396e54; --shadow:0 16px 56px #233d2910; --radius-lg:14px; --font-body:"Noto Sans SC Variable",sans-serif; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:var(--font-body); color:var(--text); background:white; }
+button,input,textarea,select { font:inherit; }
+button { cursor:pointer; }
+button:disabled { cursor:default; }
+button:focus-visible,a:focus-visible,input:focus-visible { outline:2px solid #43836a; outline-offset:3px; }
+#root { min-height:100dvh; }
+
+:root { --ink:var(--text); --canvas:var(--bg); --canvas-grid:#eaf0e9; --paper:var(--surface); --line:var(--border); --shadow-raised:var(--shadow); --font-editorial:"Noto Serif SC Variable",serif; --control-border:var(--border); --field-radius:6px; --field-shadow:none; --focus:#43836a; --focus-soft:#e7efe8; --action:var(--accent); --action-ink:#fff; --action-hover:#2b6149; --red:#a64545; }
+.auth-mark { background:#2f634a; }
+.auth-error-panel .button { padding:10px 16px; border:1px solid #b9ccbb; border-radius:6px; color:#366547; background:#f0f6ee; }

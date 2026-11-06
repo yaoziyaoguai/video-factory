@@ -21,15 +21,12 @@ import {
   type VisualReviewReport,
 } from "../../../packages/production-pipeline/src/codex-visual-review.js";
 import {
-  summarizeProductionCapabilities,
   type ProductionCapabilities,
 } from "../../../packages/production-pipeline/src/production-capabilities.js";
-import type { VisualDirectorAgentInput } from "../../../packages/production-pipeline/src/visual-director.js";
 import {
   TOPIC_IDEAS_STRATEGY_MAX_LENGTH,
   topicIdeasModelPayload,
 } from "../../studio/src/server/topic-ideas-payload.js";
-import { reviewedVideoModelCatalog } from "../../studio/src/server/video-provider-settings.js";
 import { legalCreativeTreatmentOutput } from "./fixtures/creative-treatment.js";
 
 const IDENTITY = {
@@ -609,159 +606,5 @@ describe("visual-review adapter × Broker parser", () => {
 
     assert.equal(result.output.recommendation, "approve");
     assert.deepEqual(parsedKinds, ["visual-review", "role-audit"]);
-  });
-});
-
-class RejectAfterParseClient extends CodexBridgeClient {
-  readonly calls: Array<ReturnType<typeof parseTaskRequest>> = [];
-
-  constructor() {
-    super({ socketPath: "/nonexistent/formal-capability-matrix.sock", sleep: async () => undefined });
-  }
-
-  override async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
-    this.calls.push(parseTaskRequest(envelope(kind, payload, {
-      expectedContractDigest: taskContractDescriptorFor(kind).digest,
-    }), CORE_IDENTITY));
-    throw new Error("stop-after-formal-parser");
-  }
-}
-
-function officialCapabilityScenarios(): Array<{ label: string; capabilities: ProductionCapabilities }> {
-  const catalog = reviewedVideoModelCatalog({});
-  const profiles = Object.entries(catalog).flatMap(([providerId, models]) => models.map((model) => ({
-    providerId,
-    model,
-  })));
-  assert.ok(profiles.length > 0);
-  for (const { model } of profiles) {
-    assert.ok(model.id);
-    assert.ok(model.taskTypes.length > 0);
-    assert.ok(model.resolutions.length > 0);
-    assert.ok(model.aspectRatios.length > 0);
-    assert.ok(model.minDurationSeconds > 0);
-    assert.ok(model.maxDurationSeconds >= model.minDurationSeconds);
-  }
-  const capability = ({ providerId, model }: (typeof profiles)[number]) => ({
-    id: providerId,
-    deliveryTypes: ["generated_video"],
-    supportsReferenceImage: model.taskTypes.includes("image-to-video"),
-    strengths: ["正式目录声明的视频生成能力"],
-    constraints: ["合成画面不得作为事实证据"],
-    selectedModelId: model.id,
-    minDurationSeconds: model.minDurationSeconds,
-    maxDurationSeconds: model.maxDurationSeconds,
-    aspectRatios: model.aspectRatios,
-  });
-  const recommended = Object.entries(catalog).map(([providerId, models]) => ({
-    providerId,
-    model: models.find((model) => model.recommended) ?? models[0]!,
-  }));
-  return [
-    { label: "empty", capabilities: summarizeProductionCapabilities([]) },
-    ...profiles.map((profile) => ({
-      label: `${profile.providerId}/${profile.model.id}`,
-      capabilities: summarizeProductionCapabilities([capability(profile)]),
-    })),
-    { label: "mixed-recommended", capabilities: summarizeProductionCapabilities(recommended.map(capability)) },
-  ];
-}
-
-function directorInputForCapabilities(capabilities: ProductionCapabilities): VisualDirectorAgentInput {
-  return {
-    brief: {
-      title: "正式能力合同矩阵",
-      angle: "用当前能力目录规划可执行画面",
-      audience: "普通观众",
-      platform: "douyin",
-      durationSeconds: 24,
-      durationRange: { minSeconds: 20, maxSeconds: 34 },
-      productionCapabilities: capabilities,
-    },
-    scenes: [{
-      position: 1,
-      narration: "先展示一个可观察动作。",
-      duration: 24,
-      visualPrompt: "可观察动作的竖屏画面",
-      visualStrategy: "generated",
-      visibleAction: "主体完成一个清晰动作",
-      successCriteria: ["动作可见"],
-      failureConditions: ["动作不可辨认"],
-      searchTerms: [],
-    }],
-    assetProviders: capabilities.assetProviders.map((provider) => ({
-      id: provider.id,
-      label: provider.id,
-      billing: "metered" as const,
-      modes: ["AI 视频"],
-      deliveryTypes: provider.deliveryTypes as VisualDirectorAgentInput["assetProviders"][number]["deliveryTypes"],
-      supportsReferenceImage: provider.supportsReferenceImage,
-      strengths: [...provider.strengths],
-      constraints: [...provider.constraints],
-      estimatedCnyPerClip: 1,
-      ...(provider.selectedModelId ? { selectedModelId: provider.selectedModelId } : {}),
-      ...(provider.minDurationSeconds !== undefined ? { minDurationSeconds: provider.minDurationSeconds } : {}),
-      ...(provider.maxDurationSeconds !== undefined ? { maxDurationSeconds: provider.maxDurationSeconds } : {}),
-      ...(provider.aspectRatios ? { aspectRatios: [...provider.aspectRatios] } : {}),
-    })),
-    economics: { allowMeteredProviders: true },
-    planningMode: true,
-  };
-}
-
-describe("official Provider capability catalog × all planning adapters × Broker parser", () => {
-  it("accepts empty, every declared model profile, and mixed capabilities for treatment, script, and director", async () => {
-    for (const { label, capabilities } of officialCapabilityScenarios()) {
-      const treatmentClient = new RejectAfterParseClient();
-      await assert.rejects(
-        new CodexCreativeTreatmentAgent({ client: treatmentClient, maxReviewIterations: 1 }).treatDetailed({
-          brief: {
-            title: "正式能力合同矩阵",
-            angle: "用当前能力目录规划可执行画面",
-            audience: "普通观众",
-            nicheSlug: "capability-contract",
-            platform: "douyin",
-            durationSeconds: 24,
-            durationRange: { minSeconds: 20, maxSeconds: 34 },
-            productionCapabilities: capabilities,
-          },
-          suppliedSources: [],
-          planningMode: true,
-        }),
-        /stop-after-formal-parser/,
-        label,
-      );
-      assert.deepEqual(treatmentClient.calls.map((call) => call.kind), ["creative-treatment"], label);
-
-      const scriptClient = new RejectAfterParseClient();
-      await assert.rejects(
-        new CodexScreenwriterAgent({ client: scriptClient, maxReviewIterations: 1 }).draftDetailed({
-          brief: {
-            title: "正式能力合同矩阵",
-            angle: "用当前能力目录规划可执行画面",
-            audience: "普通观众",
-            nicheSlug: "capability-contract",
-            platform: "douyin",
-            durationSeconds: 24,
-            durationRange: { minSeconds: 20, maxSeconds: 34 },
-            productionCapabilities: capabilities,
-          },
-          planningMode: true,
-        }),
-        /stop-after-formal-parser/,
-        label,
-      );
-      assert.deepEqual(scriptClient.calls.map((call) => call.kind), ["script-draft"], label);
-
-      const directorClient = new RejectAfterParseClient();
-      await assert.rejects(
-        new CodexVisualDirectorAgent({ client: directorClient, maxReviewIterations: 1 }).planDetailed(
-          directorInputForCapabilities(capabilities),
-        ),
-        /stop-after-formal-parser/,
-        label,
-      );
-      assert.deepEqual(directorClient.calls.map((call) => call.kind), ["director-plan"], label);
-    }
   });
 });

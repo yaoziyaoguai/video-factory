@@ -33,8 +33,6 @@
 .auth-error-panel .button { margin-top: 24px; }
 .auth-spinner { width: 30px; height: 30px; color: var(--action); animation: auth-spin .8s linear infinite; }
 .auth-spinner-inline { animation: auth-spin .8s linear infinite; }
-.studio-logout { min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 0; color: var(--muted); background: transparent; font: inherit; cursor: pointer; }
-.studio-logout:hover { color: var(--ink); }
 .auth-filmboard { min-width: 0; display: flex; background: #151b1e; }
 .auth-frame { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; margin: 0; }
 .auth-frame::after { content: ""; position: absolute; inset: 18px; border: 1px solid rgb(255 255 255 / 28%); pointer-events: none; }
