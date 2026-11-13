@@ -78,7 +78,9 @@ export function offlineScenarioFactory(options: { selfAppend: () => void }): Fau
         // 提案走配音：B04 后视频终稿必须落在已正式开始的事项上，离线回放没有这一步；
         // 模拟配音只需绑定脚本即可全流程验证 准备→确认→后台→交付。工具入参按合同不带定价字段。
         return fauxAssistantMessage([fauxToolCall("prepare_production", { spec: {
-          workId: null, title: "模拟配音", inputRevisions: [{ artifactId: revision.artifactId, revisionId: revision.revisionId }],
+          workId: null, title: "模拟配音",
+          inputSources: [{ kind: "artifact_revision", artifactId: revision.artifactId, revisionId: revision.revisionId, digest: revision.digest }],
+          reviewInputs: [], purpose: "production", scope: "离线模拟配音全流程验证",
           operations: [{ operationId: "speech-1", outputSlot: "voiceTrack", kind: "speech",
             model: { providerId: "fixture-text", modelId: "faux-speech", connectionId: "offline-fixture", configurationRevisionId: "increment-a-offline" },
             inputs: [{ kind: "artifact_revision", artifactId: revision.artifactId, revisionId: revision.revisionId, digest: revision.digest }],

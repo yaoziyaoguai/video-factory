@@ -21,10 +21,16 @@ export async function hydrateReferences(messages: Message[], known: ReferenceEnt
   // 修订正文不可变；head、提案和制作状态会变化，重连时仅重核已加载的对象。
   const runIds = new Set([...messages.flatMap(message => message.references.runIds), ...(refresh.runs ?? [])]);
   await Promise.all([...runIds].filter(id => !runs.has(id) || refresh.runs?.includes(id)).map(id => read(`run:${id}`, () => agentApi.readRun(id), item => { runs.set(id, item); })));
-  const proposalIds = new Set([...messages.flatMap(message => message.references.proposalIds), ...[...runs.values()].map(run => run.proposalId), ...(refresh.proposals ?? [])]);
+  const proposalIds = new Set([...messages.flatMap(message => message.references.proposalIds),
+    ...[...runs.values()].flatMap(run => run.origin.kind === "proposal" ? [run.origin.proposalId] : []),
+    ...(refresh.proposals ?? [])]);
   await Promise.all([...proposalIds].filter(id => !proposals.has(id) || refresh.proposals?.includes(id)).map(id => read(`proposal:${id}`, () => agentApi.readProposal(id), item => { proposals.set(id, item); })));
+  // 新 spec 的输入沿 inputSources 的产物修订；历史快照仍按 inputRevisions 解释。
+  const specInputRefs = [...proposals.values()].flatMap(proposal => "inputSources" in proposal.spec
+    ? proposal.spec.inputSources.filter((source): source is Extract<typeof source, { kind: "artifact_revision" }> => source.kind === "artifact_revision")
+    : proposal.spec.inputRevisions);
   const refs = new Map([...messages.flatMap(message => message.references.artifacts),
-    ...[...proposals.values()].flatMap(proposal => proposal.spec.inputRevisions),
+    ...specInputRefs,
     ...[...runs.values()].flatMap(run => run.outputRevisions)].map(ref => [`${ref.artifactId}:${ref.revisionId}`, ref]));
   await Promise.all([
     ...[...new Set([...refs.values()].map(ref => ref.artifactId).concat(refresh.artifacts ?? []))].filter(id => !artifacts.has(id) || refresh.artifacts?.includes(id))

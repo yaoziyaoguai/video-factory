@@ -5,12 +5,12 @@ import type { MessageRow } from "./conversation-store.js";
 import { canonicalJson, newAgentId } from "./util.js";
 import type { WorkFeedbackView } from "../../shared/agent/ports.js";
 import type {
-  ContentSource, ContentSourceInput, Proposal, Target, Work, WorkStage, WorkStageView,
+  ContentSource, ContentSourceInput, ReviewRole, Target, Work,
 } from "../../shared/agent/generated/contracts.js";
 
-// 视频创作事项：三个阶段（内容、画面/声音方案、视频初稿）的最小持久事实。
+// 视频创作事项：审阅组（角色/背景/分镜…）与组内事项的最小持久事实。
 // 只在用户正式开始一条视频时建立；普通聊天和独立文稿不创建事项。
-// 阶段认可保存“认可了哪份不可变对象”与“本次真实用户动作来源”，不把两者混为一个字段。
+// 认可保存“认可了哪份不可变对象”与“本次真实用户动作来源”，不把两者混为一个字段。
 
 export interface WorkRow {
   id: string;
@@ -23,48 +23,40 @@ export interface WorkRow {
   updated_at: string;
 }
 
-export interface StageState {
+// 存储形状与契约 ReviewGroup/ReviewItem 同构；approved 三字段同空同有。
+export interface StoredReviewItem {
+  id: string;
+  label: string;
+  role: ReviewRole;
+  required: boolean;
   draft: ContentSource | null;
   approved: ContentSource | null;
-  approvedAt: string | null;
   confirmationId: string | null;
-  proposalId: string | null;
-  runId: string | null;
+  approvedAt: string | null;
+}
+
+export interface StoredReviewGroup {
+  id: string;
+  title: string;
+  revision: number;
+  items: StoredReviewItem[];
+  nextIntent: string | null;
 }
 
 export interface CreationState {
-  stage: WorkStage;
-  content: StageState;
-  plan: StageState;
-  video: StageState;
+  groups: StoredReviewGroup[];
 }
 
-export interface CreationBinding {
-  workId: string;
-  stage: WorkStage;
-  source: ContentSource | null;
-  proposalRef: { proposalId: string; digest: string } | null;
-}
-
-export type StageConfirmationAction = "approve_content" | "approve_content_continue" | "approve_plan" | "finalize_video";
-
-const emptyStage = (): StageState => ({
-  draft: null, approved: null, approvedAt: null, confirmationId: null, proposalId: null, runId: null,
-});
+export type ReviewAction = "approve" | "approve_and_continue" | "finalize_video";
 
 export function emptyCreationState(): CreationState {
-  return { stage: "content", content: emptyStage(), plan: emptyStage(), video: emptyStage() };
+  return { groups: [] };
 }
 
 export function parseCreationState(row: Pick<WorkRow, "creation_state_json">): CreationState {
   if (!row.creation_state_json) return emptyCreationState();
   const stored = JSON.parse(row.creation_state_json) as Partial<CreationState>;
-  return {
-    stage: stored.stage ?? "content",
-    content: { ...emptyStage(), ...stored.content },
-    plan: { ...emptyStage(), ...stored.plan },
-    video: { ...emptyStage(), ...stored.video },
-  };
+  return { groups: Array.isArray(stored.groups) ? stored.groups : [] };
 }
 
 export function getWorkRow(db: AgentDatabase, ownerId: string, workId: string): WorkRow | undefined {
@@ -84,10 +76,9 @@ export function createWork(
   title: string,
 ): WorkRow {
   const id = newAgentId("work");
-  const state = emptyCreationState();
   db.prepare(
     "INSERT INTO works(id, owner_id, conversation_id, title, creation_state_json, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-  ).run(id, scope.ownerId, scope.conversationId, title, canonicalJson(state), now, now);
+  ).run(id, scope.ownerId, scope.conversationId, title, canonicalJson(emptyCreationState()), now, now);
   insertEvent(db, now, {
     conversationId: scope.conversationId, ownerId: scope.ownerId,
     kind: "work.changed", entityId: id, entityVersion: 1,
@@ -117,6 +108,7 @@ export function sameContentSource(left: ContentSource | null, right: ContentSour
 }
 
 // 在途制作判定（queued 起即冻结，终结后放行）；与 production_runs 的在途唯一索引同一状态集合。
+// 冻结只约束新的制作受理；后继草稿保存与独立认可不因此阻塞（§4.2.1）。
 export function workInFlight(db: AgentDatabase, workId: string): boolean {
   return Boolean(db.prepare(
     "SELECT id FROM production_runs WHERE work_id = ? AND state IN ('queued','running','unknown','cancel_requested') LIMIT 1",
@@ -129,10 +121,8 @@ export function resolveContentSource(
   db: AgentDatabase,
   scope: { ownerId: string; conversationId: string },
   source: ContentSourceInput,
-  role: "content" | "plan" | "video",
 ): ContentSource {
   if (source.kind === "message_text") {
-    if (role !== "content") throw new AgentError("INVALID_INPUT", "方案与成片认可只能指向真实产物修订。");
     const message = db.prepare("SELECT * FROM messages WHERE id = ? AND owner_id = ?").get(source.messageId, scope.ownerId) as MessageRow | undefined;
     if (!message || message.conversation_id !== scope.conversationId) throw new AgentError("NOT_FOUND", "引用的消息不存在或不属于当前会话。");
     if (message.role !== "user" && message.role !== "assistant") throw new AgentError("INVALID_INPUT", "引用消息必须是一条真实用户或助手消息。");
@@ -148,231 +138,190 @@ export function resolveContentSource(
   return { kind: "artifact_revision", artifactId: source.artifactId, revisionId: source.revisionId, digest: source.digest };
 }
 
-function revisionBinding(db: AgentDatabase, artifactId: string, revisionId: string): CreationBinding | null {
+function revisionBindingJson(db: AgentDatabase, artifactId: string, revisionId: string): unknown | null {
   const row = db.prepare("SELECT creation_binding_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
     .get(artifactId, revisionId) as { creation_binding_json: string | null } | undefined;
-  return row?.creation_binding_json ? JSON.parse(row.creation_binding_json) as CreationBinding : null;
+  return row?.creation_binding_json ? JSON.parse(row.creation_binding_json) : null;
 }
 
-function requireWorkRevision(
-  db: AgentDatabase,
-  scope: { ownerId: string; conversationId: string },
-  workId: string,
-  source: ContentSource,
-  stage: WorkStage,
-): void {
-  if (source.kind !== "artifact_revision") throw new AgentError("INVALID_INPUT", "方案与成片认可只能指向真实产物修订。");
-  const binding = revisionBinding(db, source.artifactId, source.revisionId);
-  if (!binding || binding.workId !== workId || binding.stage !== stage) {
-    throw new AgentError("INVALID_INPUT", `这份修订不是该视频的${stage === "plan" ? "画面/声音方案" : "视频初稿"}主稿。`);
-  }
-  const artifact = db.prepare("SELECT kind FROM artifacts WHERE id = ? AND owner_id = ? AND conversation_id = ?")
-    .get(source.artifactId, scope.ownerId, scope.conversationId) as { kind: string } | undefined;
-  if (!artifact) throw new AgentError("NOT_FOUND", "引用的产物不存在。");
-  if (stage === "video" && artifact.kind !== "video") throw new AgentError("INVALID_INPUT", "定稿只能指向真实视频产物。");
-  if (stage === "plan" && !["script", "analysis", "prompt"].includes(artifact.kind)) throw new AgentError("INVALID_INPUT", "方案主稿必须是文本产物。");
+// 历史修订的旧固定阶段 binding（只读）：受理/失效核对旧提案时使用。
+export function legacyRevisionStageBinding(db: AgentDatabase, artifactId: string, revisionId: string): { workId: string; stage: string; source: ContentSource | null } | null {
+  const binding = revisionBindingJson(db, artifactId, revisionId);
+  if (!binding || typeof binding !== "object" || !("stage" in binding)) return null;
+  return binding as { workId: string; stage: string; source: ContentSource | null };
 }
 
-export interface StageConfirmationInput {
+export interface ReviewConfirmationInput {
   workId: string;
-  action: StageConfirmationAction;
-  subject: ContentSourceInput;
-  sourceKind: "user_message" | "proposal_accept";
-  sourceId: string;
+  groupId: string;
+  items: { itemId: string; source: ContentSourceInput }[];
+  action: ReviewAction;
 }
 
-// Pi 工具、按钮与制作受理共用的认可内核。只记录用户已经表达的认可，
-// 不推进未明确要求的下一阶段工作，也不产生制作运行。
-export function recordStageConfirmation(
+export type ConfirmationOrigin =
+  | { kind: "user_message"; messageId: string }
+  | { kind: "pi_tool"; sourceId: string };
+
+export interface RecordedReviewItem {
+  itemId: string;
+  confirmationId: string;
+  duplicate: boolean;
+}
+
+// 按钮与 Pi confirm_review 工具共用的认可内核：只记录用户已经表达的认可，
+// 不排模型请求、不推进未明确要求的下一组工作，也不产生制作运行。
+// 在途制作不阻塞认可（§4.2.1）；新制作受理由 production_runs 的在途唯一索引约束。
+export function recordReviewConfirmation(
   db: AgentDatabase,
   now: string,
   scope: { ownerId: string; conversationId: string },
-  input: StageConfirmationInput,
-): { confirmationId: string; work: WorkRow; duplicate: boolean } {
+  input: ReviewConfirmationInput,
+  origin: ConfirmationOrigin,
+): { items: RecordedReviewItem[]; work: WorkRow } {
   const work = requireWork(db, scope.ownerId, scope.conversationId, input.workId);
   const state = parseCreationState(work);
-  const stage: WorkStage = input.action === "approve_plan" ? "plan" : input.action === "finalize_video" ? "video" : "content";
-  if (input.action === "approve_plan" && state.stage === "content") {
-    throw new AgentError("INVALID_INPUT", "内容尚未认可并进入画面阶段，不能先认可方案。");
-  }
-  if (input.action === "finalize_video" && state.stage !== "video") {
-    throw new AgentError("INVALID_INPUT", "还没有可定稿的视频初稿。");
-  }
-  const subject = resolveContentSource(db, scope, input.subject, stage);
-  if (stage === "content") {
-    if (subject.kind === "artifact_revision") {
-      const binding = revisionBinding(db, subject.artifactId, subject.revisionId);
-      const artifact = db.prepare("SELECT kind FROM artifacts WHERE id = ?").get(subject.artifactId) as { kind: string } | undefined;
-      if (!artifact || !["script", "prompt", "analysis"].includes(artifact.kind)) throw new AgentError("INVALID_INPUT", "内容认可必须指向文本稿件或聊天原文。");
-      if (binding && (binding.workId !== work.id || binding.stage !== "content")) throw new AgentError("INVALID_INPUT", "这份修订属于其他视频或阶段，不能作为本条视频的内容。");
-    }
-  } else {
-    requireWorkRevision(db, scope, work.id, subject, stage);
-  }
-  const prior = db.prepare(
-    "SELECT * FROM work_stage_confirmations WHERE work_id = ? AND stage = ? AND action = ? AND subject_json = ? AND source_kind = ? AND source_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-  ).get(work.id, stage, input.action, canonicalJson(subject), input.sourceKind, input.sourceId) as { id: string } | undefined;
-  if (prior) return { confirmationId: prior.id, work, duplicate: true };
+  const group = state.groups.find(item => item.id === input.groupId);
+  if (!group) throw new AgentError("NOT_FOUND", "没有找到这个审阅组。");
+  const sourceKind = origin.kind === "user_message" ? "user_message" : "pi_tool";
+  const sourceId = origin.kind === "user_message" ? origin.messageId : origin.sourceId;
+  const recorded: RecordedReviewItem[] = [];
+  let changed = false;
 
-  // 在途冻结：受理后该事项不再接受新的阶段认可，意见经 record_work_feedback 留到下一版。
-  // 受理事务先记录认可再创建 queued run（ProductionService.admit），不会拦住自身。
-  if (workInFlight(db, work.id)) {
-    throw new AgentError("RUN_BUSY", "这条视频正在制作中，本版内容已冻结；修改意见会保留到下一版。");
-  }
-  const stageState = state[stage];
-  // 认可作用于该阶段准确当前稿：已有当前稿时旧版本或其他来源一律拒绝，当前引用不倒退。
-  // 内容阶段尚无当前稿时，首次明确采用（含较早的真实消息/独立稿）在这里建立来源。
-  if (stageState.draft && !sameContentSource(stageState.draft, subject)) {
-    throw new AgentError("INVALID_INPUT", stage === "content"
-      ? "内容当前稿已更新，不能认可或继续旧版本；请基于当前稿操作。"
-      : `这份${stage === "plan" ? "方案" : "视频"}主稿不是当前稿，请认可当前版本。`);
-  }
-  if (!stageState.draft && stage !== "content") {
-    throw new AgentError("INVALID_INPUT", stage === "plan" ? "还没有可认可的方案主稿。" : "还没有可定稿的视频初稿。");
-  }
-  if (stage === "plan" && subject.kind === "artifact_revision") {
-    requireContentContinued(db, work);
-    const binding = revisionBinding(db, subject.artifactId, subject.revisionId);
-    if (!sameContentSource(binding?.source ?? null, state.content.draft)) {
-      throw new AgentError("INVALID_INPUT", "内容主稿已更新，请先按当前内容更新方案再认可。");
+  for (const entry of input.items) {
+    const item = group.items.find(candidate => candidate.id === entry.itemId);
+    if (!item) throw new AgentError("NOT_FOUND", `审阅组里没有事项 ${entry.itemId}。`);
+    const subject = resolveContentSource(db, scope, entry.source);
+    if (input.action === "finalize_video") {
+      if (item.role !== "video") throw new AgentError("INVALID_INPUT", "定稿只能作用于视频事项。");
+      if (subject.kind !== "artifact_revision") throw new AgentError("INVALID_INPUT", "定稿只能指向真实视频修订。");
+      const artifact = db.prepare("SELECT kind FROM artifacts WHERE id = ? AND owner_id = ? AND conversation_id = ?")
+        .get(subject.artifactId, scope.ownerId, scope.conversationId) as { kind: string } | undefined;
+      if (!artifact || artifact.kind !== "video") throw new AgentError("INVALID_INPUT", "定稿只能指向真实视频产物。");
+      if (!item.draft) throw new AgentError("INVALID_INPUT", "还没有可定稿的视频初稿。");
+      if (!sameContentSource(item.draft, subject)) throw new AgentError("INVALID_INPUT", "定稿只能指向当前视频草稿。");
+    } else if (item.draft) {
+      // 认可作用于事项准确当前稿：旧版本或其他来源一律拒绝，当前引用不倒退。
+      if (!sameContentSource(item.draft, subject)) {
+        throw new AgentError("INVALID_INPUT", `这份${item.label}不是当前稿，请认可当前版本。`);
+      }
+    } else {
+      // 尚无当前稿：只有内容事项允许首次明确采用（含较早的真实消息/独立稿）建立来源。
+      if (item.role !== "content") throw new AgentError("INVALID_INPUT", `还没有可认可的${item.label}当前稿。`);
+      if (subject.kind === "artifact_revision") {
+        const artifact = db.prepare("SELECT kind FROM artifacts WHERE id = ?").get(subject.artifactId) as { kind: string } | undefined;
+        if (!artifact || !["script", "prompt", "analysis"].includes(artifact.kind)) {
+          throw new AgentError("INVALID_INPUT", "内容认可必须指向文本稿件或聊天原文。");
+        }
+        const binding = revisionBindingJson(db, subject.artifactId, subject.revisionId) as { workId?: string } | null;
+        if (binding?.workId && binding.workId !== work.id) throw new AgentError("INVALID_INPUT", "这份修订属于其他视频，不能作为本条视频的内容。");
+      }
     }
+    // 去重按 action 区分：普通认可看事项已认可的来源；定稿只认确认表里
+    // 同事项同版本的既有 finalize_video 行，普通 approve 写入的 approved
+    // 状态不能吞掉显式定稿（否则库查询永远查不到 finalize 记录）。
+    let duplicateConfirmationId: string | null = null;
+    if (input.action === "finalize_video") {
+      const existing = db.prepare(
+        `SELECT id FROM work_review_confirmations
+         WHERE owner_id = ? AND work_id = ? AND group_id = ? AND item_id = ? AND action = 'finalize_video' AND subject_json = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      ).get(scope.ownerId, work.id, group.id, item.id, canonicalJson(subject)) as { id: string } | undefined;
+      duplicateConfirmationId = existing?.id ?? null;
+    } else if (sameContentSource(item.approved, subject) && item.confirmationId && item.approvedAt) {
+      duplicateConfirmationId = item.confirmationId;
+    }
+    if (duplicateConfirmationId) {
+      recorded.push({ itemId: item.id, confirmationId: duplicateConfirmationId, duplicate: true });
+      continue;
+    }
+    const confirmationId = newAgentId("confirm");
+    db.prepare(
+      `INSERT INTO work_review_confirmations(id, owner_id, conversation_id, work_id, group_id, item_id, action, subject_json, source_kind, source_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(confirmationId, scope.ownerId, scope.conversationId, work.id, group.id, item.id, input.action, canonicalJson(subject), sourceKind, sourceId, now);
+    item.approved = subject;
+    item.approvedAt = now;
+    item.confirmationId = confirmationId;
+    if (!item.draft) item.draft = subject;
+    changed = true;
+    recorded.push({ itemId: item.id, confirmationId, duplicate: false });
   }
-  const confirmationId = newAgentId("confirm");
-  db.prepare(
-    `INSERT INTO work_stage_confirmations(id, owner_id, conversation_id, work_id, stage, action, subject_json, source_kind, source_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(confirmationId, scope.ownerId, scope.conversationId, work.id, stage, input.action, canonicalJson(subject), input.sourceKind, input.sourceId, now);
-
-  stageState.approved = subject;
-  stageState.approvedAt = now;
-  stageState.confirmationId = confirmationId;
-  if (!stageState.draft) stageState.draft = subject;
-  if (input.action === "approve_content_continue" && state.stage === "content") state.stage = "plan";
-  if (input.action === "finalize_video") state.stage = "video";
-  const updated = writeWorkState(db, now, work, state);
-  return { confirmationId, work: updated, duplicate: false };
+  const updated = changed ? writeWorkState(db, now, work, state) : work;
+  return { items: recorded, work: updated };
 }
 
-// 制作受理在同一事务记录方案认可与运行关联；按钮一次动作完成“认可 + 开始”。
-export function markPlanProduced(
-  db: AgentDatabase,
-  now: string,
-  scope: { ownerId: string; conversationId: string },
-  workId: string,
-  planSource: ContentSource,
-  proposalId: string,
-  runId: string,
-  confirmationId: string,
-): WorkRow {
-  const work = requireWork(db, scope.ownerId, scope.conversationId, workId);
-  const state = parseCreationState(work);
-  state.stage = "video";
-  state.plan.approved = planSource;
-  state.plan.approvedAt = now;
-  state.plan.confirmationId = confirmationId;
-  state.plan.proposalId = proposalId;
-  state.video.proposalId = proposalId;
-  state.video.runId = runId;
-  return writeWorkState(db, now, work, state);
-}
-
-export function setStageDraft(
+// 组内事项草稿更新（交付/受理目标注册、运行产出登记共用）。
+// 在途不阻塞后继草稿；组版本随草稿变化提升。
+export function setReviewItemDraft(
   db: AgentDatabase,
   now: string,
   work: WorkRow,
-  stage: "content" | "plan",
+  target: { groupId: string; itemId: string },
   source: ContentSource,
-  proposalId: string | null,
 ): WorkRow {
   const state = parseCreationState(work);
-  state[stage].draft = source;
-  if (stage === "plan") state.plan.proposalId = proposalId;
+  const group = state.groups.find(item => item.id === target.groupId);
+  const item = group?.items.find(candidate => candidate.id === target.itemId);
+  if (!group || !item) throw new AgentError("NOT_FOUND", "草稿归属的审阅事项不存在。");
+  item.draft = source;
+  group.revision += 1;
   return writeWorkState(db, now, work, state);
 }
 
+// 运行产出登记：按受理冻结的目标事项落位（§4.2.1 no-clobber、§11.6 S4）。完成时不重新选择目标：
+// 冻结基准 null 表示受理时该项确实无稿，只在完成时仍为空才落位；准确基准只在当前仍等于该版时更新；
+// 省略基准不当作“此前无稿”，与 null 同样只在当前无稿时落位。目标已删除或旧历史运行缺冻结目标时
+// 不覆盖、不改挂别项，产出保留为 run 结果。返回是否实际落位为当前草稿。
 export function setVideoOutput(
   db: AgentDatabase,
   now: string,
   work: WorkRow,
   source: ContentSource,
-  proposalId: string | null,
-  runId: string | null,
-): WorkRow {
-  const state = parseCreationState(work);
-  state.stage = "video";
-  state.video.draft = source;
-  state.video.proposalId = proposalId;
-  state.video.runId = runId;
-  return writeWorkState(db, now, work, state);
-}
-
-// 下游（素材检索/采用、首次方案或提案绑定、prepare、受理）的继续许可：当前内容稿存在、approved 与
-// draft 一致，且最新相关确认就是这份准确 subject 上的 approve_content_continue。当前讨论方案的纯修订单独核对来源。
-// stage 字段只是展示位置；仅认可、或最新动作改回暂停，都不放行新下游。
-export function requireContentContinued(db: AgentDatabase, work: WorkRow): void {
-  const state = parseCreationState(work);
-  if (state.stage === "content") {
-    throw new AgentError("INVALID_INPUT", "内容稿尚未认可并进入画面阶段，不能先准备画面素材或制作方案。");
-  }
-  const draft = state.content.draft;
-  if (!draft || !sameContentSource(state.content.approved, draft)) {
-    throw new AgentError("INVALID_INPUT", "内容主稿已更新，请先认可当前稿并明确继续，再准备画面素材或制作方案。");
-  }
-  const confirmation = state.content.confirmationId
-    ? db.prepare("SELECT action, subject_json FROM work_stage_confirmations WHERE id = ?")
-      .get(state.content.confirmationId) as { action: StageConfirmationAction; subject_json: string } | undefined
-    : undefined;
-  if (!confirmation || confirmation.action !== "approve_content_continue"
-    || canonicalJson(draft) !== confirmation.subject_json) {
-    throw new AgentError("INVALID_INPUT", "内容当前稿只获得认可、未明确继续；明确继续后才能准备画面素材或制作方案。");
-  }
-}
-
-// B3：内容“明确继续”是否已有准确对应的方案草稿——该方案修订的采用来源正是这份内容。
-// 有它时按钮只补记认可并展示这份方案，不再排一次文本模型请求。
-export function hasPlanDraftForContent(
-  db: AgentDatabase,
-  scope: { ownerId: string; conversationId: string },
-  workId: string,
-  subject: ContentSourceInput,
+  target: { groupId: string; itemId: string; baseRevisionId?: string | null } | null,
 ): boolean {
-  const work = requireWork(db, scope.ownerId, scope.conversationId, workId);
-  const draft = parseCreationState(work).plan.draft;
-  if (!draft || draft.kind !== "artifact_revision") return false;
-  const source = resolveContentSource(db, scope, subject, "content");
-  const binding = revisionBinding(db, draft.artifactId, draft.revisionId);
-  return binding?.workId === workId && binding.stage === "plan"
-    && sameContentSource(binding.source ?? null, source);
+  if (!target) return false;
+  const state = parseCreationState(work);
+  const group = state.groups.find(candidate => candidate.id === target.groupId);
+  const item = group?.items.find(candidate => candidate.id === target.itemId);
+  if (!group || !item) return false;
+  const currentDraft = item.draft?.kind === "artifact_revision" ? item.draft.revisionId : null;
+  if (currentDraft !== (target.baseRevisionId ?? null)) return false;
+  item.draft = source;
+  group.revision += 1;
+  writeWorkState(db, now, work, state);
+  return true;
 }
 
-// 按真实当前引用解析产物归属：不依赖 artifacts.work_id 或采用前的 revision binding。
-// 视频产物不允许聊天改写；同一产物被多个事项（或同事项多个阶段）引用时无法唯一推导，
-// 要求本次显式 stageDrafts，不任取第一项、不做跨作品级联。
+// 按真实当前引用解析产物归属：不依赖 artifacts.work_id 或交付前的 revision binding。
+// 视频产物不允许聊天改写；同一产物被多个事项引用时要求本次显式目标，不任取第一项。
 export function artifactWorkOwnership(
   db: AgentDatabase,
   artifact: { id: string; conversation_id: string },
-  explicit?: { workId: string; stage: WorkStage },
-): { workId: string; stage: "content" | "plan" } | null {
+  explicit?: { workId: string; groupId: string; itemId: string },
+): { workId: string; groupId: string; itemId: string } | null {
   const works = db.prepare("SELECT * FROM works WHERE conversation_id = ?").all(artifact.conversation_id) as WorkRow[];
-  const matches: { workId: string; stage: "content" | "plan" }[] = [];
+  const matches: { workId: string; groupId: string; itemId: string }[] = [];
   for (const work of works) {
     const state = parseCreationState(work);
-    if (state.video.draft?.kind === "artifact_revision" && state.video.draft.artifactId === artifact.id) {
-      throw new AgentError("INVALID_INPUT", "制作产出的视频初稿不能在聊天里直接改写；修改请准备下一版。");
-    }
-    for (const stage of ["plan", "content"] as const) {
-      const draft = state[stage].draft;
-      if (draft?.kind === "artifact_revision" && draft.artifactId === artifact.id) matches.push({ workId: work.id, stage });
+    for (const group of state.groups) {
+      for (const item of group.items) {
+        if (item.role === "video" && item.draft?.kind === "artifact_revision" && item.draft.artifactId === artifact.id) {
+          throw new AgentError("INVALID_INPUT", "制作产出的视频初稿不能在聊天里直接改写；修改请准备下一版。");
+        }
+        if (item.draft?.kind === "artifact_revision" && item.draft.artifactId === artifact.id) {
+          matches.push({ workId: work.id, groupId: group.id, itemId: item.id });
+        }
+      }
     }
   }
   if (matches.length === 0) return null;
   if (explicit) {
-    const match = matches.find(item => item.workId === explicit.workId && item.stage === explicit.stage);
-    if (!match) throw new AgentError("INVALID_INPUT", "不能把已有主稿改挂到其他视频或阶段。");
+    const match = matches.find(candidate => candidate.workId === explicit.workId && candidate.groupId === explicit.groupId && candidate.itemId === explicit.itemId);
+    if (!match) throw new AgentError("INVALID_INPUT", "不能把已有主稿改挂到其他视频或审阅事项。");
     return match;
   }
   if (matches.length > 1) {
-    throw new AgentError("INVALID_INPUT", "这份稿件同时被多条视频创作引用，修改时请在 stageDrafts 里明确本次归属。");
+    throw new AgentError("INVALID_INPUT", "这份稿件同时被多条视频创作引用，修改时请在 reviewGroups 里明确本次归属。");
   }
   return matches[0]!;
 }
@@ -420,51 +369,25 @@ export function relatedWorkFeedback(
   });
 }
 
-function stageView(db: AgentDatabase, stage: WorkStage, state: StageState, upstreamStale: boolean): WorkStageView {
-  let proposalId = state.proposalId;
-  if (stage === "plan" && proposalId) {
-    const proposal = db.prepare("SELECT state FROM proposals WHERE id = ?").get(proposalId) as Pick<Proposal, "state"> | undefined;
-    if (proposal?.state !== "ready") proposalId = null;
-  }
-  // confirmationAction 是确认记录的只读派生投影，无额外持久字段。
-  let confirmationAction: WorkStageView["confirmationAction"] = null;
-  if (state.confirmationId) {
-    const row = db.prepare("SELECT action FROM work_stage_confirmations WHERE id = ?")
-      .get(state.confirmationId) as { action: WorkStageView["confirmationAction"] } | undefined;
-    confirmationAction = row?.action ?? null;
-  }
-  return {
-    stage,
-    draft: state.draft,
-    approved: state.approved,
-    approvedAt: state.approvedAt,
-    confirmationId: state.confirmationId,
-    confirmationAction,
-    upstreamStale,
-    proposalId,
-    runId: state.runId,
-  };
-}
-
 export function workProjection(db: AgentDatabase, row: WorkRow): Work {
   const state = parseCreationState(row);
-  const planBinding = state.plan.draft?.kind === "artifact_revision"
-    ? revisionBinding(db, state.plan.draft.artifactId, state.plan.draft.revisionId) : null;
-  const videoBinding = state.video.draft?.kind === "artifact_revision"
-    ? revisionBinding(db, state.video.draft.artifactId, state.video.draft.revisionId) : null;
-  // 待更新只从不可变上游关联比较，不双写 approved/stale 布尔。
-  const planStale = planBinding?.source != null && !sameContentSource(planBinding.source, state.content.draft);
-  const videoStale = videoBinding?.source != null && !sameContentSource(videoBinding.source, state.plan.draft);
+  // finalizedSource 是只读投影：来自确认表里该事项最近的 finalize_video 行。
+  // 非 video 事项没有 finalize 行，自然保持 null。
+  const finalizeRows = db.prepare(
+    `SELECT item_id, subject_json FROM work_review_confirmations
+     WHERE owner_id = ? AND work_id = ? AND action = 'finalize_video'
+     ORDER BY created_at ASC, rowid ASC`,
+  ).all(row.owner_id, row.id) as { item_id: string; subject_json: string }[];
+  const finalizedByItem = new Map<string, ContentSource>();
+  for (const confirmation of finalizeRows) finalizedByItem.set(confirmation.item_id, JSON.parse(confirmation.subject_json) as ContentSource);
   return {
     id: row.id,
     title: row.title,
-    stage: state.stage,
     revision: row.revision,
-    stages: {
-      content: stageView(db, "content", state.content, false),
-      plan: stageView(db, "plan", state.plan, planStale),
-      video: stageView(db, "video", state.video, videoStale),
-    },
+    reviewGroups: state.groups.map(group => ({
+      ...group,
+      items: group.items.map(item => ({ ...item, finalizedSource: finalizedByItem.get(item.id) ?? null })),
+    })),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -474,17 +397,11 @@ export function listWorkRows(db: AgentDatabase, conversationId: string, limit: n
   return (db.prepare("SELECT * FROM works WHERE conversation_id = ? AND creation_state_json IS NOT NULL ORDER BY rowid DESC LIMIT ?")
     .all(conversationId, limit) as WorkRow[]).reverse();
 }
+
 // 提案与方案主稿的准确关联现由 proposals.plan_source_json 持久承载（§10.1），
 // 读取入口是 artifact-store.ts 的 proposalPlanSource；此处不再保留历史修订反查。
 
-export function revisionCreationBinding(db: AgentDatabase, artifactId: string, revisionId: string): CreationBinding | null {
-  return revisionBinding(db, artifactId, revisionId);
-}
-
-export function isWorkPlanDraftCurrent(db: AgentDatabase, work: WorkRow, source: ContentSource): boolean {
-  if (source.kind !== "artifact_revision") return false;
-  const state = parseCreationState(work);
-  return state.plan.draft?.kind === "artifact_revision"
-    && state.plan.draft.artifactId === source.artifactId
-    && state.plan.draft.revisionId === source.revisionId;
+// 新 binding 是组模型 CreationBinding；旧修订的固定阶段 binding 由 legacyRevisionStageBinding 单独读取。
+export function revisionCreationBinding<T>(db: AgentDatabase, artifactId: string, revisionId: string): T | null {
+  return revisionBindingJson(db, artifactId, revisionId) as T | null;
 }

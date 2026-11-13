@@ -425,13 +425,14 @@ test("M3 本次MiniMax备选冻结准确型号和音色，OpenAI默认保留，�
   const catalog = () => ({ ...additionalMediaCatalog(db, true), ...connectedSpeechChoices(db, true).catalog });
   const binding = choices.catalog["speech:speech-2.8-turbo"]!.binding!;
   db.prepare("INSERT INTO conversations(id,owner_id,title,created_seq,pi_session_id,created_at,updated_at) VALUES('choice-conversation','owner','本次配音',1,'choice-session',?,?)").run(clock(), clock());
-  const intent: ProductionIntent = { workId: null, title: "本次MiniMax短句", inputRevisions: [],
+  const intent: ProductionIntent = { workId: null, title: "本次MiniMax短句", inputSources: [], reviewInputs: [], purpose: "production", scope: "本次配音备选冻结验证",
     operations: [{ kind: "speech", operationId: "voice", outputSlot: "voice", model: binding, maxCreateAttempts: 1,
       inputs: [{ kind: "text", text: "窗外下雨，杯里回暖。" }], parameters: { voiceId: MINIMAX_SPEECH_VOICE, format: "mp3" } }],
     finalOutput: { operationId: "voice", outputSlot: "voice" }, maxSpend: { currency: "CNY", amountMinor: 100 } };
   const scope = { ownerId: "owner", conversationId: "choice-conversation" };
-  const proposal = applyPrepareProposal(db, clock(), scope, intent, catalog()).proposal;
-  const waiting = applyPrepareProposal(db, clock(), scope, intent, catalog()).proposal;
+  const requestSource = { requestId: "req-m3-choice", messageId: "msg-m3-choice" };
+  const proposal = applyPrepareProposal(db, clock(), scope, intent, catalog(), requestSource).proposal;
+  const waiting = applyPrepareProposal(db, clock(), scope, intent, catalog(), requestSource).proposal;
   const hub = new EventHub();
   const service = new ProductionService(db, clock, hub, catalog, new ProductionBlobs(db, dir, clock));
   const accepted = service.accept("owner", proposal.id, { commandId: "choice-confirm", proposalDigest: proposal.digest });
@@ -657,12 +658,13 @@ test("F15 实际10/100/1000汉字报价：两输入形式同价，prepare/admit�
     const artifactId = `quote-art-${length}`, revisionId = `quote-rev-${length}`, content = { format: "markdown", text };
     db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES(?,'quote-conv','owner','旁白','script',?,1,?,?,?)").run(artifactId, revisionId, length, clock(), clock());
     db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,digest,content_json,created_at) VALUES(?,?,1,?,?,?)").run(revisionId, artifactId, digestOf(content), canonicalJson(content), clock());
-    const intent = (reference: boolean): ProductionIntent => ({ workId: null, title: `旁白${length}`, inputRevisions: reference ? [{ artifactId, revisionId }] : [],
+    const intent = (reference: boolean): ProductionIntent => ({ workId: null, title: `旁白${length}`, purpose: "production", scope: `旁白${length}字两输入形式同价验证`, reviewInputs: [],
+      inputSources: reference ? [{ kind: "artifact_revision" as const, artifactId, revisionId, digest: digestOf(content) }] : [],
       operations: [{ operationId: "speech", outputSlot: "speech", kind: "speech", model: binding,
-        inputs: [reference ? { kind: "artifact_revision", artifactId, revisionId, digest: digestOf(content) } : { kind: "text", text }],
+        inputs: [reference ? { kind: "artifact_revision" as const, artifactId, revisionId, digest: digestOf(content) } : { kind: "text", text }],
         parameters: { voiceId: "Chinese (Mandarin)_Gentleman", format: "mp3" }, maxCreateAttempts: 1 }],
       finalOutput: { operationId: "speech", outputSlot: "speech" }, maxSpend: { currency: "CNY", amountMinor: 40 } });
-    const proposals = [false, true].map(reference => applyPrepareProposal(db, clock(), { ownerId: "owner", conversationId: "quote-conv" }, intent(reference), catalog()).proposal);
+    const proposals = [false, true].map(reference => applyPrepareProposal(db, clock(), { ownerId: "owner", conversationId: "quote-conv" }, intent(reference), catalog(), { requestId: `req-quote-${length}-${reference}`, messageId: `msg-quote-${length}-${reference}` }).proposal);
     for (const proposal of proposals) {
       const spec = JSON.parse(proposal.spec_json);
       assert.equal(spec.operations[0].quotePerAttempt.amountMinor, minor);
@@ -677,7 +679,7 @@ test("F15 实际10/100/1000汉字报价：两输入形式同价，prepare/admit�
       const oldCatalog = catalog();
       const entry = oldCatalog[`speech:${binding.modelId}`]!;
       delete entry.quoteMinorFor;
-      const old = applyPrepareProposal(db, clock(), { ownerId: "owner", conversationId: "quote-conv" }, intent(false), oldCatalog).proposal;
+      const old = applyPrepareProposal(db, clock(), { ownerId: "owner", conversationId: "quote-conv" }, intent(false), oldCatalog, { requestId: "req-quote-old", messageId: "msg-quote-old" }).proposal;
       assert.equal(JSON.parse(old.spec_json).operations[0].quotePerAttempt.amountMinor, 40);
       assert.throws(() => service.accept("owner", old.id, { commandId: crypto.randomUUID(), proposalDigest: old.digest }), /模型配置或价格已变化/);
     }

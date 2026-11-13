@@ -458,21 +458,23 @@ describe("agent domain rules", () => {
     assert.equal((await snapshotOf(conversationId)).artifacts.items.length, 0, "迟到写入没有产生产物");
   });
 
-  it("连接失败提示准确：无假回复、事实保留、可继续（A-16 部分）", async () => {
-    const conversationId = await createConversation("cmd-e0", "提供方失败");
-    assembly.faux?.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "Connection error." })]);
-    const sent = await send(conversationId, "cmd-e1", "这条会失败");
+  for (const [kind, errorMessage, notice] of [
+    ["connection", "Connection error.", "暂时无法连接文本模型，消息已保留；请稍后重试。"],
+    ["timeout", "Request timed out.", "文本模型请求超时，消息已保留；请稍后重试，或检查网络与代理。"],
+  ] as const) it(`连接失败提示准确：${errorMessage}，无假回复、事实保留、可继续（A-16 部分）`, async () => {
+    const conversationId = await createConversation(`cmd-e0-${kind}`, "提供方失败");
+    assembly.faux?.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
+    const sent = await send(conversationId, `cmd-e1-${kind}`, "这条会失败");
     assert.equal(sent.status, 202);
     await waitFor(async () => (await snapshotOf(conversationId)).activeRequestId === null, 60_000);
     const messages = (await json("GET", `/api/agent/v1/conversations/${conversationId}/messages`)).body.items;
     assert.ok(!messages.some((item: any) => item.role === "assistant"), "失败回合不落假助手回复");
     const request = assembly.database.prepare("SELECT state FROM requests WHERE id = ?").get(sent.body.requestId) as { state: string };
     assert.equal(request.state, "failed");
-    assert.equal(messages.find((item: any) => item.role === "system_notice")?.text,
-      "暂时无法连接文本模型，消息已保留；请稍后重试。");
+    assert.equal(messages.find((item: any) => item.role === "system_notice")?.text, notice);
 
     assembly.faux?.setResponses([fauxAssistantMessage("恢复后的回答。")]);
-    const next = await send(conversationId, "cmd-e2", "继续聊");
+    const next = await send(conversationId, `cmd-e2-${kind}`, "继续聊");
     assert.equal(next.status, 202);
     await waitFor(async () => (await assistantTexts(conversationId)).some(text => text.includes("恢复后的回答")));
   });
@@ -491,7 +493,10 @@ describe("agent domain rules", () => {
     const intent = {
       workId: null,
       title: "开场配音",
-      inputRevisions: [{ artifactId: artifact.id, revisionId: artifact.revisionId }],
+      inputSources: [{ kind: "artifact_revision", artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],
+      reviewInputs: [],
+      purpose: "draft",
+      scope: "开场配音草稿",
       operations: [{
         operationId: "opVoice", outputSlot: "voiceTrack",
         inputs: [{ kind: "artifact_revision", artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],
@@ -620,5 +625,36 @@ describe("agent domain rules", () => {
     assert.equal(after.n, before.n, "重复迁移不毁数据");
     assert.deepEqual(reopened.prepare("SELECT version FROM agent_schema_migrations ORDER BY version").all(), applied, "重开不重复执行迁移");
     reopened.close();
+  });
+
+  it("v21→v22 迁移：messages 补 review_context_json，旧行读出 NULL，再次重开幂等", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "frame-mig-"));
+    try {
+      // 还原 v21 形状：撤掉 v22 增列并摘除版本记录，模拟未升级部署的库。
+      const legacy = openAgentDatabase(dir);
+      legacy.exec("ALTER TABLE messages DROP COLUMN review_context_json");
+      legacy.prepare("DELETE FROM agent_schema_migrations WHERE version=22").run();
+      const now = systemClock();
+      legacy.prepare(`INSERT INTO conversations(id,owner_id,title,created_seq,pi_session_id,created_at,updated_at)
+        VALUES ('conv-mig','local-owner','迁移夹具',1,'sess-mig',?,?)`).run(now, now);
+      legacy.prepare(`INSERT INTO messages(id,conversation_id,owner_id,role,kind,state,text,references_json,created_seq,created_at,updated_at)
+        VALUES ('msg-mig','conv-mig','local-owner','user','chat','completed','旧消息','{"artifacts":[],"proposalIds":[]}',1,?,?)`).run(now, now);
+      legacy.close();
+
+      // 重开：迁移 22 补列，旧行按历史语义读 NULL；再重开不重复执行。
+      const upgraded = openAgentDatabase(dir);
+      const columns = (upgraded.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map(row => row.name);
+      assert.ok(columns.includes("review_context_json"), "v22 补齐 review_context_json 列");
+      assert.equal((upgraded.prepare("SELECT review_context_json AS v FROM messages WHERE id='msg-mig'").get() as { v: unknown }).v, null,
+        "旧消息行无指向，读出 NULL");
+      assert.ok((upgraded.prepare("SELECT version FROM agent_schema_migrations WHERE version=22").get() as { version: number } | undefined) != null,
+        "版本记录落账");
+      const versions = (upgraded.prepare("SELECT version FROM agent_schema_migrations ORDER BY version").all() as { version: number }[]).map(row => row.version);
+      upgraded.close();
+      const again = openAgentDatabase(dir);
+      assert.deepEqual((again.prepare("SELECT version FROM agent_schema_migrations ORDER BY version").all() as { version: number }[]).map(row => row.version),
+        versions, "再次重开仍是同一版本集合");
+      again.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 });

@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -36,22 +37,48 @@ jobs:
       - run: npm run contracts:check && python contracts/agent/v1/verify-openapi.py
       - run: PYTHONPATH=src python -m unittest discover -s tests
       - run: npm test
-      - run: bash -n scripts/deploy-frame.sh
-      - name: Build and boot the production image without network or credentials
+      - run: bash -n scripts/deploy-frame.sh && bash -n scripts/smoke-frame-release.sh && node --check scripts/smoke-creative-container.mjs
+      - name: Build the same-SHA app and creative images
         run: |
-          image=video-factory:release-$GITHUB_SHA
-          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/Dockerfile -t "$image" .
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/Dockerfile -t "video-factory:release-$GITHUB_SHA" .
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/creative.Dockerfile -t "frame-creative:release-$GITHUB_SHA" .
+          python - <<'PY'
+          import json,os,subprocess
+          sha=os.environ['GITHUB_SHA']
+          manifest={'sha':sha,'platform':'linux/amd64'}
+          for key,prefix in [('app','video-factory'),('creative','frame-creative')]:
+              tag=f'{prefix}:release-{sha}'
+              image=json.loads(subprocess.check_output(['docker','image','inspect',tag]))[0]
+              assert image['Os']+'/'+image['Architecture']==manifest['platform']
+              manifest[key]={'tag':tag,'id':image['Id']}
+          with open('frame-release.json','w') as f: json.dump(manifest,f,indent=2)
+          print(json.dumps(manifest))
+          PY
+      - name: Boot the production app without network or credentials
+        run: |
           docker run --rm --read-only --tmpfs /tmp:rw,mode=1777 --network none \
             -v "$PWD/scripts/smoke-studio-container.mjs:/tmp/smoke-studio-container.mjs:ro" \
-            -e RELEASE_SHA="$GITHUB_SHA" --entrypoint node "$image" /tmp/smoke-studio-container.mjs
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then docker save "$image" | gzip -1 > frame-image.tar.gz; fi
+            -e RELEASE_SHA="$GITHUB_SHA" --entrypoint node "video-factory:release-$GITHUB_SHA" /tmp/smoke-studio-container.mjs
+      - name: Rehearse real Linux app, UDS, migration and release recovery
+        run: |
+          bash scripts/smoke-frame-release.sh
+      - name: Package only the verified release tags
+        run: |
+          docker save "video-factory:release-$GITHUB_SHA" "frame-creative:release-$GITHUB_SHA" | gzip -1 > frame-images.tar.gz
       - uses: actions/upload-artifact@v4
-        if: github.ref == 'refs/heads/main'
         with:
-          name: frame-image
-          path: frame-image.tar.gz
+          name: frame-release
+          path: |
+            frame-images.tar.gz
+            frame-release.json
           compression-level: 0
-          retention-days: 1
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frame-release-rehearsal
+          path: ${{ runner.temp }}/frame-release-evidence/
+          retention-days: 7
 
   deploy:
     name: Deploy to Alibaba ECS
@@ -72,19 +99,20 @@ jobs:
           if [[ "$latest" == "$GITHUB_SHA" ]]; then echo current=true >> "$GITHUB_OUTPUT"; fi
       - uses: actions/download-artifact@v4
         if: steps.latest.outputs.current == 'true'
-        with: {name: frame-image}
+        with: {name: frame-release}
       - name: Package the tested release
         if: steps.latest.outputs.current == 'true'
         run: |
           git bundle create "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" HEAD
-          mv frame-image.tar.gz "frame-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          mv frame-images.tar.gz "frame-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          mv frame-release.json "frame-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
       - uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345
         if: steps.latest.outputs.current == 'true'
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "video-factory-release-*.bundle,frame-*.tar.gz"
+          source: "video-factory-release-*.bundle,frame-*.tar.gz,frame-release-*.json"
           target: /tmp
           command_timeout: 35m
       - uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
@@ -105,7 +133,8 @@ jobs:
             umask 077
             bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
             image="/tmp/frame-${DEPLOY_RUN}.tar.gz"
-            trap 'rm -f "$bundle_path" "$image"' EXIT
+            export RELEASE_MANIFEST="/tmp/frame-release-${DEPLOY_RUN}.json"
+            trap 'rm -f "$bundle_path" "$image" "$RELEASE_MANIFEST"' EXIT
             exec 9>/var/lock/video-factory-deploy.lock
             flock -w 2400 9
             cd "$PROJECT_PATH"

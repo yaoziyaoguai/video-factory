@@ -14,7 +14,7 @@ import { probeVideoFile } from "../src/server/agent/media-probe.js";
 import { blobSources, recordBlobSources } from "../src/server/agent/material-store.js";
 import { attemptsFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
-import { bindPreparedPlan, seedPlanStageWork, type PlanStageWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork, type ConfirmedReviewWork } from "./helpers/creative-work-fixture.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import type { AgentDatabase } from "../src/server/agent/db.js";
 import type { MediaExecutionPort } from "../src/shared/agent/ports.js";
@@ -84,31 +84,30 @@ function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Bu
 // RenderParameters 已是 ordered/narrated 判别联合；本文件只构造 ordered 分支。
 type OrderedRenderParameters = Extract<RenderParameters, { assembly: "ordered_concat" }>;
 
-// 视频 render 只能落在已正式开始的视频创作内（B04/T04）：用产品内核把事项推进到方案阶段，
-// 并行时把方案主稿交付关联到本次提案；测试不手写 creation_binding，也不放宽阶段规则。
-function stageWork(runtime: AgentRuntime, conversationId: string, title = "拼接视频"): PlanStageWork {
-  return seedPlanStageWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, title);
+// 视频 render 是正式制作（B04/T04）：用产品内核把创作推进到“脚本已认可”，
+// 提案引用真实认可事实（reviewInputs）；测试不手写 creation_binding，也不放宽认可规则。
+function stageWork(runtime: AgentRuntime, conversationId: string, title = "拼接视频"): ConfirmedReviewWork {
+  return seedConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, title);
 }
 
-function renderIntent(work: { workId: string }, order: { artifactId: string; revisionId: string; digest: string }[], overrides: Partial<OrderedRenderParameters> = {}): ProductionIntent {
+function renderIntent(work: ConfirmedReviewWork, order: { artifactId: string; revisionId: string; digest: string }[], overrides: Partial<OrderedRenderParameters> = {}): ProductionIntent {
   if (!order.length) throw new Error("render 输入不能为空");
-  const revisions = order.map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId }));
+  const sources = order.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }));
   const inputs = order.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }));
-  return { workId: work.workId, title: "拼接", inputRevisions: revisions as ProductionIntent["inputRevisions"],
+  return { workId: work.workId, title: "拼接",
+    inputSources: sources, reviewInputs: [work.reviewInput], purpose: "production", scope: "把已认可片段按顺序拼成正式成片",
     operations: [{ operationId: "render", outputSlot: "final", kind: "render", model: null,
       inputs: inputs as ProductionIntent["operations"][number]["inputs"], maxCreateAttempts: 1,
       parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24, ...overrides } satisfies OrderedRenderParameters }],
-    finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
+    finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
 
-async function prepareWithPlan(runtime: AgentRuntime, conversationId: string, work: PlanStageWork, intent: ProductionIntent) {
-  const prepared = await runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
-  bindPreparedPlan(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, prepared.proposal, work);
-  return prepared;
+async function prepareIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
+  return runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
 }
 
-async function acceptRender(runtime: AgentRuntime, conversationId: string, work: PlanStageWork, intent: ProductionIntent): Promise<string> {
-  const { proposal } = await prepareWithPlan(runtime, conversationId, work, intent);
+async function acceptRender(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
+  const { proposal } = await prepareIntent(runtime, conversationId, intent);
   const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
   return admitted.run.id;
 }
@@ -131,7 +130,7 @@ it("T3 引用边界：明确提案可复用同会话未交付 blob，确认前�
     const work = stageWork(runtime, conversation.id, "复用素材视频");
     const intent = renderIntent(work, [revision]);
     intent.operations[0]!.inputs.push({ kind: "blob", blobId: blob.id, digest: blob.digest });
-    const prepared = await prepareWithPlan(runtime, conversation.id, work, intent);
+    const prepared = await prepareIntent(runtime, conversation.id, intent);
     assert.equal(prepared.proposal.state, "ready");
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
     assert.equal(submits, 0);
@@ -178,14 +177,14 @@ it("T3 来源上限：64 项可交付，65 项在准备时拒绝，同图依赖�
       { kind: "operation_output", producerOperationId: "render", outputSlot: "final" },
       { kind: "artifact_revision", ...refs[2]! },
     ] });
-    chained.inputRevisions.push({ artifactId: refs[2]!.artifactId, revisionId: refs[2]!.revisionId });
+    chained.inputSources.push({ kind: "artifact_revision", ...refs[2]! });
     chained.finalOutput = { operationId: "second", outputSlot: "second-final" };
     await assert.rejects(runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: chained }),
       (error: any) => error.code === "INVALID_INPUT" && /64/.test(error.message));
     assert.equal(submits, 0);
     chained.operations[1]!.inputs[1] = { kind: "artifact_revision", ...refs[0]! };
-    chained.inputRevisions.pop();
-    const runId = await acceptRender(runtime, conversation.id, work, chained);
+    chained.inputSources.pop();
+    const runId = await acceptRender(runtime, conversation.id, chained);
     for (let i = 0; i < 8; i++) await runtime.worker!.pollOnce();
     const result = runtime.service.getRun("local-owner", runId);
     assert.equal(result.state, "succeeded");
@@ -216,7 +215,7 @@ it("C1-04：不同帧率输入按声明顺序拼接并归一到冻结规格（A�
       { order: ["a", "b", "a"], expectMs: 3200, checks: [[0.2, isRed], [1.6, isBlue], [3.0, isRed]] },
     ];
     for (const [index, testcase] of cases.entries()) {
-      const runId = await acceptRender(runtime, conversation.id, work, renderIntent(work, testcase.order.map(key => key === "a" ? clipA : clipB)));
+      const runId = await acceptRender(runtime, conversation.id, renderIntent(work, testcase.order.map(key => key === "a" ? clipA : clipB)));
       writeFileSync(probeTrace, "");
       for (let i = 0; i < 5; i++) await runtime.worker!.pollOnce();
       assert.equal(readFileSync(probeTrace, "utf8").trim().split("\n").length, new Set(testcase.order).size + 1,
@@ -251,7 +250,7 @@ it("C1-04：本地并发峰值 1——两条渲染运行的 ffmpeg 进程不重�
     for (let index = 0; index < 2; index++) {
       const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: `并发 ${index}` }).conversation;
       const work = stageWork(runtime, conversation.id, `并发视频 ${index}`);
-      runs.push(await acceptRender(runtime, conversation.id, work, renderIntent(work, [
+      runs.push(await acceptRender(runtime, conversation.id, renderIntent(work, [
         mediaRevision(runtime, conversation.id, assets.clipA, 1200),
         mediaRevision(runtime, conversation.id, assets.clipB, 800),
       ])));
@@ -282,7 +281,7 @@ it("C1-04：文件完成而业务未提交的窗口——重启后 query 发现�
   try {
     const conversation = first.service.createConversation("local-owner", { commandId: cmd(), title: "窗口验证" }).conversation;
     const work = stageWork(first, conversation.id, "窗口验证视频");
-    const runId = await acceptRender(first, conversation.id, work, renderIntent(work, [
+    const runId = await acceptRender(first, conversation.id, renderIntent(work, [
       mediaRevision(first, conversation.id, assets.clipA, 1200),
       mediaRevision(first, conversation.id, assets.clipB, 800),
     ]));
@@ -334,7 +333,7 @@ it("C1-04：无退出证据——稳定 unknown 且跨重启保留本地占用�
   try {
     const conversation = first.service.createConversation("local-owner", { commandId: cmd(), title: "无证据" }).conversation;
     const work = stageWork(first, conversation.id, "无证据视频");
-    const stuckRunId = await acceptRender(first, conversation.id, work, renderIntent(work, [
+    const stuckRunId = await acceptRender(first, conversation.id, renderIntent(work, [
       mediaRevision(first, conversation.id, assets.clipA, 1200),
       mediaRevision(first, conversation.id, assets.clipB, 800),
     ]));
@@ -353,7 +352,7 @@ it("C1-04：无退出证据——稳定 unknown 且跨重启保留本地占用�
     // 新的渲染运行必须被占位规则挡住：不产生任何尝试。
     const other = second.service.createConversation("local-owner", { commandId: cmd(), title: "第二个渲染" }).conversation;
     const otherWork = stageWork(second, other.id, "第二个渲染视频");
-    const blockedRunId = await acceptRender(second, other.id, otherWork, renderIntent(otherWork, [
+    const blockedRunId = await acceptRender(second, other.id, renderIntent(otherWork, [
       mediaRevision(second, other.id, assets.clipA, 1200),
       mediaRevision(second, other.id, assets.clipB, 800),
     ]));
@@ -371,17 +370,17 @@ it("C1 审计：本地拼接只启用 1280×720 / 24fps / 一次尝试", async (
     const work = stageWork(runtime, conversation.id, "输出范围视频");
     const clip = mediaRevision(runtime, conversation.id, assets.clipA, 1200);
     for (const parameters of [{ width: 640, height: 360 }, { fps: 30 }]) {
-      await assert.rejects(() => prepareWithPlan(runtime, conversation.id, work, renderIntent(work, [clip], parameters)),
+      await assert.rejects(() => prepareIntent(runtime, conversation.id, renderIntent(work, [clip], parameters)),
         (error: { code?: string }) => error.code === "CAPABILITY_UNAVAILABLE");
     }
     const multipleAttempts = renderIntent(work, [clip]);
     multipleAttempts.operations[0]!.maxCreateAttempts = 2;
-    await assert.rejects(() => prepareWithPlan(runtime, conversation.id, work, multipleAttempts),
+    await assert.rejects(() => prepareIntent(runtime, conversation.id, multipleAttempts),
       (error: { code?: string }) => error.code === "INVALID_INPUT");
     const textInput = renderIntent(work, [clip]);
-    textInput.inputRevisions = [];
+    textInput.inputSources = [];
     textInput.operations[0]!.inputs = [{ kind: "text", text: "文字不能直接交给视频拼接。" }];
-    await assert.rejects(() => prepareWithPlan(runtime, conversation.id, work, textInput),
+    await assert.rejects(() => prepareIntent(runtime, conversation.id, textInput),
       (error: { code?: string }) => error.code === "INVALID_INPUT");
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
@@ -400,7 +399,7 @@ it("C1 审计：收窄能力后，旧提案不能继续受理不再支持的输�
     const conversation = first.service.createConversation("local-owner", { commandId: cmd(), title: "旧规格提案" }).conversation;
     const work = stageWork(first, conversation.id, "旧规格视频");
     const clip = mediaRevision(first, conversation.id, assets.clipA, 1200);
-    const { proposal } = await prepareWithPlan(first, conversation.id, work,
+    const { proposal } = await prepareIntent(first, conversation.id,
       renderIntent(work, [clip], { width: 640, height: 360 }));
     await first.close();
     second = await buildRuntime(assets.directory, staticClock, (blobs, db) =>
@@ -427,7 +426,7 @@ it("C1 审计：点击停止能终止正在执行的本地子进程", async () =
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "停止拼接" }).conversation;
     const work = stageWork(runtime, conversation.id, "停止拼接视频");
     const clip = mediaRevision(runtime, conversation.id, assets.clipA, 1200);
-    const runId = await acceptRender(runtime, conversation.id, work, renderIntent(work, [clip]));
+    const runId = await acceptRender(runtime, conversation.id, renderIntent(work, [clip]));
     const pending = runtime.worker!.pollOnce();
     for (let i = 0; i < 100 && !existsSync(startedFile); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(existsSync(startedFile), true, "子进程已启动后才发停止请求");
@@ -516,7 +515,7 @@ it("T3 来源回归：A/B/A 合成、成片再合成与同图依赖输出均继�
     }
     const intents = [renderIntent(work, [a, b, a])];
     for (let stage = 0; stage < 3; stage++) {
-      const runId = await acceptRender(runtime, conversation.id, work, intents[stage]!);
+      const runId = await acceptRender(runtime, conversation.id, intents[stage]!);
       for (let i = 0; i < 8; i++) await runtime.worker!.pollOnce();
       const result = runtime.service.getRun("local-owner", runId);
       assert.equal(result.state, "succeeded");

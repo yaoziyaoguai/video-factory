@@ -16,6 +16,8 @@ import type { MediaExecutionPort } from "../../shared/agent/ports.js";
 import { ProductionBlobs } from "./production-blobs.js";
 import { ProductionService } from "./production-service.js";
 import { ProductionWorker, type ProductionWorkerOptions } from "./production-worker.js";
+import { CreativeRunner, editingWorkspace } from "./creative-runner.js";
+import { ensureLibraryInputs } from "./library-inputs.js";
 
 export interface AgentRuntimeOptions {
   providerConnections?: boolean;
@@ -34,6 +36,8 @@ export interface AgentRuntimeOptions {
   limits?: { turnMs: number; maxToolCalls: number };
   /** 免费素材替身 fetch 注入口；仅测试用于完整 Pi 链的可控回源。 */
   materials?: { stockFetch?: typeof fetch; cacheRoot?: string | null };
+  /** 隔离创作环境（原生创作工具与 publish_project）；缺省时两者不可用。 */
+  creative?: { runner: CreativeRunner };
   displayName?: string;
   onHostReady?: (host: PiRuntimeHost) => void;
   /** 文本工厂：在已有 db 上先完成设置初始化（先于 worker 与 Pi 恢复），再返回动态目录与绑定解析。 */
@@ -105,6 +109,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
   const skillPackages = new SkillPackages(options.dataDir, skillsRoot);
   await skillPackages.initialize();
   const host = new PiRuntimeHost({ dataDir: options.dataDir, skillsRoot, skillPackages, ...options.host,
+    ...(options.creative ? { creativeRunner: options.creative.runner } : {}),
     ...(textChannel ? { textVersions: textChannel.resolve } : {}) });
   await host.init();
   options.onHostReady?.(host);
@@ -115,12 +120,22 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
     // Pixabay 服务条款要求缓存 API 响应 24h；缓存放在数据目录，不进用户媒体库。
     cacheRoot: options.materials?.cacheRoot ?? path.join(options.dataDir, "stock-cache"),
     ...(options.materials?.stockFetch ? { stockFetch: options.materials.stockFetch } : {}),
-  });
+  }, production, options.creative ? { runner: options.creative.runner, workspace: editingWorkspace } : undefined);
+  // §11.7 来源6/7：作品明确后把已发送选材原字节准备到该作品输入位置；与 BusinessTools 同一 runner/blobs 边界。
+  const prepareLibraryInputs = options.creative
+    ? (ownerId: string, conversationId: string, workId: string) =>
+        ensureLibraryInputs(db, blobs, clock, { runner: options.creative!.runner, workspace: editingWorkspace }, ownerId, conversationId, workId)
+    : undefined;
   const registry = new ConversationRunnerRegistry({
     db, clock, hub, host,
     ...(channel ? { mediaModels: channel.models } : {}),
     productionAvailable: Boolean(port),
-    toolFactory: holder => buildAgentTools(holder, businessTools, skillsRoot, () => skillPackages.resources().skills.map(skill => skill.baseDir)),
+    // 离线装配保留 Skill 间接读取；隔离创作环境用原生 read，不注入 read_skill_file。
+    toolFactory: holder => buildAgentTools(holder, businessTools, { blobs },
+      options.creative ? undefined : { root: skillsRoot, directories: () => skillPackages.resources().skills.map(skill => skill.baseDir) },
+      prepareLibraryInputs ? { ensure: prepareLibraryInputs } : undefined),
+    ...(options.creative ? { creativeSkills: () => skillPackages.resources().skills.map(skill => ({ id: skill.name, directory: skill.baseDir })) } : {}),
+    ...(prepareLibraryInputs ? { prepareLibraryInputs } : {}),
     ...(options.limits ? { limits: options.limits } : {}),
     ...(options.crashPoint ? { crashPoint: options.crashPoint } : {}),
   });

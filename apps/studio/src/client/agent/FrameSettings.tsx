@@ -4,25 +4,28 @@ import { ModelConnectionsPanel } from "./ModelConnectionsPanel.js";
 import { SkillPackagesPanel } from "./SkillPackagesPanel.js";
 import { WorkLibrary } from "./WorkLibrary.js";
 import type { SkillPackageMutation } from "../../shared/agent/generated/contracts.js";
+import type { LibraryPick } from "./workspace-state.js";
 import { SavedConfigurationDetails } from "./SavedConfigurationDetails.js";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronRight, Cpu, Film, FolderOpen, Image, Music2, Search, Sparkles, TrendingUp, X } from "lucide-react";
-import { agentApi, AgentApiError, type UserProfile, type PexelsSettings, type NewsNowSettings, type KeyedMaterialSettings, type SavePexelsSettings, type SaveNewsNowSettings, type FreeServiceSettings, type SaveFreeServiceSettingsInput } from "./api.js";
+import { Check, ChevronRight, Cpu, Film, FolderOpen, Image, Mic, Music2, Search, Sparkles, TrendingUp, X } from "lucide-react";
+import { agentApi, AgentApiError, type UserProfile, type PexelsSettings, type NewsNowSettings, type KeyedMaterialSettings, type EdgeTtsSettings, type SavePexelsSettings, type SaveNewsNowSettings, type SaveEdgeTtsSettings, type FreeServiceSettings, type SaveFreeServiceSettingsInput } from "./api.js";
 import type { Bootstrap, Conversation, SaveUserProfile } from "./api.js";
 
 export type FramePage = "chat" | "models" | "services" | "skills" | "library" | "profile";
 export const framePageTitle = { chat: "对话", models: "模型配置", services: "免费服务", skills: "Skill 管理", library: "作品库", profile: "用户页" };
-export function FrameSettings({ page, bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onSkillMutationChange }: {
+export function FrameSettings({ page, bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onSkillMutationChange, onLibraryBringIn, libraryBringTarget }: {
   page: FramePage; bootstrap: Bootstrap | null; conversations: Conversation[];
   onConversation: (id: string) => void; onPage: (page: FramePage) => void; onLogout?: (() => Promise<void>) | undefined;
   onCatalogRefresh: () => Promise<void>; onSkillMutationChange?: ((mutation: SkillPackageMutation | null) => void) | undefined;
+  /** §11.7 来源9：库详情“带入对话”回调——有目标会话并入该会话草稿，无则并入新对话草稿；不猜最近会话。 */
+  onLibraryBringIn?: ((picks: LibraryPick[]) => void) | undefined; libraryBringTarget?: "current" | "new" | undefined;
 }) {
   const [skillsVisited, setSkillsVisited] = useState(page === "skills");
   useEffect(() => { if (page === "skills") setSkillsVisited(true); }, [page]);
   return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"}><div className="agent-settings-content">
     <header className="agent-settings-heading"><h2>{framePageTitle[page]}</h2>{page === "models" ? <button type="button" className="agent-text-link" onClick={() => onPage("chat")}>返回对话</button> : null}</header>
     {page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : page === "services" ? <ServicesDirectory />
-      : page === "library" ? <WorkLibrary /> : page === "profile" ? <ProfileEditor bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} /> : null}
+      : page === "library" && onLibraryBringIn ? <WorkLibrary onBringIn={onLibraryBringIn} bringTarget={libraryBringTarget ?? "new"} /> : page === "profile" ? <ProfileEditor bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} /> : null}
     {skillsVisited || page === "skills" ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}
   </div></section>;
 }
@@ -42,15 +45,17 @@ const SERVICE_CATALOG = [
   { id: "archive", kind: "keyless", name: "Internet Archive", description: "公有领域与开放许可的历史影像", kinds: ["video"], access: "无需密钥" },
   { id: "freetouse", kind: "keyless", name: "FreeToUse", description: "个人社交平台自制视频的音乐与歌曲，采用前需确认用途并署名", kinds: ["audio"], access: "无需密钥" },
   { id: "newsnow", kind: "newsnow", name: "国内平台榜单", description: "通过 NewsNow 按需查抖音、快手和 B 站，也可自选来源", kinds: ["trend"], access: "实例地址" },
+  { id: "edge-tts", kind: "edgetts", name: "Edge 免费配音", description: "把文字合成为免费配音音频，带词级时间边界", kinds: ["dub"], access: "无需密钥" },
 ] as const;
 const SERVICE_GROUPS = [
   { id: "trend", label: "视频选题", icon: TrendingUp, purpose: "找选题时看平台榜单；核实背景时再联网搜索。", footnote: "" },
   { id: "image", label: "图片素材", icon: Image, purpose: "查找已有图片，补充画面与创作参考。", footnote: "免费来源也有许可和调用限制，采用素材时保留作者与来源；同一来源在各页签共用一份配置。" },
   { id: "video", label: "视频素材", icon: Film, purpose: "查找已有视频，补充镜头与参考。", footnote: "免费来源也有许可和调用限制，采用素材时保留作者与来源；同一来源在各页签共用一份配置。" },
   { id: "audio", label: "音乐素材", icon: Music2, purpose: "查平台热歌，或找有许可、可混入视频的配乐。", footnote: "热歌榜仅提供平台链接。采用曲库音乐时，会保留曲目、作者与许可。" },
+  { id: "dub", label: "配音", icon: Mic, purpose: "把文字合成为免费配音，不占用付费配音型号。", footnote: "第三方维护的免费客户端，没有官方 SLA；调用失败会返回真实原因，不会自动改用付费配音。运行依赖由管理员在配置中管理。" },
 ] as const;
 type ServiceGroup = (typeof SERVICE_GROUPS)[number]["id"];
-const SERVICE_KIND_LABELS: Record<ServiceGroup, string> = { trend: "热点", image: "图片", video: "视频", audio: "音乐" };
+const SERVICE_KIND_LABELS: Record<ServiceGroup, string> = { trend: "热点", image: "图片", video: "视频", audio: "音乐", dub: "配音" };
 type ServiceRow = (typeof SERVICE_CATALOG)[number];
 type ServiceId = ServiceRow["id"];
 type KeyedRow = Extract<ServiceRow, { kind: "keyed" }>;
@@ -105,6 +110,9 @@ function ServicesDirectory() {
       } else if (current.serviceId === "newsnow") {
         if (!current.enabled && (!current.endpoint || current.sourceIds.length === 0)) { setNotice("启用 NewsNow 需要先在配置里填写实例地址和来源。"); return; }
         request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled, endpoint: current.endpoint, sourceIds: current.sourceIds, topics: current.topics } };
+      } else if (current.serviceId === "edge-tts") {
+        // 读取形状恒带语音与命令（未保存时给缺省），开关只需回写当前选择。
+        request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled, voice: current.voice, pythonCommand: current.pythonCommand } };
       } else {
         request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled } };
       }
@@ -155,6 +163,7 @@ function ServicesDirectory() {
     if (!settings) return null;
     if (settings.serviceId === "pexels") return <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} apiKey={settings.apiKey} />;
     if (settings.serviceId === "newsnow") return settings.endpoint ? <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} /> : null;
+    if (settings.serviceId === "edge-tts") return <dl className="agent-saved-configuration"><dt>语音</dt><dd>{settings.voice}</dd></dl>;
     if ("credentialConfigured" in settings) return <SavedConfigurationDetails name={row.name} apiKey={settings.apiKey ?? null} />;
     return null;
   };
@@ -190,6 +199,7 @@ function ServicesDirectory() {
     {!rows.length ? <div className="agent-settings-empty"><Search aria-hidden="true" /><h3>没有匹配的服务</h3><button type="button" onClick={() => setQuery("")}>清除搜索</button></div> : null}
     <p className="agent-service-footnote">{group === "trend" ? <>海外选题参考：<a href={TIKTOK_CREATIVE_CENTER} target="_blank" rel="noreferrer">TikTok 热门标签与视频 ↗</a>{" · "}<a href={GOOGLE_TRENDS} target="_blank" rel="noreferrer">Google 地区搜索热度 ↗</a></> : catalog.footnote}</p>
     {configTarget?.kind === "newsnow" ? <NewsNowConfigDialog onClose={closeConfig} onSaved={settings => setLoads(prev => ({ ...prev, newsnow: { phase: "ready", settings } }))} /> : null}
+    {configTarget?.kind === "edgetts" ? <EdgeTtsConfigDialog onClose={closeConfig} onSaved={settings => setLoads(prev => ({ ...prev, "edge-tts": { phase: "ready", settings } }))} /> : null}
     {configTarget?.kind === "keyed" ? <KeyedServiceConfigDialog row={configTarget} onClose={closeConfig} onSaved={() => void loadService(configTarget.id)} /> : null}
   </>;
 }
@@ -449,6 +459,137 @@ function NewsNowConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
   </div>;
 }
 
+// 常用 Edge 神经语音候选（datalist 提示，不限制其他合法语音 ID）。
+const EDGE_TTS_VOICE_OPTIONS = [
+  "zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural", "zh-CN-YunyangNeural", "zh-CN-YunjianNeural", "zh-CN-XiaoyiNeural",
+  "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
+];
+
+// 免费配音配置面板：语音与能 import edge_tts 的解释器命令 + 启用。保存不发起外部请求；
+// 语音形状由契约校验，这里做同样的先行检查给出行内错误。
+function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (settings: EdgeTtsSettings) => void }) {
+  const [phase, setPhase] = useState<"loading" | "loadFailed" | "editing">("loading");
+  const [settings, setSettings] = useState<EdgeTtsSettings | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [voice, setVoice] = useState("");
+  const [pythonCommand, setPythonCommand] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState("");
+  const [pending, setPending] = useState<SaveEdgeTtsSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [conflictReadFailed, setConflictReadFailed] = useState(false);
+  const dialog = useRef<HTMLDivElement>(null);
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+  const voiceInput = useRef<HTMLInputElement>(null);
+  const runtimeDetails = useRef<HTMLDetailsElement>(null);
+
+  const load = useCallback(async () => {
+    setPhase("loading"); setNotice(""); setPending(null);
+    try {
+      const value = await agentApi.readFreeServiceSettings("edge-tts") as EdgeTtsSettings;
+      setSettings(value); setEnabled(value.enabled);
+      setVoice(value.voice); setPythonCommand(value.pythonCommand); setErrors({});
+      setPhase("editing");
+    } catch { setPhase("loadFailed"); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (phase === "editing") voiceInput.current?.focus(); }, [phase]);
+
+  const close = () => { active.current = false; setPending(null); onClose(); };
+  const onKeyDown = (event: ReactKeyboardEvent) => {
+    if (event.key === "Escape") { event.preventDefault(); close(); return; }
+    if (event.key !== "Tab") return;
+    const focusables = dialog.current?.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled])');
+    if (!focusables?.length) return;
+    const first = focusables[0]!, last = focusables[focusables.length - 1]!;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+
+  const edit = (setter: (value: string) => void) => (value: string) => { setter(value); setPending(null); setNotice(""); };
+  const readConflict = async () => {
+    setConflict(true);
+    try {
+      setSettings(await agentApi.readFreeServiceSettings("edge-tts") as EdgeTtsSettings); setConflictReadFailed(false);
+      setNotice("设置已被其他页面修改；你的输入已保留，请对照当前配置后再次保存。");
+    } catch { setConflictReadFailed(true); setNotice("设置已被其他页面修改，但最新状态读取失败。"); }
+  };
+
+  const submit = async (retry: typeof pending) => {
+    if (!settings || saving || conflictReadFailed) return;
+    const trimmedVoice = voice.trim();
+    const trimmedPython = pythonCommand.trim();
+    const fieldErrors: Record<string, string> = {};
+    if (!/^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$/.test(trimmedVoice)) fieldErrors.voice = "语音必须是 Edge 神经语音 ID，例如 zh-CN-XiaoxiaoNeural。";
+    if (!trimmedPython || /[\x00-\x1f\x7f]/.test(trimmedPython)) fieldErrors.pythonCommand = "Python 命令不能为空或含控制字符；填写能 import edge_tts 的解释器命令。";
+    setErrors(fieldErrors);
+    if (fieldErrors.pythonCommand && runtimeDetails.current) runtimeDetails.current.open = true;
+    if (Object.keys(fieldErrors).length) return;
+    const body = retry ?? { commandId: agentApi.newCommandId(), expectedRevision: settings.revision, enabled, voice: trimmedVoice, pythonCommand: trimmedPython };
+    setSaving(true);
+    dialog.current?.querySelector<HTMLButtonElement>('button[aria-label="关闭配置"]')?.focus();
+    try {
+      const receipt = await agentApi.saveFreeServiceSettings("edge-tts", body);
+      if (!active.current) return;
+      setPending(null);
+      onSaved(receipt.settings as EdgeTtsSettings);
+      onClose();
+    } catch (error) {
+      if (!active.current) return;
+      if (error instanceof AgentApiError) {
+        setPending(null);
+        if (error.payload.code === "STALE_REVISION") await readConflict();
+        else setNotice(error.payload.message);
+      } else {
+        setPending(body);
+        setNotice("保存结果未知，可重试同一命令；修改表单将生成新命令。");
+      }
+    } finally { setSaving(false); }
+  };
+
+  return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
+    <div className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-labelledby="edgetts-config-title" ref={dialog} onKeyDown={onKeyDown}>
+      <header className="agent-modal-header">
+        <div><h3 id="edgetts-config-title">配置 Edge 免费配音</h3><p>保存后生效，保存时不会发起配音。</p></div>
+        <button type="button" className="agent-icon-button" aria-label="关闭配置" onClick={close}><X aria-hidden="true" /></button>
+      </header>
+      {phase === "loading" ? <p className="agent-config-note">正在读取配置…</p> : phase === "loadFailed" ? <div className="agent-config-note">
+        <p>配置读取失败，无法编辑。</p><button type="button" onClick={() => void load()}>重试读取</button>
+      </div> : <form onSubmit={event => { event.preventDefault(); void submit(pending); }}>
+        <label className="agent-config-check"><input disabled={saving} type="checkbox" checked={enabled} onChange={event => { setEnabled(event.target.checked); setPending(null); setNotice(""); }} /><span>允许 Agent 使用免费配音</span></label>
+        <div className="agent-config-field">
+          <label htmlFor="edgetts-config-voice">语音</label>
+          <input disabled={saving} id="edgetts-config-voice" value={voice} onChange={event => edit(setVoice)(event.target.value)} ref={voiceInput} list="edgetts-voice-options" autoComplete="off" placeholder="zh-CN-XiaoxiaoNeural" aria-invalid={Boolean(errors.voice)} aria-describedby={errors.voice ? "edgetts-config-voice-error" : undefined} />
+          <datalist id="edgetts-voice-options">{EDGE_TTS_VOICE_OPTIONS.map(option => <option key={option} value={option} />)}</datalist>
+          {errors.voice ? <span className="agent-field-error" id="edgetts-config-voice-error" role="alert">{errors.voice}</span> : null}
+        </div>
+        <details className="agent-scope-details" ref={runtimeDetails}>
+          <summary>运行设置</summary>
+          <div className="agent-config-field">
+            <label htmlFor="edgetts-config-python">Python 命令</label>
+            <input disabled={saving} id="edgetts-config-python" value={pythonCommand} onChange={event => edit(setPythonCommand)(event.target.value)} autoComplete="off" placeholder="python3" aria-invalid={Boolean(errors.pythonCommand)} aria-describedby={errors.pythonCommand ? "edgetts-config-python-error" : "edgetts-config-runtime-note"} />
+            {errors.pythonCommand ? <span className="agent-field-error" id="edgetts-config-python-error" role="alert">{errors.pythonCommand}</span> : null}
+          </div>
+          <p className="agent-config-summary" id="edgetts-config-runtime-note">供管理员配置：填写已安装 edge-tts 的解释器可执行文件名或绝对路径，不含参数。服务器需在 Python 隔离模式（-I）下加载该依赖。</p>
+          {conflict && !conflictReadFailed ? <p className="agent-config-note">当前已保存 Python：{settings?.pythonCommand}</p> : null}
+        </details>
+        <p className="agent-config-summary">第三方维护的免费客户端，没有官方 SLA。配音失败会返回真实原因，不会自动改用付费配音。</p>
+        {notice ? <p className="agent-field-error" role="alert">{notice}</p> : null}
+        {conflict && !conflictReadFailed ? <aside className="agent-config-note" aria-label="当前已保存免费配音配置"><strong>当前已保存</strong><p>{settings?.enabled ? "已选用" : "已停用"} · {settings?.voice}</p></aside> : null}
+        {conflictReadFailed ? <button type="button" onClick={() => void readConflict()}>重试读取最新配置</button> : null}
+        <footer className="agent-modal-actions">
+          <button type="button" className="agent-secondary-button" onClick={close}>取消</button>
+          <button type="submit" className="agent-primary-button" disabled={saving || conflictReadFailed}>{pending ? "重试保存" : saving ? "保存中…" : "保存"}</button>
+        </footer>
+      </form>}
+    </div>
+  </div>;
+}
 // T2 用户页：资料保存在服务端（owner 一张），保存后 Bootstrap 展示名同步；不重建聊天。
 function ProfileEditor({ bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh }: {
   bootstrap: Bootstrap | null; conversations: Conversation[]; onConversation: (id: string) => void;

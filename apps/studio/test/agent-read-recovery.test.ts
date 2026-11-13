@@ -286,7 +286,10 @@ describe("agent read & recovery", () => {
     const revision = (await scopedJson("GET", `/api/agent/v1/artifacts/${artifact.id}/revisions/${artifact.revisionId}`)).body;
     const intent = {
       workId: null, title: "到期提案",
-      inputRevisions: [{ artifactId: artifact.id, revisionId: artifact.revisionId }],
+      inputSources: [{ kind: "artifact_revision", artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],
+      reviewInputs: [],
+      purpose: "draft",
+      scope: "到期提案草稿",
       operations: [{
         operationId: "opV", outputSlot: "v",
         inputs: [{ kind: "artifact_revision", artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],

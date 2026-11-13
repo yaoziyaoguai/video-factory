@@ -65,11 +65,11 @@ export class SkillPackages {
   async refresh(): Promise<SkillPackagesView> {
     this.catalog = null;
     const builtinRoot = realpathSync(this.skillsRoot);
-    const builtin: SkillPackage = { id: "builtin-skills", source: "builtin", name: "内置 Skill", origin: "builtin", skillIds: [], status: "ready", diagnostics: [] };
+    const builtin: SkillPackage = { id: "builtin-skills", source: "builtin", name: "内置 Skill", origin: "builtin", skillIds: [], status: "ready", diagnostics: [], runtimeStatus: "unchecked", runtimeMissing: [] };
     const configured = this.manager.listConfiguredPackages();
     const packages = [builtin, ...configured.map(entry => ({ id: `pkg-${digestOf(entry.source).slice(0, 24)}`,
       source: entry.source, name: entry.source.slice(0, 200), origin: "installed" as const, skillIds: [] as string[], status: "no_skills" as const,
-      diagnostics: [] as string[] }))];
+      diagnostics: [] as string[], runtimeStatus: "unchecked" as const, runtimeMissing: [] as string[] }))];
     const roots = new Map<string, string>([[builtin.id, builtinRoot]]);
     for (const [index, entry] of configured.entries()) {
       const pkg = packages[index + 1]!;
@@ -101,6 +101,11 @@ export class SkillPackages {
       return "skip";
     });
     const paths: { path: string; packageId: string }[] = [{ path: builtinRoot, packageId: builtin.id }];
+    // 原生包管理器只发现约定资源目录；根 SKILL.md 仍交给 SDK 原生加载和诊断。
+    for (const [packageId, root] of roots) {
+      const file = path.join(root, "SKILL.md");
+      if (packageId !== builtin.id && existsSync(file)) paths.push({ path: file, packageId });
+    }
     for (const resource of resolved.skills) {
       if (!resource.enabled || resource.metadata.origin !== "package") continue;
       const pkg = packages.find(item => item.origin === "installed" && item.source === resource.metadata.source);

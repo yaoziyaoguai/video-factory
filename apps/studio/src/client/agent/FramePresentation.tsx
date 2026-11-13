@@ -7,20 +7,20 @@ export function ArtifactIcon({ kind }: { kind: ArtifactHead["kind"] }) {
   return <Icon aria-hidden="true" />;
 }
 
-export const artifactLabel = (kind: ArtifactHead["kind"]) => ({ prompt: "Prompt", script: "脚本", analysis: "分析", storyboard: "分镜", image: "图片", video: "视频", audio: "音频" }[kind] ?? "内容");
+export const artifactLabel = (kind: ArtifactHead["kind"]) => ({ prompt: "Prompt", script: "脚本", analysis: "分析", storyboard: "分镜", image: "图片", video: "视频", audio: "音频", project: "工程", file: "文件" }[kind] ?? "内容");
 
-const STAGE_OWNED_LABELS: readonly [keyof Work["stages"], string][] = [
-  ["content", "内容稿"], ["plan", "画面与声音方案"], ["video", "视频初稿"],
-];
+export const REVIEW_ROLE_LABELS = {
+  content: "内容", plan: "方案", character: "角色", scene: "场景", storyboard: "分镜",
+  voice: "配音", music: "音乐", clip: "片段", video: "成片", other: "素材",
+} as const;
 
-// 归属派生标签：被某个创作阶段引用的产物按阶段称呼；其余产物沿用 kind 标签。
-// 同一产物先后承担多个阶段时取最新阶段（后面的覆盖前面的）。
+// 归属派生标签：被某个审阅事项引用的产物按角色称呼；其余产物沿用 kind 标签。
+// 同一产物先后承担多个角色时取最新归属（后面的覆盖前面的）。
 export function stageOwnedLabel(works: readonly Work[], artifact: ArtifactHead): string {
   let owned: string | null = null;
-  for (const work of works) for (const [stage, label] of STAGE_OWNED_LABELS) {
-    const stageView = work.stages[stage];
-    for (const source of [stageView.draft, stageView.approved]) {
-      if (source?.kind === "artifact_revision" && source.artifactId === artifact.id) owned = label;
+  for (const work of works) for (const group of work.reviewGroups) for (const item of group.items) {
+    for (const source of [item.draft, item.approved]) {
+      if (source?.kind === "artifact_revision" && source.artifactId === artifact.id) owned = REVIEW_ROLE_LABELS[item.role];
     }
   }
   return owned ?? artifactLabel(artifact.kind);

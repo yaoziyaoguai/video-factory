@@ -1,5 +1,5 @@
 import type { MediaExecutionPort } from "../../shared/agent/ports.js";
-import type { ExecutionInput, ExecutionObservation, MediaContent, OperationSpec, RecoveryQuery, Run } from "../../shared/agent/generated/contracts.js";
+import type { ContentSource, CreationBinding, ExecutionInput, ExecutionObservation, FrozenReviewTarget, LocalRenderOperation, MediaContent, OperationSpec, RecoveryQuery, RevisionRef, Run } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { renderSlotRole } from "./render-inputs.js";
 import { type EventHub, insertEvent } from "./event-log.js";
@@ -10,9 +10,9 @@ import { canonicalJson, digestOf, newAgentId, type AgentClock } from "./util.js"
 import { ProductionBlobs, type BlobRow } from "./production-blobs.js";
 import type { ProductionCrashHook } from "./production-service.js";
 import { aggregateSources, mergeSources, recordBlobSources } from "./material-store.js";
-import { attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, quoteMinor, runRow, specFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
+import { attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, quoteMinor, runRow, snapshotFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
 import { issueSubmitPermit } from "./submit-permit.js";
-import { setVideoOutput, type WorkRow } from "./creative-work.js";
+import { parseCreationState, setReviewItemDraft, setVideoOutput, type WorkRow } from "./creative-work.js";
 
 interface Lease { runId: string; epoch: number }
 export interface ProductionWorkerOptions {
@@ -246,30 +246,41 @@ export class ProductionWorker {
       if (run.state === "cancel_requested" || terminal(run.state)) return;
       const previous = attempts.filter(a => a.operation_id === op.operationId);
       if (previous.some(a => !terminal(a.state) || !a.billing_final || a.billing_conflict) || previous.length >= op.maxCreateAttempts) return;
-      if (!this.withinBudget(run, quoteMinor(op))) return;
+      // 本地免费运行没有报价与额度事实：预留记 0，不进预算门（§4.2.1 不造假账单）。
+      const free = snapshotFor(this.db, run).kind === "local";
+      const reserve = free ? 0 : quoteMinor(op);
+      if (!free && !this.withinBudget(run, reserve)) return;
       const id = newAgentId("att");
       this.db.prepare("INSERT INTO production_attempts(id,run_id,operation_id,ordinal,request_identity,phase,state,reserve_minor) VALUES(?,?,?,?,?,'prepared','prepared',?)")
-        .run(id, run.id, op.operationId, previous.length + 1, newAgentId("submit"), quoteMinor(op));
+        .run(id, run.id, op.operationId, previous.length + 1, newAgentId("submit"), reserve);
       this.refresh(run.id);
       return attemptsFor(this.db, run.id).find(a => a.id === id);
     })();
   }
   private withinBudget(run: RunRow, additionalReserve = 0): boolean {
+    const snapshot = snapshotFor(this.db, run);
+    // 本地运行报价与账务为空（§4.2.1），没有额度事实可判，不进预算门。
+    if (snapshot.kind === "local") return true;
     const held = attemptsFor(this.db, run.id).reduce((sum, a) => {
       const candidate = a.billing_json ? (JSON.parse(a.billing_json) as { netAmount: { amountMinor: number } }).netAmount.amountMinor : 0;
       const reserved = a.billing_final && !a.billing_conflict || a.phase === "prepared" && terminal(a.state) ? 0 : Math.max(0, a.reserve_minor - a.billed_minor);
       return sum + Math.max(candidate, a.billed_minor + reserved);
     }, 0);
-    if (held + additionalReserve <= specFor(this.db, run).maxSpend.amountMinor) return true;
+    if (held + additionalReserve <= snapshot.spec.maxSpend.amountMinor) return true;
     this.fail(run.id, "BUDGET_EXHAUSTED", "实际费用已超出剩余额度，没有提交后续操作。");
     return false;
   }
   private executionInput(run: RunRow, op: OperationSpec, attempt: AttemptRow): ExecutionInput {
+    // code_project 的执行事实由端口物化：工程本体来自 parameters.projectRevision，
+    // 媒体输入按槽位落 inputs/；文本与工程引用输入不产生执行文件。
+    const codeProject = op.kind === "render" && op.parameters.assembly === "code_project";
     const resolvedInputs: ExecutionInput["resolvedInputs"] = [];
     for (const [slot, ref] of op.inputs.entries()) {
-      if (ref.kind === "text") continue;
-      const role = op.kind === "render" ? renderSlotRole(op.parameters, slot) : "none";
+      if (ref.kind === "text" || ref.kind === "project_revision") continue;
+      const role = op.kind === "render" && !codeProject ? renderSlotRole(op.parameters, slot) : "none";
       const audio = role === "audio", image = role === "image";
+      // 混音音乐槽额外接受本地登记 WAV；旁白槽仍是供应商 MP3 契约（与 prepare 边界一致）。
+      const musicSlot = op.kind === "render" && op.parameters.assembly === "mixed_concat" ? op.parameters.music?.inputSlot : undefined;
       let id: string | undefined;
       if (ref.kind === "blob") id = ref.blobId;
       else if (ref.kind === "operation_output") id = operationsFor(this.db, run.id).find(o => o.id === ref.producerOperationId)?.output_blob_id ?? undefined;
@@ -278,14 +289,16 @@ export class ProductionWorker {
         if (!revision || revision.digest !== ref.digest) throw new AgentError("CAPABILITY_UNAVAILABLE", "冻结内容不可用。");
         const content = JSON.parse(revision.content_json) as { format: string; blobId?: string };
         if (content.format === "media") id = content.blobId;
+        else if (codeProject) throw new AgentError("INVALID_INPUT", "工程的数据输入必须是媒体修订或工程修订。");
         else if (op.kind === "render") throw new AgentError("INVALID_INPUT", audio ? "旁白槽只接受音频修订。" : image ? "图片片段只接受图片修订。" : "有序拼接只接受视频片段。");
       }
       if (id) {
         const blob = this.blobs.get(run.owner_id, id);
         this.blobs.verify(blob);
-        if (op.kind === "render") {
-          const accepted = audio ? blob.mime_type === "audio/mpeg" : image ? blob.mime_type.startsWith("image/") : blob.mime_type === "video/mp4" || blob.mime_type === "video/webm";
-          if (!accepted) throw new AgentError("INVALID_INPUT", audio ? "旁白槽只接受音频。" : image ? "图片片段只接受图片。" : "有序拼接只接受视频片段。");
+        // code_project 的媒体类型由端口按 MEDIA_INPUT_EXTENSION 落位，不支持的类型在执行处确定性失败。
+        if (op.kind === "render" && !codeProject) {
+          const accepted = audio ? blob.mime_type === "audio/mpeg" || slot === musicSlot && blob.mime_type === "audio/wav" : image ? blob.mime_type.startsWith("image/") : blob.mime_type === "video/mp4" || blob.mime_type === "video/webm";
+          if (!accepted) throw new AgentError("INVALID_INPUT", audio ? slot === musicSlot ? "音乐槽只接受音频。" : "旁白槽只接受音频。" : image ? "图片片段只接受图片。" : "有序拼接只接受视频片段。");
         }
         resolvedInputs.push({ slot, blobId: id, digest: blob.digest });
       } else if (ref.kind !== "artifact_revision") throw new AgentError("CAPABILITY_UNAVAILABLE", "依赖输出尚未可用。");
@@ -318,7 +331,10 @@ export class ProductionWorker {
           if (!observation.blob) throw new AgentError("CAPABILITY_UNAVAILABLE", "输出尚未落盘。");
           const blob = this.blobs.get(run.owner_id, observation.blob.id);
           if (blob.conversation_id !== run.conversation_id || blob.digest !== observation.blob.digest || blob.mime_type !== observation.blob.mimeType) throw new AgentError("INVALID_INPUT", "输出身份不一致。");
-          const expected = op.kind === "render" || op.kind === "video" ? "video/" : op.kind === "speech" ? "audio/" : "image/";
+          // code_project 的期望输出类型按冻结参数核对；其余 render 仍以视频为准。
+          const expected = op.kind === "render" && op.parameters.assembly === "code_project"
+            ? op.parameters.expectedMediaKind === "image" ? "image/" : op.parameters.expectedMediaKind === "audio" ? "audio/" : "video/"
+            : op.kind === "render" || op.kind === "video" ? "video/" : op.kind === "speech" ? "audio/" : "image/";
           if (!blob.mime_type.startsWith(expected)) throw new AgentError("INVALID_INPUT", "输出类型不匹配。");
           this.blobs.verify(blob);
           this.publish(run, op, blob);
@@ -351,10 +367,24 @@ export class ProductionWorker {
       return;
     }
     const artifactId = newAgentId("art"), revisionId = newAgentId("rev"), now = this.clock();
-    const spec = specFor(this.db, run);
-    const final = spec.finalOutput.operationId === op.operationId;
-    const title = final ? run.title : `${run.title} · ${{ image: "图片", video: "视频片段", speech: "配音", render: "合成视频" }[op.kind]} ${spec.operations.filter(item => item.kind === op.kind).findIndex(item => item.operationId === op.operationId) + 1}`;
-    const content: MediaContent = { format: "media", blobId: blob.id, mimeType: blob.mime_type, durationMs: blob.duration_ms };
+    const snapshot = snapshotFor(this.db, run);
+    // 旧付费快照缺新组模型字段时在读取边界一次规范化为空集合与默认用途；不改写原 JSON、不补造认可事实。
+    const reviewInputs = snapshot.spec.reviewInputs ?? [];
+    const purpose = snapshot.spec.purpose ?? "production";
+    // §11.7 来源1：来源按本操作实际输入解析——artifact_revision 数据输入、operation_output 沿
+    // producer 产物既有 binding 继承、code_project 工程修订的 sourceRevisions（声明提供给工程的资源）。
+    // 不把整条 run 的 inputSources 复制到每个产物；工程链去重后随 projectRevisions 留存。
+    const sources = operationSources(this.db, run, op);
+    const final = snapshot.spec.finalOutput.operationId === op.operationId;
+    const kindLabel = op.kind === "speech" ? "配音" : op.kind === "image" ? "图片" : op.kind === "video" ? "视频片段"
+      : op.kind === "render" && op.parameters.assembly === "code_project"
+        ? { image: "图片", audio: "音频", video: "合成视频" }[op.parameters.expectedMediaKind]
+      : "合成视频";
+    const title = final ? run.title : `${run.title} · ${kindLabel} ${snapshot.spec.operations.filter(item => item.kind === op.kind).findIndex(item => item.operationId === op.operationId) + 1}`;
+    const artifactKind = op.kind === "speech" ? "audio" : op.kind === "image" ? "image" : op.kind === "video" ? "video"
+      : op.kind === "render" && op.parameters.assembly === "code_project" ? op.parameters.expectedMediaKind
+      : "video";
+    const content: MediaContent = { format: "media", blobId: blob.id, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms };
     if (op.kind === "render") {
       // 成片署名：按冻结输入的实际 blob 顺序聚合素材来源（去重、保持首次使用顺序），
       // 与修订同事务登记；本地生成或无来源输入的成品不带 sources。
@@ -364,32 +394,67 @@ export class ProductionWorker {
       ]));
       if (sources.length > 0) content.sources = sources;
     }
-    // 实际视频初稿只在文件落盘后登记为阶段主稿；文本回复不能推进视频状态。
-    // 方案来源读本次已受理提案的固定持久关系（§10.1），不读 work 当前指针；
-    // 署名同样用本次提案 id 与 digest，不能拿原提案 digest 配新提案。
-    const planDraft = final && (op.kind === "render" || op.kind === "video")
-      ? proposalPlanSource(this.db, run.owner_id, run.conversation_id, run.proposal_id) : null;
-    if (final && (op.kind === "render" || op.kind === "video") && !planDraft) {
-      // 受理门保证视频提案必有方案关系；到这里说明关系事实缺失：保留文件与费用事实，
-      // 不创建无绑定成片、不把 run 标成功（observe 按既有失败语义登记）。
-      throw new AgentError("CAPABILITY_UNAVAILABLE", "成片发布缺少方案关联事实，已保留输出文件待核对；不登记为视频初稿。");
+    // 新写入只用新组模型 binding（§4.3）：本地运行按操作冻结目标；付费成片按受理冻结目标，
+    // 首个成片（受理时还没有视频事项）按实际落位目标登记来源。旧固定阶段形状不再写。
+    // 付费非成片输出保留无绑定修订。
+    const localOperation = snapshot.kind === "local" ? JSON.parse(operation.spec_json) as LocalRenderOperation : null;
+    const finalVideoDraft = final && (op.kind === "render" || op.kind === "video");
+    // 本操作自己的工程在前，继承工程在后；projectRevision 仍只表示本操作执行的工程（§11.7 来源3）。
+    const projectFields: Pick<CreationBinding, "projectRevision" | "projectRevisions"> =
+      op.kind === "render" && op.parameters.assembly === "code_project"
+        ? { projectRevision: op.parameters.projectRevision, projectRevisions: sources.projectRevisions }
+        : sources.projectRevisions.length ? { projectRevisions: sources.projectRevisions } : {};
+    let binding: CreationBinding | null = null;
+    let videoTarget: FrozenReviewTarget | null = null;
+    if (localOperation) {
+      binding = {
+        workId: run.work_id, groupId: localOperation.target.groupId, itemId: localOperation.target.itemId,
+        inputSources: sources.inputSources, reviewInputs, purpose, runId: run.id,
+        ...projectFields,
+      };
+    } else if (finalVideoDraft) {
+      // 实际视频初稿只在文件落盘后登记；文本回复不能推进视频状态。
+      // 旧付费快照的方案来源读本次已受理提案的固定持久关系（§10.1），不读 work 当前指针；
+      // 新组模型提案的受理依据已随快照冻结（reviewInputs），没有方案关系可读。
+      if (!("type" in snapshot.spec)) {
+        const planDraft = proposalPlanSource(this.db, run.owner_id, run.conversation_id, run.proposal_id!);
+        if (!planDraft) {
+          // 旧受理门保证视频提案必有方案关系；到这里说明关系事实缺失：保留文件与费用事实，
+          // 不创建无绑定成片、不把 run 标成功（observe 按既有失败语义登记）。
+          throw new AgentError("CAPABILITY_UNAVAILABLE", "成片发布缺少方案关联事实，已保留输出文件待核对；不登记为视频初稿。");
+        }
+      }
+      videoTarget = run.frozen_target_json ? JSON.parse(run.frozen_target_json) as FrozenReviewTarget : null;
     }
-    const binding = planDraft ? {
-      workId: run.work_id, stage: "video" as const, source: planDraft.source,
-      proposalRef: { proposalId: run.proposal_id, digest: planDraft.proposalDigest },
-    } : null;
+    const source: ContentSource = { kind: "artifact_revision", artifactId, revisionId, digest: digestOf(content) };
+    // 草稿落位先于修订写入（§4.2.1 在途改稿、§11.6 S4）：本地与付费都按受理冻结的基准落位——
+    // null 基准表示受理时确实无稿，完成时仍为空才落；准确基准只在当前仍是该版时更新。
+    // 未落位（后继稿、目标已删除、旧历史运行缺冻结目标）时只保留 run 产出，不覆盖、不改挂别项。
+    if (localOperation || finalVideoDraft) {
+      const work = this.db.prepare("SELECT * FROM works WHERE id = ?").get(run.work_id) as WorkRow | undefined;
+      if (work) {
+        if (localOperation) {
+          const state = parseCreationState(work);
+          const item = state.groups.find(group => group.id === localOperation.target.groupId)
+            ?.items.find(candidate => candidate.id === localOperation.target.itemId);
+          const currentDraft = item?.draft?.kind === "artifact_revision" ? item.draft.revisionId : null;
+          if (item && currentDraft === localOperation.target.baseRevisionId) {
+            setReviewItemDraft(this.db, now, work, localOperation.target, source);
+          }
+        } else if (videoTarget) {
+          setVideoOutput(this.db, now, work, source, videoTarget);
+          // 归属记录受理冻结的身份：即使未落位，run 产出仍指向原目标可查。
+          binding = { workId: run.work_id, groupId: videoTarget.groupId, itemId: videoTarget.itemId,
+            inputSources: sources.inputSources, reviewInputs, purpose, runId: run.id, ...projectFields };
+        }
+      }
+    }
     this.db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,work_id,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?)")
-      .run(artifactId, run.conversation_id, run.owner_id, title, op.kind === "speech" ? "audio" : op.kind === "render" ? "video" : op.kind, run.work_id, revisionId, maxArtifactSeq(this.db, run.conversation_id) + 1, now, now);
+      .run(artifactId, run.conversation_id, run.owner_id, title, artifactKind, run.work_id, revisionId, maxArtifactSeq(this.db, run.conversation_id) + 1, now, now);
     this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,?,?,?,?)")
       .run(revisionId, artifactId, run.id, digestOf(content), canonicalJson(content), binding ? canonicalJson(binding) : null, now);
     this.db.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES(?,?)").run(revisionId, blob.id);
     this.db.prepare("UPDATE production_operations SET output_blob_id=? WHERE run_id=? AND id=?").run(blob.id, run.id, op.operationId);
-    if (binding) {
-      const work = this.db.prepare("SELECT * FROM works WHERE id = ?").get(run.work_id) as WorkRow | undefined;
-      if (work) setVideoOutput(this.db, now, work, {
-        kind: "artifact_revision", artifactId, revisionId, digest: digestOf(content),
-      }, run.proposal_id, run.id);
-    }
     insertEvent(this.db, now, { ownerId: run.owner_id, conversationId: run.conversation_id, kind: "artifact.delivered", entityId: artifactId, entityVersion: 1, notification: "new_output" });
   }
   // unknown 的用户说明按事实来源区分：本地无退出证据、供应商无任务身份，或仍在正常查询原任务。
@@ -477,7 +542,8 @@ export class ProductionWorker {
     if (terminal(state) && !terminal(before.state)) {
       // 费用说明按真实查询渠道区分（R2）：仍有会继续查询的账务未核尝试才说“正在核对”，
       // 没有渠道时如实说“实际费用未取得”，不把无从核对的待对账说成进行中的核对。
-      const feeNote = finances(this.db, run).state !== "pending_reconciliation" ? ""
+      // 本地免费运行没有付费快照与账务，不谈费用。
+      const feeNote = run.proposal_id === null || finances(this.db, run).state !== "pending_reconciliation" ? ""
         : attempts.some(a => this.billingQueryAlive(a, renderOperationIds(ops))) ? "费用仍在核对。" : "实际费用未取得。";
       insertMessage(this.db, this.clock(), {
         id: newAgentId("msg"), ownerId: run.owner_id, conversationId: run.conversation_id, requestId: null,
@@ -492,6 +558,65 @@ export class ProductionWorker {
 function renderOperationIds(operations: OperationRow[]): Set<string> {
   return new Set(operations.filter(o => (JSON.parse(o.spec_json) as OperationSpec).kind === "render").map(o => o.id));
 }
+
+// §11.7 来源1：本操作的直接来源——artifact_revision 数据输入、operation_output 沿 producer 产物
+// 既有 binding 继承（来源与工程）、code_project 工程修订 content.sourceRevisions（声明提供给工程的
+// 资源，digest 读冻结行）。工程链含本操作自己的工程（在前）与继承工程，按 revisionId 去重；
+// 不另做来源猜测器，历史产出没有 binding 就没有可继承的事实。
+function operationSources(db: AgentDatabase, run: RunRow, op: OperationSpec): { inputSources: ContentSource[]; projectRevisions: RevisionRef[] } {
+  const inputSources: ContentSource[] = [];
+  const projectRevisions: RevisionRef[] = [];
+  const seenSources = new Set<string>();
+  const seenProjects = new Set<string>();
+  const pushSource = (artifactId: string, revisionId: string, digest: string) => {
+    const key = `${artifactId}:${revisionId}`;
+    if (seenSources.has(key)) return;
+    seenSources.add(key);
+    inputSources.push({ kind: "artifact_revision", artifactId, revisionId, digest });
+  };
+  const pushProject = (ref: RevisionRef) => {
+    if (seenProjects.has(ref.revisionId)) return;
+    seenProjects.add(ref.revisionId);
+    projectRevisions.push(ref);
+  };
+  const projectParameters = op.kind === "render" && op.parameters.assembly === "code_project" ? op.parameters : null;
+  if (projectParameters) pushProject(projectParameters.projectRevision);
+  for (const input of op.inputs) {
+    if (input.kind === "artifact_revision") {
+      pushSource(input.artifactId, input.revisionId, input.digest);
+    } else if (input.kind === "project_revision") {
+      pushProject(input.projectRevision);
+    } else if (input.kind === "operation_output") {
+      const producer = db.prepare(`
+        SELECT ar.creation_binding_json AS binding FROM production_operations po
+        JOIN revision_blob_links l ON l.blob_id = po.output_blob_id
+        JOIN artifact_revisions ar ON ar.id = l.revision_id AND ar.run_id = po.run_id
+        WHERE po.run_id = ? AND po.id = ?`).get(run.id, input.producerOperationId) as { binding: string | null } | undefined;
+      const producerBinding = producer?.binding ? JSON.parse(producer.binding) as CreationBinding : null;
+      if (!producerBinding) continue;
+      for (const source of producerBinding.inputSources) {
+        if (source.kind === "artifact_revision") pushSource(source.artifactId, source.revisionId, source.digest);
+      }
+      if (producerBinding.projectRevision) pushProject(producerBinding.projectRevision);
+      for (const ref of producerBinding.projectRevisions ?? []) pushProject(ref);
+    }
+  }
+  if (projectParameters) {
+    const projectRevision = getRevisionRow(db, projectParameters.projectRevision.artifactId, projectParameters.projectRevision.revisionId);
+    const content = projectRevision ? JSON.parse(projectRevision.content_json) as { sourceRevisions?: RevisionRef[] } : null;
+    for (const ref of content?.sourceRevisions ?? []) {
+      // 封存时已验证来源修订存在且修订不可变；digest 读冻结行，缺行说明完整性破坏，如实失败。
+      const sourceRevision = getRevisionRow(db, ref.artifactId, ref.revisionId);
+      if (!sourceRevision) throw new AgentError("CAPABILITY_UNAVAILABLE", "冻结内容不可用。");
+      pushSource(ref.artifactId, ref.revisionId, sourceRevision.digest);
+    }
+  }
+  if (inputSources.length > 64 || projectRevisions.length > 64) {
+    throw new AgentError("INVALID_INPUT", "本操作来源链超过 64 项，请减少本次使用的素材或工程。");
+  }
+  return { inputSources, projectRevisions };
+}
+
 function renderInputBlobIds(db: AgentDatabase, runId: string, op: OperationSpec): string[] {
   const bySlot: (string | undefined)[] = [];
   for (const [slot, input] of op.inputs.entries()) {

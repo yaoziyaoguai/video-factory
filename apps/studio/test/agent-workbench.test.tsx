@@ -5,13 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentWorkbench } from "../src/client/agent/AgentWorkbench.js";
 import { ProposalCard } from "../src/client/agent/AgentWorkbench.js";
 import { MarkdownText } from "../src/client/agent/markdown.js";
-import { MediaPreview, RunCard } from "../src/client/agent/ProductionCards.js";
+import { FilePreview, MediaPreview, RunCard } from "../src/client/agent/ProductionCards.js";
 import {
-  appendNotice, clearDraft, draftStorageKey, loadDraft, loadPanelLayout, mergeArtifacts,
-  mergeMessages, mergeProposals, saveDraft, savePanelLayout,
+  appendNotice, clearDraft, draftStorageKey, loadDraft, loadPanelLayout, mergeArtifacts, mergeLibraryPicks, mergeMessages, mergeProposals, saveDraft, savePanelLayout,
+  type LibraryPick,
 } from "../src/client/agent/workspace-state.js";
 import type {
-  ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, MaterialBatch, Message, MessageInput, Snapshot, Proposal, Run, SkillPackagesView,
+  ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, LegacyProductionSpec, LibraryVideo, MaterialBatch, Message, MessageInput, ProductionSpec, Snapshot, Proposal, Run, SkillPackagesView, Work,
 } from "../src/shared/agent/generated/contracts.js";
 
 // 工作台纯逻辑（合并/预览策略/草稿/布局）+ 组件冒烟：API 与 SSE 全部打桩，浏览器端真实交互留给 A6 手工验证。
@@ -107,12 +107,33 @@ function messageFixture(options: Partial<Message> & Pick<Message, "id" | "role" 
     references: { artifacts: [], proposalIds: [], runIds: [], materialBatchIds: [] },
     kind: "chat",
     feedback: null,
+    librarySelections: [],
     ...options,
   };
 }
 
 function artifactFixture(id: string, title: string, revisionId: string, revisionNumber: number): ArtifactHead {
   return { id, title, kind: "script", revisionId, revisionNumber, workId: null, updatedAt: "2026-01-01T00:00:00.000Z" };
+}
+
+function libraryVideoFixture(options: Partial<LibraryVideo> = {}): LibraryVideo {
+  return {
+    video: { artifactId: "art-lib-video", revisionId: "rev-lib-video" },
+    workId: "work-lib",
+    conversationId: "conv-lib-src",
+    title: "山路定稿",
+    finalizedAt: "2026-02-01T00:00:00.000Z",
+    plan: null,
+    content: null,
+    originMessageId: "msg-src",
+    narrationText: null,
+    projectFiles: [{ project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" }, relativePath: "main.cjs", mimeType: "text/javascript" }],
+    project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" },
+    materials: [{ source: { artifactId: "art-lib-mat", revisionId: "rev-lib-mat" }, label: "山路", kind: "prompt", provenance: [] }],
+    reviewSources: [],
+    provenanceStatus: "recorded",
+    ...options,
+  };
 }
 
 function snapshotFixture(conversation: Conversation, options: {
@@ -144,20 +165,22 @@ const REVISION_FIXTURE: ArtifactRevision = {
   createdAt: "2026-01-01T00:00:00.000Z",
 };
 
-function productionFixture(conversation: Conversation): { proposal: Proposal; run: Run; snapshot: Snapshot; bootstrap: Bootstrap } {
-  const proposal: Proposal = { id: "proposal-b", conversationId: conversation.id, digest: "a".repeat(64), revision: 1, state: "ready", acceptedRunId: null,
-    expiresAt: "2099-01-01T00:00:00Z", priceDisclosure: "模拟媒体 12 元，无真实扣费", spec: { workId: null, title: "模拟短片", inputRevisions: [{ artifactId: "art-1", revisionId: "rev-1" }],
-      operations: [{ operationId: "op-1", outputSlot: "video", inputs: [{ kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-1", digest: "a".repeat(64) }],
-        kind: "video", model: BOOTSTRAP.models[0]!.binding, parameters: { durationSeconds: 3, aspectRatio: "16:9", resolution: "640x360", audioMode: "none" }, maxCreateAttempts: 1,
-        quotePerAttempt: { currency: "CNY", amountMinor: 1200 }, priceKind: "bounded" }], finalOutput: { operationId: "op-1", outputSlot: "video" }, maxSpend: { currency: "CNY", amountMinor: 1200 } } };
-  const run: Run = { id: "run-b", conversationId: conversation.id, workId: "work-b", snapshotId: "snapshot-b", proposalId: proposal.id, revision: 1, state: "queued", title: "模拟短片",
-    finance: { state: "reserved", currency: "CNY", reservedMinor: 1200, pendingUnknownMinor: 0, settledMinor: 0, priceKind: "bounded" }, inputRevisions: proposal.spec.inputRevisions,
+function productionFixture(conversation: Conversation): { proposal: Proposal; run: Run; snapshot: Snapshot; bootstrap: Bootstrap; spec: LegacyProductionSpec } {
+  // 旧形状 spec 夹具：专门覆盖 LegacyProductionSpec 读取路径（ProductionSpec 见 read-tools/audit 侧测试）。
+  const spec: LegacyProductionSpec = { workId: null, title: "模拟短片", inputRevisions: [{ artifactId: "art-1", revisionId: "rev-1" }],
+    operations: [{ operationId: "op-1", outputSlot: "video", inputs: [{ kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-1", digest: "a".repeat(64) }],
+      kind: "video", model: BOOTSTRAP.models[0]!.binding, parameters: { durationSeconds: 3, aspectRatio: "16:9", resolution: "640x360", audioMode: "none" }, maxCreateAttempts: 1,
+      quotePerAttempt: { currency: "CNY", amountMinor: 1200 }, priceKind: "bounded" }], finalOutput: { operationId: "op-1", outputSlot: "video" }, maxSpend: { currency: "CNY", amountMinor: 1200 } };
+  const proposal: Proposal = { id: "proposal-b", conversationId: conversation.id, digest: "a".repeat(64), revision: 1, state: "ready", acceptedRunId: null, acceptanceBlocker: null,
+    expiresAt: "2099-01-01T00:00:00Z", priceDisclosure: "模拟媒体 12 元，无真实扣费", spec };
+  const run: Run = { id: "run-b", conversationId: conversation.id, workId: "work-b", snapshotId: "snapshot-b", origin: { kind: "proposal", proposalId: proposal.id }, revision: 1, state: "queued", title: "模拟短片",
+    finance: { state: "reserved", currency: "CNY", reservedMinor: 1200, pendingUnknownMinor: 0, settledMinor: 0, priceKind: "bounded" }, inputRevisions: spec.inputRevisions,
     outputRevisions: [], operations: [{ operationId: "op-1", kind: "video", state: "pending", media: null }], segments: [],
     createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", issue: null };
   const snapshot = snapshotFixture(conversation, { artifacts: [artifactFixture("art-1", "原 Prompt", "rev-1", 1)], messages: [messageFixture({ id: "proposal-message", role: "assistant", text: "提案准备好了。", references: { artifacts: [], proposalIds: [proposal.id], runIds: [], materialBatchIds: [] } })] });
   snapshot.proposals.items = [proposal];
   const bootstrap: Bootstrap = { ...BOOTSTRAP, models: [...BOOTSTRAP.models, { ...BOOTSTRAP.models[0]!, kind: "video", features: ["offline-fixture"] }] };
-  return { proposal, run, snapshot, bootstrap };
+  return { proposal, run, snapshot, bootstrap, spec };
 }
 
 it("B 确认响应丢失后使用原 commandId 重试；成功后输入锁定，草稿与阅读保持", async () => {
@@ -235,7 +258,7 @@ it("B 回复提案携带精确引用，保留问号；后台新结果不抢预�
   expect(command.proposalRef).toEqual({ proposalId: f.proposal.id, digest: f.proposal.digest });
   expect(command.text).toBe("开始制作？"); expect(command.target).toBeNull(); expect(command.skillId).toBeNull();
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "我们聊点别的");
-  f.run = { ...f.run, revision: 3, state: "succeeded", finance: { ...f.run.finance, state: "settled", settledMinor: 1200, reservedMinor: 0 }, outputRevisions: [{ artifactId: "video-b", revisionId: "video-rev" }] };
+  f.run = { ...f.run, revision: 3, state: "succeeded", finance: { state: "settled", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 0, settledMinor: 1200, priceKind: "bounded" }, outputRevisions: [{ artifactId: "video-b", revisionId: "video-rev" }] };
   f.snapshot.runs.items = [f.run];
   f.snapshot.artifacts.items.push({ ...artifactFixture("video-b", "新视频", "video-rev", 1), kind: "video" });
   FakeEventSource.instances.find(s => !s.closed)!.emit("business", { eventId: "completed", kind: "run.changed", entityId: "run-b", entityVersion: 3, notification: "quiet" });
@@ -282,9 +305,9 @@ function installWorkbenchRoutes(options: {
   return calls;
 }
 
-function renderAt(path: string) {
+function renderAt(path: string, state?: unknown) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
+    <MemoryRouter initialEntries={[state === undefined ? path : { pathname: path, state }]}>
       <Routes>
         <Route path="/agent" element={<AgentWorkbench />} />
         <Route path="/agent/:conversationId" element={<AgentWorkbench />} />
@@ -303,6 +326,36 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   window.localStorage.clear();
+});
+
+it("R45-CLOSE-1 旧继续缓存缺少组目标时不发送，保留原命令并提示核对", async () => {
+  const conversation = conversationFixture("legacy-continue", "创作对话");
+  const snapshot = snapshotFixture(conversation);
+  const source = { kind: "artifact_revision" as const, artifactId: "art-1", revisionId: "rev-1", digest: "sha256:fixture" };
+  snapshot.artifacts.items = [artifactFixture("art-1", "脚本", "rev-1", 1)];
+  snapshot.works = [{
+    id: "work-b", title: "城市动画", revision: 1, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    reviewGroups: [{ id: "group-content", title: "内容草稿", revision: 1, nextIntent: null,
+      items: [{ id: "item-content", label: "脚本", role: "content", required: true,
+        draft: source, approved: source, finalizedSource: null, confirmationId: "conf-b", approvedAt: "2026-01-01T00:00:00Z" }] }],
+  }];
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshot }, onRequest: (url, call) => {
+    if (call.method === "POST" && url.endsWith("/messages")) {
+      return { status: 202, body: { requestId: "req-continue", messageId: "msg-continue", state: "completed", replayed: false, runId: null } };
+    }
+    return null;
+  } });
+  const storageKey = `vf:agent-review:${conversation.id}:work-b:group-content:continue`;
+  const saved = JSON.stringify({ commandId: "pre-r45-pending-continue", text: "「内容草稿」这一组可以了，请继续。",
+    target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null, reviewConfirmation: null }, null, 2);
+  localStorage.setItem(storageKey, saved);
+  renderAt(`/agent/${conversation.id}`);
+  await screen.findByText("这一组已全部认可；想调整时在对话中提出。");
+  await userEvent.click(screen.getByRole("button", { name: "继续" }));
+  expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(0);
+  expect(localStorage.getItem(storageKey)).toBe(saved);
+  expect(await screen.findByRole("alert")).toHaveTextContent("这是旧版留下的继续操作");
+  expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
 });
 
 // —— 纯逻辑 ——
@@ -369,6 +422,22 @@ describe("workspace 状态合并与预览策略", () => {
     expect(loadDraft("c2")).toBeNull();
     clearDraft("c1");
     expect(loadDraft("c1")).toBeNull();
+  });
+
+  it("G4-2 库选材草稿持久化与合并：坏条目丢弃，同一定稿下同一素材/文件去重", () => {
+    const pick = (label: string, selection: LibraryPick["selection"]): LibraryPick => ({ label, selection });
+    const material = pick("山路（Prompt）", { sourceVideo: { artifactId: "art-v", revisionId: "rev-v" }, source: { kind: "artifact_revision", artifactId: "art-src", revisionId: "rev-src" } });
+    const file = pick("main.cjs", { sourceVideo: { artifactId: "art-v", revisionId: "rev-v" }, source: { kind: "project_file", project: { artifactId: "art-p", revisionId: "rev-p" }, relativePath: "main.cjs" } });
+    saveDraft("c1", { text: "改编", targetArtifactId: null, targetRevisionId: null, librarySelections: [material] });
+    expect(loadDraft("c1")?.librarySelections).toEqual([material]);
+    // 同一素材重复带入不重复；同一定稿下另一文件、另一条定稿下的同名素材都保留
+    expect(mergeLibraryPicks([material], [material, file])).toEqual([material, file]);
+    const otherVideo = pick("山路（Prompt）", { sourceVideo: { artifactId: "art-v", revisionId: "rev-v2" }, source: { kind: "artifact_revision", artifactId: "art-src", revisionId: "rev-src" } });
+    expect(mergeLibraryPicks([material], [otherVideo])).toEqual([material, otherVideo]);
+    // 旧草稿无字段照常读出；坏条目（缺 label/selection 结构）只丢弃该条
+    expect(loadDraft("c-noold")?.librarySelections).toBeUndefined();
+    window.localStorage.setItem(draftStorageKey("c3"), JSON.stringify({ text: "x", targetArtifactId: null, targetRevisionId: null, librarySelections: [material, { label: "坏" }, { label: 1 }] }));
+    expect(loadDraft("c3")?.librarySelections).toEqual([material]);
   });
 
   it("面板布局持久化：存取往返，非法值被过滤", () => {
@@ -524,8 +593,8 @@ describe("AgentWorkbench", () => {
         }],
         finalOutput: { operationId: "op-1", outputSlot: "voice" }, maxSpend: { currency: "CNY", amountMinor: 0 },
       },
-      state: "ready", priceDisclosure: "预计 0.00 元（离线验证，不产生真实支出）", expiresAt: "2026-01-01T01:00:00.000Z",
-      acceptedRunId: null, revision: 1,
+      state: "ready", priceDisclosure: "预计 0.00 元（离线验证，不产生真实支出）", expiresAt: "2099-01-01T00:00:00.000Z",
+      acceptedRunId: null, revision: 1, acceptanceBlocker: null,
     }} />);
     expect(screen.getByRole("button", { name: "确认制作" })).toBeDisabled();
   });
@@ -686,7 +755,7 @@ it("音乐候选保留原批次顺序，采用第二首用准确引用且重试�
   expect(commands[0]!.text).not.toContain("audio-new");
   expect(commands[0]!.text).not.toContain("personal_social_ugc");
   expect(commands[0]!.text).toContain("用途不明且影响许可时请先向我澄清");
-  expect(commands[0]!.stageConfirmation).toBeUndefined();
+  expect(commands[0]!.reviewConfirmation).toBeUndefined();
   const link = await screen.findByRole("link", { name: "「雨后音乐」原批次第 2 首「未标声乐的曲目」" });
   expect(link.getAttribute("href")).toContain("/material-batches/audio-old#candidate=old-song-2");
   expect(document.querySelector('[data-message-id="music-adopt"]')).not.toHaveTextContent("old-song-2");
@@ -792,7 +861,7 @@ it("审计 F6 回归：无显式绑定的首次干预继承当前目标，未改
 
 it.each([false, true])("审计 F5：末次费用事件补读失败保留重连入口，历史页=%s", async outsideFirstPage => {
   const conv = conversationFixture("billing-resync", "费用同步"), f = productionFixture(conv);
-  const run = { ...f.run, state: "succeeded" as const, finance: { ...f.run.finance, state: "pending_reconciliation" as const, reservedMinor: 0, pendingUnknownMinor: 1200 } };
+  const run = { ...f.run, state: "succeeded" as const, finance: { state: "pending_reconciliation" as const, currency: "CNY" as const, reservedMinor: 0, pendingUnknownMinor: 1200, settledMinor: 0, priceKind: "bounded" as const } };
   f.snapshot.runs.items = [run];
   f.snapshot.messages.items.push(messageFixture({ id: "finished-run", role: "system_notice", text: "执行结束，费用待核", references: { artifacts: [], proposalIds: [], runIds: [run.id], materialBatchIds: [] } }));
   let failReads = 0;
@@ -806,7 +875,7 @@ it.each([false, true])("审计 F5：末次费用事件补读失败保留重连�
   await screen.findByText(/供应商账单待核对/);
   await waitFor(() => expect(FakeEventSource.instances.some(s => !s.closed)).toBe(true));
   failReads = outsideFirstPage ? 2 : 1;
-  latest = { ...run, revision: 2, finance: { ...run.finance, state: "settled", pendingUnknownMinor: 0, settledMinor: 1200 } };
+  latest = { ...run, revision: 2, finance: { state: "settled", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 0, settledMinor: 1200, priceKind: "bounded" } };
   f.snapshot.runs.items = outsideFirstPage ? [] : [latest];
   FakeEventSource.instances.find(s => !s.closed)!.emit("business", { eventId: "last-billing", kind: "run.changed", entityId: run.id, entityVersion: 2 });
   await userEvent.click(await screen.findByRole("button", { name: "重新连接" }));
@@ -908,6 +977,109 @@ it("Frame 首页可直接发送，创建会话后沿用该请求且不自动开�
   expect(calls.find(call => call.url.endsWith("/messages"))?.body).toMatchObject({ text: "先聊聊想法，暂时不要制作", target: null, proposalRef: null });
   await waitFor(() => expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(""));
   expect(calls.filter(call => call.url.includes("acceptances"))).toHaveLength(0);
+});
+
+it("§11.7 来源8/10 输入框“从作品库选择”：勾选并入草稿可移除，new 携带、steer 不消耗，发送后消息可回看", async () => {
+  const conversation = conversationFixture("conv-lib", "跨片改编");
+  const snap = snapshotFixture(conversation);
+  snap.activeRequestId = "req-live";
+  const entry = libraryVideoFixture();
+  let posted = 0;
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { "conv-lib": snap }, onRequest: (url, call) => {
+    if (url.endsWith("/library/videos")) return { status: 200, body: { items: [entry], nextCursor: null } };
+    if (call.method === "POST" && url.endsWith("/messages")) {
+      posted += 1;
+      if (posted === 2) snap.messages.items.push(messageFixture({ id: "msg-sent", role: "user", text: "用这份方案做改编",
+        librarySelections: [{ sourceVideo: entry.video, source: { kind: "artifact_revision", artifactId: "art-lib-mat", revisionId: "rev-lib-mat" } }] }));
+      return { status: 202, body: { requestId: "req-back" } };
+    }
+    return null;
+  } });
+  renderAt("/agent/conv-lib");
+  await screen.findByRole("textbox", { name: "消息输入" });
+  // 弹层只并入当前草稿：取消不发送、选择可移除，正文与阅读位置不动。
+  await userEvent.click(screen.getByRole("button", { name: "从作品库选择" }));
+  await userEvent.click(await screen.findByRole("button", { name: /山路定稿/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /山路/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /main\.cjs/ }));
+  await userEvent.click(screen.getByRole("button", { name: /加入输入框（2）/ }));
+  expect(await screen.findByText(/作品库 · 山路（Prompt）/)).toBeInTheDocument();
+  expect(screen.getByText(/作品库 · main\.cjs/)).toBeInTheDocument();
+  expect(loadDraft("conv-lib")?.librarySelections).toHaveLength(2);
+  await userEvent.click(screen.getByRole("button", { name: "移除 main.cjs" }));
+  expect(screen.queryByText(/main\.cjs/)).toBeNull();
+  expect(loadDraft("conv-lib")?.librarySelections).toHaveLength(1);
+  // steer 是对在途请求的补充说明：不携带库选材，也不消耗 chips。
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "这轮先保持原方案");
+  await userEvent.click(screen.getByRole("button", { name: "干预本轮" }));
+  await waitFor(() => expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(1));
+  let command = calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as Record<string, unknown>;
+  expect(command.mode).toBe("steer");
+  expect(command.librarySelections).toBeUndefined();
+  await waitFor(() => expect(screen.getByText(/作品库 · 山路（Prompt）/)).toBeInTheDocument());
+  // new 请求携带准确 selection（不含展示 label）；发送成功后 chips 消费、已发送消息可回看来源。
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "用这份方案做改编");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(2));
+  command = calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))[1]!.body as Record<string, unknown>;
+  expect(command.mode).toBe("new");
+  expect(command.librarySelections).toEqual([{ sourceVideo: entry.video, source: { kind: "artifact_revision", artifactId: "art-lib-mat", revisionId: "rev-lib-mat" } }]);
+  await waitFor(() => expect(screen.queryByText(/作品库 · 山路（Prompt）/)).toBeNull());
+  expect(await screen.findByText("作品库 · 素材")).toBeInTheDocument();
+  expect(loadDraft("conv-lib")).toBeNull();
+});
+
+it("§11.7 来源9 库详情带入当前对话：并入该会话草稿回到输入框，来源对话保持独立入口", async () => {
+  const conversation = conversationFixture("conv-lib9", "正在改编");
+  const source = conversationFixture("conv-lib-src", "原片会话");
+  const entry = libraryVideoFixture();
+  installWorkbenchRoutes({ conversations: [conversation, source], snapshots: { "conv-lib9": snapshotFixture(conversation), "conv-lib-src": snapshotFixture(source) },
+    onRequest: url => (url.endsWith("/library/videos") ? { status: 200, body: { items: [entry], nextCursor: null } } : null) });
+  renderAt("/agent/conv-lib9?page=library");
+  await userEvent.click(await screen.findByRole("button", { name: /山路定稿/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /山路/ }));
+  // 回到来源对话是详情页上的独立入口，带入后回输入框，不再依赖该按钮存在。
+  expect(screen.getByRole("button", { name: "回到来源对话" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "带入当前对话（1）" }));
+  expect(await screen.findByRole("textbox", { name: "消息输入" })).toBeVisible();
+  expect(await screen.findByText(/作品库 · 山路（Prompt）/)).toBeInTheDocument();
+  expect(loadDraft("conv-lib9")?.librarySelections).toHaveLength(1);
+});
+
+it("§11.7 来源9 无当前会话时“带入新对话”：并入新对话草稿，首条消息携带选材", async () => {
+  const entry = libraryVideoFixture();
+  const created = conversationFixture("conv-lib-new", "新的会话");
+  const calls = installWorkbenchRoutes({ conversations: [], snapshots: { "conv-lib-new": snapshotFixture(created) }, onCreate: () => ({ status: 201, body: created }), onRequest: (url, call) => {
+    if (url.endsWith("/library/videos")) return { status: 200, body: { items: [entry], nextCursor: null } };
+    if (call.method === "POST" && url.endsWith("/messages")) return { status: 202, body: { requestId: "req-new" } };
+    return null;
+  } });
+  renderAt("/agent?page=library");
+  await userEvent.click(await screen.findByRole("button", { name: /山路定稿/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /main\.cjs/ }));
+  await userEvent.click(screen.getByRole("button", { name: "带入新对话（1）" }));
+  expect(await screen.findByText(/作品库 · main\.cjs/)).toBeInTheDocument();
+  expect(loadDraft("new")?.librarySelections).toHaveLength(1);
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "用这个工程文件做参考");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  const sent = await waitFor(() => {
+    const call = calls.find(item => item.method === "POST" && item.url.endsWith("/messages"));
+    expect(call).toBeTruthy();
+    return call!;
+  });
+  const command = sent.body as Record<string, unknown>;
+  expect(command.librarySelections).toEqual([{ sourceVideo: entry.video, source: { kind: "project_file", project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" }, relativePath: "main.cjs" } }]);
+});
+
+it("§11.7 来源5 文件卡：文本类读回原文渲染，二进制只给事实与下载", async () => {
+  installFetch(async url => ({ status: 200, body: url.includes("blob-txt") ? "console.log('hi')" : "" }));
+  const textual = render(<FilePreview content={{ format: "file", blobId: "blob-txt", mimeType: "text/javascript", path: "assets/main.js" }} />);
+  expect(await within(textual.container).findByText(/console\.log/)).toBeInTheDocument();
+  expect(within(textual.container).getByRole("link", { name: "下载文件" })).toHaveAttribute("href", "/api/agent/v1/blobs/blob-txt/content");
+  const binary = render(<FilePreview content={{ format: "file", blobId: "blob-bin", mimeType: "application/octet-stream", path: "assets/model.bin" }} />);
+  expect(await within(binary.container).findByText("assets/model.bin")).toBeInTheDocument();
+  expect(within(binary.container).getByText(/二进制文件不在页面内解释/)).toBeInTheDocument();
+  expect(within(binary.container).getByRole("link", { name: "下载文件" })).toHaveAttribute("href", "/api/agent/v1/blobs/blob-bin/content");
 });
 
 it("Frame 三个设置入口独立，往返保留预览、目标和草稿，不打开旧资源页", async () => {
@@ -1120,7 +1292,7 @@ it("S1-09 制作记录读取晚到时，不抢回用户新选择的作品", asyn
 it("提案展示本次冻结的聊天原文，不要求先打开 Prompt 作品", async () => {
   const f = productionFixture(conversationFixture("chat-text", "从聊天制作"));
   const text = "山谷的清晨。\n缓慢推进，不添加旁白。";
-  f.proposal.spec.inputRevisions = [];
+  f.spec.inputRevisions = [];
   f.proposal.spec.operations[0]!.inputs = [{ kind: "text", text }];
   render(<ProposalCard proposal={f.proposal} onAccept={() => {}} />);
   await userEvent.click(screen.getByText("查看制作范围 · 1 项操作"));
@@ -1163,16 +1335,34 @@ it("R2 费用摘要来自冻结报价，推导按需展开且声音与模拟事�
   expect(screen.getByText(/声音：/)).toHaveTextContent("保留镜头原声");
 });
 
+it("B6 交付位置来自传入的作品投影，卡内不重复推导也不吞掉目标", () => {
+  const f = productionFixture(conversationFixture("target-line", "交付位置"));
+  const digest = "a".repeat(64);
+  const spec: ProductionSpec = {
+    workId: "work-b", title: "城市成片", type: "paid_production", purpose: "production", scope: "成片",
+    requestSource: { requestId: "req-1", messageId: "msg-1" },
+    inputSources: [{ kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-1", digest }],
+    reviewInputs: [{ groupId: "grp-1", itemId: "item-1", source: { kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-1", digest }, confirmationId: "confirm-1" }],
+    operations: [f.spec.operations[0]!],
+    finalOutput: { operationId: "op-1", outputSlot: "video" }, maxSpend: { currency: "CNY", amountMinor: 1200 },
+    outputTarget: { group: { mode: "existing", groupId: "grp-1" }, item: { mode: "create", key: "final", label: "成片", role: "clip", required: true } },
+  };
+  const works: Work[] = [{ id: "work-b", title: "城市动画", revision: 1, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    reviewGroups: [{ id: "grp-1", title: "脚本与内容", revision: 1, nextIntent: null, items: [] }] }];
+  render(<ProposalCard proposal={{ ...f.proposal, spec }} works={works} onAccept={vi.fn()} />);
+  expect(screen.getByText(/交付到：/)).toHaveTextContent("脚本与内容 · 成片");
+});
+
 it("S1-09 查看制作记录期间，原作品的旧修订仍可完成读取", async () => {
   const conv = conversationFixture("reading-run", "保留原阅读");
   const f = productionFixture(conv);
-  f.proposal = { ...f.proposal, state: "accepted", acceptedRunId: f.run.id,
-    spec: { ...f.proposal.spec, inputRevisions: [{ artifactId: "art-1", revisionId: "rev-2" }], operations: [{ ...f.proposal.spec.operations[0],
-      inputs: [{ kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-2", digest: "a".repeat(64) }],
-    }] } };
+  const acceptedSpec: LegacyProductionSpec = { ...f.spec, inputRevisions: [{ artifactId: "art-1", revisionId: "rev-2" }], operations: [{ ...f.spec.operations[0]!,
+    inputs: [{ kind: "artifact_revision", artifactId: "art-1", revisionId: "rev-2", digest: "a".repeat(64) }],
+  }] };
+  f.proposal = { ...f.proposal, state: "accepted", acceptedRunId: f.run.id, spec: acceptedSpec };
   f.snapshot.proposals.items = [f.proposal];
   f.snapshot.artifacts.items = [artifactFixture("art-1", "原 Prompt", "rev-2", 2)];
-  f.run.inputRevisions = f.proposal.spec.inputRevisions;
+  f.run.inputRevisions = acceptedSpec.inputRevisions;
   localStorage.setItem(`vf:agent-reading:${conv.id}`, JSON.stringify({ artifactId: "art-1", revisionId: "rev-1" }));
   let finish!: (value: RouteResult) => void;
   const pending = new Promise<RouteResult>(resolve => { finish = resolve; });
@@ -1216,7 +1406,7 @@ it("S1-10/11 制作范围展示真实顺序、全部操作和旧版本；受理�
   expect(screen.getByText(/拼接顺序/)).toHaveTextContent("本次视频 2产出 → 本次视频 1产出");
   expect(screen.getByRole("button", { name: "已受理" })).toBeDisabled();
   expect(screen.queryByText("已开始")).toBeNull();
-  ui.rerender(<RunCard run={{ ...f.run, state: "failed", operations: f.run.operations.map(op => ({ ...op, state: "failed" })), finance: { ...f.run.finance, state: "pending_reconciliation", settledMinor: 300, pendingUnknownMinor: 900 } }} onCancel={vi.fn()} simulated proposals={[proposal]} {...props} />);
+  ui.rerender(<RunCard run={{ ...f.run, state: "failed", operations: f.run.operations.map(op => ({ ...op, state: "failed" })), finance: { state: "pending_reconciliation", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 900, settledMinor: 300, priceKind: "bounded" } }} onCancel={vi.fn()} simulated proposals={[proposal]} {...props} />);
   await userEvent.click(screen.getByText("回看原提案：模拟短片"));
   expect(screen.getByText(/拼接顺序/)).toHaveTextContent("本次视频 1产出 → 本次视频 2产出 → 本次视频 1产出");
   expect(screen.getByText(/供应商账单待核对/)).toHaveTextContent("已核对 ¥3.00，待核对部分估算 ¥9.00");
@@ -1224,7 +1414,7 @@ it("S1-10/11 制作范围展示真实顺序、全部操作和旧版本；受理�
   expect(screen.getByText(/已完成 0/)).toBeInTheDocument();
   ui.rerender(<RunCard run={{ ...f.run, state: "succeeded", operations: f.run.operations.map(op => ({ ...op, state: "succeeded" })) }} onCancel={vi.fn()} simulated proposals={[proposal]} {...props} />);
   expect(screen.getByText(/100%/)).toBeInTheDocument();
-  ui.rerender(<RunCard run={{ ...f.run, state: "running", operations: f.run.operations.map(op => ({ ...op, state: "succeeded" })), finance: { ...f.run.finance, state: "pending_reconciliation", settledMinor: 0, pendingUnknownMinor: 900 } }} onCancel={vi.fn()} simulated proposals={[proposal]} {...props} />);
+  ui.rerender(<RunCard run={{ ...f.run, state: "running", operations: f.run.operations.map(op => ({ ...op, state: "succeeded" })), finance: { state: "pending_reconciliation", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 900, settledMinor: 0, priceKind: "bounded" } }} onCancel={vi.fn()} simulated proposals={[proposal]} {...props} />);
   expect(screen.queryByText(/100%/)).toBeNull();
   expect(screen.getByText(/供应商账单待核对/)).not.toHaveTextContent("已入账 ¥0.00");
 });
@@ -1304,8 +1494,8 @@ it("K1.2 steer 只干预当前轮：不带 Skill，也不消费已指定的选�
 // P3c 使用既有工作台装配与 fetch seam；这里只验证 UI 合同和交互，不替代原生安装验收。
 const SKILL_PACKAGES: SkillPackagesView = {
   packages: [
-    { id: "builtin", source: "builtin", name: "内置创作", origin: "builtin", skillIds: ["builtin-writing"], status: "ready", diagnostics: [] },
-    { id: "local-kit", source: "/srv/skills/travel-kit", name: "周末创作包", origin: "installed", skillIds: ["weekend-prompt", "weekend-script"], status: "ready", diagnostics: [] },
+    { id: "builtin", source: "builtin", name: "内置创作", origin: "builtin", skillIds: ["builtin-writing"], status: "ready", diagnostics: [], runtimeStatus: "ready", runtimeMissing: [] },
+    { id: "local-kit", source: "/srv/skills/travel-kit", name: "周末创作包", origin: "installed", skillIds: ["weekend-prompt", "weekend-script"], status: "ready", diagnostics: [], runtimeStatus: "ready", runtimeMissing: [] },
   ],
   skills: [
     { id: "builtin-writing", name: "内置写作", description: "梳理创作思路" },
@@ -1385,8 +1575,8 @@ it("P3c 目录按服务端状态展示零 Skill、解析诊断与只读内置，
   const packages: SkillPackagesView = {
     ...BUILTIN_SKILLS,
     packages: [...BUILTIN_SKILLS.packages,
-      { id: "empty", source: "npm:empty-skill-package", name: "空包", origin: "installed", skillIds: [], status: "no_skills", diagnostics: ["未发现 SKILL.md"] },
-      { id: "broken", source: "https://example.test/broken.git", name: "错误包", origin: "installed", skillIds: [], status: "invalid", diagnostics: ["Skill frontmatter 缺少 description"] },
+      { id: "empty", source: "npm:empty-skill-package", name: "空包", origin: "installed", skillIds: [], status: "no_skills", diagnostics: ["未发现 SKILL.md"], runtimeStatus: "unchecked", runtimeMissing: [] },
+      { id: "broken", source: "https://example.test/broken.git", name: "错误包", origin: "installed", skillIds: [], status: "invalid", diagnostics: ["Skill frontmatter 缺少 description"], runtimeStatus: "unchecked", runtimeMissing: [] },
     ],
   };
   installWorkbenchRoutes({ conversations: [], onRequest: url => url.endsWith("/settings/skills") ? { status: 200, body: packages } : null });

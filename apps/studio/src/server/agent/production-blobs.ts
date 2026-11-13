@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { AgentDatabase } from "./db.js";
-import type { MediaContent } from "../../shared/agent/generated/contracts.js";
 import { newAgentId, type AgentClock } from "./util.js";
 import { AgentError } from "./errors.js";
 
 export interface BlobRow {
   id: string; owner_id: string; conversation_id: string; digest: string;
-  mime_type: MediaContent["mimeType"]; size_bytes: number; duration_ms: number | null;
+  /** 列本身无 CHECK：媒体调用方传已验证的媒体枚举，工程文件传映射后的文件类型。 */
+  mime_type: string; size_bytes: number; duration_ms: number | null;
 }
 export class ProductionBlobs {
   private readonly root: string;
@@ -17,10 +17,21 @@ export class ProductionBlobs {
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
   // 这里只接收执行适配器已经探测过的字节；C 的网络下载/探测在适配器，不接受用户路径或 URL。
-  persist(ownerId: string, conversationId: string, bytes: Buffer, mimeType: MediaContent["mimeType"], durationMs: number | null): BlobRow {
+  persist(ownerId: string, conversationId: string, bytes: Buffer, mimeType: string, durationMs: number | null): BlobRow {
     const digest = createHash("sha256").update(bytes).digest("hex");
     const existing = this.db.prepare("SELECT * FROM production_blobs WHERE owner_id=? AND conversation_id=? AND digest=?").get(ownerId, conversationId, digest) as BlobRow | undefined;
-    if (existing) { this.verify(existing); return existing; }
+    if (existing) {
+      this.verify(existing);
+      // 同一份字节可先按工程文件登记（octet-stream、无时长），确定性工程重跑产出相同字节后再按探测过的
+      // 媒体成品登记；字节相同就以更晚验证过的事实补齐标签，且只升级不降级，不另建行。
+      if (existing.mime_type === "application/octet-stream" && mimeType !== "application/octet-stream"
+        || durationMs !== null && existing.duration_ms === null) {
+        this.db.prepare("UPDATE production_blobs SET mime_type=?, duration_ms=COALESCE(duration_ms,?) WHERE id=?")
+          .run(existing.mime_type === "application/octet-stream" ? mimeType : existing.mime_type, durationMs, existing.id);
+        return this.get(ownerId, existing.id);
+      }
+      return existing;
+    }
     const temporary = path.join(this.root, newAgentId("tmp"));
     const fd = openSync(temporary, "wx", 0o600);
     try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }

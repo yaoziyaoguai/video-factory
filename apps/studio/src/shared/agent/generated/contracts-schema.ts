@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.32",
+  "title": "Frame contract payloads 0.1.42",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -17,6 +17,9 @@ export const contractsSchema: Record<string, unknown> = {
         },
         {
           "$ref": "#/$defs/NewsNowSettings"
+        },
+        {
+          "$ref": "#/$defs/EdgeTtsSettings"
         }
       ]
     },
@@ -532,6 +535,213 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "SpeechBoundary": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "offsetMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      },
+      "required": [
+        "text",
+        "offsetMs",
+        "durationMs"
+      ],
+      "additionalProperties": false
+    },
+    "DubbedSpeechMeta": {
+      "type": "object",
+      "description": "免费配音（edge-tts）生成的语音元数据；边界毫秒相对该音频修订起点，已对应生成语速 rate。当前时间线 cue 为源边界加 narration.timelineStartMs，不再次按 rate 缩放。granularity=none 表示本次没有返回任何边界事件。",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "voice": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "rate": {
+          "type": "string",
+          "pattern": "^[+-]\\d{1,3}%$"
+        },
+        "granularity": {
+          "enum": [
+            "word",
+            "sentence",
+            "none"
+          ],
+          "type": "string"
+        },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpeechBoundary"
+          },
+          "minItems": 0,
+          "maxItems": 20000
+        }
+      },
+      "required": [
+        "text",
+        "voice",
+        "rate",
+        "granularity",
+        "boundaries"
+      ],
+      "additionalProperties": false
+    },
+    "EdgeTtsSettings": {
+      "type": "object",
+      "properties": {
+        "serviceId": {
+          "const": "edge-tts",
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "voice": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "pythonCommand": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "能在 -I 下 import edge_tts 的 Python 解释器可执行文件名或绝对路径，不含 shell 参数；部署统一配置 PATH 或在此覆盖。"
+        }
+      },
+      "required": [
+        "serviceId",
+        "revision",
+        "enabled",
+        "voice",
+        "pythonCommand"
+      ],
+      "additionalProperties": false
+    },
+    "SaveEdgeTtsSettings": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "voice": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "pythonCommand": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "enabled",
+        "voice",
+        "pythonCommand"
+      ],
+      "additionalProperties": false
+    },
+    "ToolDubFree": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "voice": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "rate": {
+          "type": "string",
+          "pattern": "^[+-]\\d{1,3}%$",
+          "description": "语速，如 +10% 或 -5%；省略为 +0%。"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "DubFreeResult": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/Id"
+        },
+        "revisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "granularity": {
+          "enum": [
+            "word",
+            "sentence",
+            "none"
+          ],
+          "type": "string"
+        },
+        "boundaryCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20000
+        },
+        "voice": {
+          "type": "string",
+          "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "rate": {
+          "type": "string",
+          "pattern": "^[+-]\\d{1,3}%$"
+        }
+      },
+      "required": [
+        "artifactId",
+        "revisionId",
+        "durationMs",
+        "granularity",
+        "boundaryCount",
+        "voice",
+        "rate"
+      ],
+      "additionalProperties": false
+    },
     "PexelsSettings": {
       "type": "object",
       "properties": {
@@ -630,6 +840,9 @@ export const contractsSchema: Record<string, unknown> = {
         },
         {
           "$ref": "#/$defs/SaveNewsNowSettings"
+        },
+        {
+          "$ref": "#/$defs/SaveEdgeTtsSettings"
         }
       ]
     },
@@ -649,6 +862,9 @@ export const contractsSchema: Record<string, unknown> = {
             },
             {
               "$ref": "#/$defs/NewsNowSettings"
+            },
+            {
+              "$ref": "#/$defs/EdgeTtsSettings"
             }
           ]
         },
@@ -897,6 +1113,23 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "ReviewContext": {
+      "type": "object",
+      "description": "本条消息指向的视频创作与审阅组；只表达该消息的归属，不是全局活动作品状态。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "workId",
+        "groupId"
+      ],
+      "additionalProperties": false
+    },
     "MessageInput": {
       "type": "object",
       "properties": {
@@ -955,10 +1188,28 @@ export const contractsSchema: Record<string, unknown> = {
             }
           ]
         },
-        "stageConfirmation": {
+        "reviewConfirmation": {
           "anyOf": [
             {
-              "$ref": "#/$defs/StageConfirmation"
+              "$ref": "#/$defs/ReviewConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "librarySelections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LibrarySelection"
+          },
+          "minItems": 0,
+          "maxItems": 24
+        },
+        "reviewContext": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewContext"
             },
             {
               "type": "null"
@@ -1024,6 +1275,16 @@ export const contractsSchema: Record<string, unknown> = {
               },
               "steerRequestId": {
                 "type": "null"
+              },
+              "librarySelections": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "reviewConfirmation": {
+                "type": "null"
+              },
+              "reviewContext": {
+                "type": "null"
               }
             }
           }
@@ -1031,17 +1292,18 @@ export const contractsSchema: Record<string, unknown> = {
         {
           "if": {
             "properties": {
-              "stageConfirmation": {
+              "reviewConfirmation": {
                 "type": "object"
               }
             },
             "required": [
-              "stageConfirmation"
+              "reviewConfirmation"
             ]
           },
           "then": {
             "properties": {
               "mode": {
+                "type": "string",
                 "const": "new"
               },
               "steerRequestId": {
@@ -1052,6 +1314,13 @@ export const contractsSchema: Record<string, unknown> = {
               },
               "target": {
                 "type": "null"
+              },
+              "librarySelections": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "reviewContext": {
+                "type": "null"
               }
             }
           }
@@ -1059,12 +1328,38 @@ export const contractsSchema: Record<string, unknown> = {
         {
           "if": {
             "properties": {
-              "stageConfirmation": {
+              "reviewContext": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "reviewContext"
+            ]
+          },
+          "then": {
+            "properties": {
+              "target": {
+                "type": "null"
+              },
+              "proposalRef": {
+                "type": "null"
+              },
+              "reviewConfirmation": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reviewConfirmation": {
                 "type": "object",
                 "properties": {
                   "action": {
                     "not": {
-                      "const": "approve_content_continue"
+                      "type": "string",
+                      "const": "approve_and_continue"
                     }
                   }
                 },
@@ -1074,59 +1369,13 @@ export const contractsSchema: Record<string, unknown> = {
               }
             },
             "required": [
-              "stageConfirmation"
+              "reviewConfirmation"
             ]
           },
           "then": {
             "properties": {
               "skillId": {
                 "type": "null"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "stageConfirmation": {
-                "type": "object",
-                "properties": {
-                  "action": {
-                    "enum": [
-                      "approve_plan",
-                      "finalize_video"
-                    ]
-                  }
-                },
-                "required": [
-                  "action"
-                ]
-              }
-            },
-            "required": [
-              "stageConfirmation"
-            ]
-          },
-          "then": {
-            "properties": {
-              "stageConfirmation": {
-                "type": "object",
-                "properties": {
-                  "subject": {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "artifact_revision"
-                      }
-                    },
-                    "required": [
-                      "kind"
-                    ]
-                  }
-                },
-                "required": [
-                  "subject"
-                ]
               }
             }
           }
@@ -1215,6 +1464,24 @@ export const contractsSchema: Record<string, unknown> = {
           "minimum": 1,
           "maximum": 9007199254740991,
           "description": "服务端分配的会话内不可变创建顺序；只用于显示排序，不是 SSE 游标。"
+        },
+        "librarySelections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LibrarySelection"
+          },
+          "minItems": 0,
+          "maxItems": 24
+        },
+        "reviewContext": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1229,7 +1496,8 @@ export const contractsSchema: Record<string, unknown> = {
         "references",
         "kind",
         "feedback",
-        "createdSequence"
+        "createdSequence",
+        "librarySelections"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -1357,7 +1625,9 @@ export const contractsSchema: Record<string, unknown> = {
             "analysis",
             "video",
             "image",
-            "audio"
+            "audio",
+            "project",
+            "file"
           ]
         },
         "revisionId": {
@@ -1531,6 +1801,9 @@ export const contractsSchema: Record<string, unknown> = {
           "minItems": 0,
           "maxItems": 64,
           "description": "按(provider,assetId)去重的素材来源；旧记录缺省视为空。"
+        },
+        "dub": {
+          "$ref": "#/$defs/DubbedSpeechMeta"
         }
       },
       "required": [
@@ -1538,6 +1811,34 @@ export const contractsSchema: Record<string, unknown> = {
         "blobId",
         "mimeType",
         "durationMs"
+      ],
+      "additionalProperties": false
+    },
+    "FileContent": {
+      "type": "object",
+      "description": "作品库选材带入的二进制或未知类型文件：按原字节共享 blob，仅提供下载，不在客户端解释或执行；path 为来源工程内的原相对路径，mimeType 不限媒体枚举。",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "file"
+        },
+        "blobId": {
+          "$ref": "#/$defs/Id"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "path": {
+          "$ref": "#/$defs/RelativeProjectPath"
+        }
+      },
+      "required": [
+        "format",
+        "blobId",
+        "mimeType",
+        "path"
       ],
       "additionalProperties": false
     },
@@ -1595,11 +1896,27 @@ export const contractsSchema: Record<string, unknown> = {
             },
             {
               "$ref": "#/$defs/MediaContent"
+            },
+            {
+              "$ref": "#/$defs/CreativeProjectContent"
+            },
+            {
+              "$ref": "#/$defs/FileContent"
             }
           ]
         },
         "createdAt": {
           "$ref": "#/$defs/Time"
+        },
+        "creationBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1880,7 +2197,7 @@ export const contractsSchema: Record<string, unknown> = {
             "no_skills",
             "invalid"
           ],
-          "description": "ready 表示实际发现可用 Skill；零个 Skill 为 no_skills，来源或原生解析不可用为 invalid，不能宣称可用。"
+          "description": "ready 仅表示实际发现 Skill，不代表其创作依赖已就绪；执行可用性单独看 runtimeStatus。"
         },
         "diagnostics": {
           "type": "array",
@@ -1891,6 +2208,25 @@ export const contractsSchema: Record<string, unknown> = {
           },
           "minItems": 0,
           "maxItems": 200
+        },
+        "runtimeStatus": {
+          "type": "string",
+          "enum": [
+            "unchecked",
+            "ready",
+            "unavailable"
+          ],
+          "description": "独立于发现 status；未知依赖为 unchecked，ready 必须有对应实际探测证据。"
+        },
+        "runtimeMissing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "minItems": 0,
+          "maxItems": 32
         }
       },
       "required": [
@@ -1900,9 +2236,55 @@ export const contractsSchema: Record<string, unknown> = {
         "origin",
         "skillIds",
         "status",
-        "diagnostics"
+        "diagnostics",
+        "runtimeStatus",
+        "runtimeMissing"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtimeStatus": {
+                "type": "string",
+                "const": "ready"
+              }
+            },
+            "required": [
+              "runtimeStatus"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtimeMissing": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "runtimeStatus": {
+                "type": "string",
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "runtimeStatus"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtimeMissing": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "SkillPackageMutation": {
       "type": "object",
@@ -2115,6 +2497,27 @@ export const contractsSchema: Record<string, unknown> = {
             "kind",
             "producerOperationId",
             "outputSlot"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "project_revision"
+            },
+            "projectRevision": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest"
+            }
+          },
+          "required": [
+            "kind",
+            "projectRevision",
+            "digest"
           ],
           "additionalProperties": false
         }
@@ -2812,7 +3215,8 @@ export const contractsSchema: Record<string, unknown> = {
                   "maximum": 23
                 },
                 "candidateId": {
-                  "$ref": "#/$defs/Id"
+                  "$ref": "#/$defs/Id",
+                  "description": "外部素材候选：仅在音乐来自素材库已采用文件时给出。本地已登记音频（如冻结工程渲染的程序音乐）作为音乐输入时不带本字段，也不得伪造外部候选 ID；来源事实由所引用的音频对象自身携带。"
                 },
                 "sourceStartMs": {
                   "type": "integer",
@@ -2858,7 +3262,6 @@ export const contractsSchema: Record<string, unknown> = {
               },
               "required": [
                 "inputSlot",
-                "candidateId",
                 "sourceStartMs",
                 "sourceDurationMs",
                 "timelineStartMs",
@@ -2909,6 +3312,9 @@ export const contractsSchema: Record<string, unknown> = {
           ],
           "additionalProperties": false,
           "description": "三路声音按冻结参数混音：视觉时长≤120s、所有输入合计≤24；原声逐段0–1，音乐最多一路且绑定本会话已采用候选，配音完整使用。prepare核对槽位/范围/fade/来源并展开缺省原声增益；没有有声独立配音时duck冻结false。48kHz立体声AAC，不延长画面或截配音。"
+        },
+        {
+          "$ref": "#/$defs/CodeProjectParameters"
         }
       ]
     },
@@ -3096,7 +3502,7 @@ export const contractsSchema: Record<string, unknown> = {
               "items": {
                 "$ref": "#/$defs/InputRef"
               },
-              "minItems": 1,
+              "minItems": 0,
               "maxItems": 24
             },
             "maxCreateAttempts": {
@@ -3173,14 +3579,6 @@ export const contractsSchema: Record<string, unknown> = {
           "minLength": 1,
           "maxLength": 120
         },
-        "inputRevisions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RevisionRef"
-          },
-          "minItems": 0,
-          "maxItems": 8
-        },
         "operations": {
           "type": "array",
           "items": {
@@ -3207,15 +3605,61 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "maxSpend": {
           "$ref": "#/$defs/Money"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSource"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "outputTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "type": {
+          "type": "string",
+          "const": "paid_production"
+        },
+        "requestSource": {
+          "$ref": "#/$defs/RequestSource"
         }
       },
       "required": [
         "workId",
         "title",
-        "inputRevisions",
         "operations",
         "finalOutput",
-        "maxSpend"
+        "maxSpend",
+        "inputSources",
+        "reviewInputs",
+        "purpose",
+        "scope",
+        "type",
+        "requestSource"
       ],
       "additionalProperties": false
     },
@@ -3227,10 +3671,6 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "spec": {
           "$ref": "#/$defs/ProductionIntent"
-        },
-        "planSource": {
-          "$ref": "#/$defs/RevisionRef",
-          "description": "准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。"
         },
         "replacesProposal": {
           "$ref": "#/$defs/ProposalRef",
@@ -3256,7 +3696,7 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/Digest"
         },
         "spec": {
-          "$ref": "#/$defs/ProductionSpec"
+          "$ref": "#/$defs/PaidProductionSnapshot"
         },
         "state": {
           "type": "string",
@@ -3292,6 +3732,16 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "audioSummary": {
           "$ref": "#/$defs/AudioSummary"
+        },
+        "acceptanceBlocker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcceptanceBlocker"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -3303,7 +3753,8 @@ export const contractsSchema: Record<string, unknown> = {
         "priceDisclosure",
         "expiresAt",
         "acceptedRunId",
-        "revision"
+        "revision",
+        "acceptanceBlocker"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -3602,9 +4053,6 @@ export const contractsSchema: Record<string, unknown> = {
         "snapshotId": {
           "$ref": "#/$defs/Id"
         },
-        "proposalId": {
-          "$ref": "#/$defs/Id"
-        },
         "revision": {
           "type": "integer",
           "minimum": 1,
@@ -3614,7 +4062,14 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/RunState"
         },
         "finance": {
-          "$ref": "#/$defs/Finance"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Finance"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "inputRevisions": {
           "type": "array",
@@ -3622,7 +4077,7 @@ export const contractsSchema: Record<string, unknown> = {
             "$ref": "#/$defs/RevisionRef"
           },
           "minItems": 0,
-          "maxItems": 8
+          "maxItems": 64
         },
         "outputRevisions": {
           "type": "array",
@@ -3695,6 +4150,9 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "audioSummary": {
           "$ref": "#/$defs/AudioSummary"
+        },
+        "origin": {
+          "$ref": "#/$defs/RunOrigin"
         }
       },
       "required": [
@@ -3702,7 +4160,6 @@ export const contractsSchema: Record<string, unknown> = {
         "conversationId",
         "workId",
         "snapshotId",
-        "proposalId",
         "revision",
         "state",
         "finance",
@@ -3713,9 +4170,47 @@ export const contractsSchema: Record<string, unknown> = {
         "createdAt",
         "updatedAt",
         "issue",
-        "title"
+        "title",
+        "origin"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "origin": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "local_request"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            },
+            "required": [
+              "origin"
+            ]
+          },
+          "then": {
+            "properties": {
+              "finance": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "finance": {
+                "$ref": "#/$defs/Finance"
+              }
+            }
+          }
+        }
+      ]
     },
     "AdmissionReceipt": {
       "type": "object",
@@ -4304,7 +4799,14 @@ export const contractsSchema: Record<string, unknown> = {
               ]
             },
             "content": {
-              "$ref": "#/$defs/MediaReferenceContent"
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/MediaReferenceContent"
+                },
+                {
+                  "$ref": "#/$defs/LocalOutputInput"
+                }
+              ]
             }
           },
           "required": [
@@ -4355,6 +4857,54 @@ export const contractsSchema: Record<string, unknown> = {
             "content"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "revise"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "image",
+                "video",
+                "audio"
+              ]
+            },
+            "content": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/MediaReferenceContent"
+                },
+                {
+                  "$ref": "#/$defs/LocalOutputInput"
+                }
+              ]
+            },
+            "artifactId": {
+              "$ref": "#/$defs/Id"
+            },
+            "baseRevisionId": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "mode",
+            "title",
+            "kind",
+            "content",
+            "artifactId",
+            "baseRevisionId"
+          ],
+          "additionalProperties": false,
+          "description": "已采用素材可跨请求按同会话blob交付为媒体草稿；服务端核对类型和采用事实，不自动定稿。"
         }
       ]
     },
@@ -4369,10 +4919,10 @@ export const contractsSchema: Record<string, unknown> = {
           "minItems": 1,
           "maxItems": 8
         },
-        "stageDrafts": {
+        "reviewGroups": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/StageDraft"
+            "$ref": "#/$defs/ReviewGroupDelivery"
           },
           "minItems": 1,
           "maxItems": 8
@@ -4406,6 +4956,37 @@ export const contractsSchema: Record<string, unknown> = {
         "deliveryClosed": {
           "const": true,
           "type": "boolean"
+        },
+        "reviewTargets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "workId": {
+                "$ref": "#/$defs/Id"
+              },
+              "groupId": {
+                "$ref": "#/$defs/Id"
+              },
+              "itemId": {
+                "$ref": "#/$defs/Id"
+              },
+              "itemIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              }
+            },
+            "required": [
+              "workId",
+              "groupId",
+              "itemId",
+              "itemIndex"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 8
         }
       },
       "required": [
@@ -4413,7 +4994,8 @@ export const contractsSchema: Record<string, unknown> = {
         "requestId",
         "replayed",
         "revisions",
-        "deliveryClosed"
+        "deliveryClosed",
+        "reviewTargets"
       ],
       "additionalProperties": false
     },
@@ -4422,10 +5004,6 @@ export const contractsSchema: Record<string, unknown> = {
       "properties": {
         "spec": {
           "$ref": "#/$defs/ToolProductionIntent"
-        },
-        "planSource": {
-          "$ref": "#/$defs/RevisionRef",
-          "description": "准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。"
         },
         "replacesProposal": {
           "$ref": "#/$defs/ProposalRef",
@@ -4490,7 +5068,32 @@ export const contractsSchema: Record<string, unknown> = {
       "description": "分页发现当前会话的提案/运行索引；游标与既有分页同源，不接受任意过滤表达式。"
     },
     "ToolReadArtifact": {
-      "$ref": "#/$defs/RevisionRef"
+      "type": "object",
+      "description": "图片实际 image blocks；视频仅按反馈目标抽取指定毫秒帧并标注时间，模型不支持图像时明确说明。音频未有独立验证适配时不声称听过。",
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/Id"
+        },
+        "revisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "frameTimesMs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "artifactId",
+        "revisionId"
+      ],
+      "additionalProperties": false
     },
     "ExecutionInput": {
       "type": "object",
@@ -4511,7 +5114,14 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/Id"
         },
         "operation": {
-          "$ref": "#/$defs/OperationSpec"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/OperationSpec"
+            },
+            {
+              "$ref": "#/$defs/LocalRenderOperation"
+            }
+          ]
         },
         "resolvedInputs": {
           "type": "array",
@@ -4539,6 +5149,26 @@ export const contractsSchema: Record<string, unknown> = {
           },
           "minItems": 0,
           "maxItems": 24
+        },
+        "resolvedProject": {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "content": {
+              "$ref": "#/$defs/CreativeProjectContent"
+            }
+          },
+          "required": [
+            "revision",
+            "digest",
+            "content"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -4551,7 +5181,51 @@ export const contractsSchema: Record<string, unknown> = {
         "resolvedInputs"
       ],
       "additionalProperties": false,
-      "description": "仅宿主到执行器；operation.model 为唯一账户/配置绑定，render 为 null。模型不能构造执行上下文。冻结文本按修订读取，媒体按 resolvedInputs 读取。"
+      "description": "仅宿主到执行器；operation.model 为唯一账户/配置绑定，render 为 null。resolvedProject 为宿主核对后的冻结文件清单，执行器按 blob 读取；禁止任意脚本文本、工作区绝对路径或宿主配置。",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operation": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "render"
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "assembly": {
+                        "type": "string",
+                        "const": "code_project"
+                      }
+                    },
+                    "required": [
+                      "assembly"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "parameters"
+                ]
+              }
+            },
+            "required": [
+              "operation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolvedProject": {}
+            },
+            "required": [
+              "resolvedProject"
+            ]
+          }
+        }
+      ]
     },
     "RecoveryQuery": {
       "oneOf": [
@@ -4880,7 +5554,7 @@ export const contractsSchema: Record<string, unknown> = {
               "items": {
                 "$ref": "#/$defs/InputRef"
               },
-              "minItems": 1,
+              "minItems": 0,
               "maxItems": 24
             },
             "maxCreateAttempts": {
@@ -4929,14 +5603,6 @@ export const contractsSchema: Record<string, unknown> = {
           "minLength": 1,
           "maxLength": 120
         },
-        "inputRevisions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RevisionRef"
-          },
-          "minItems": 0,
-          "maxItems": 8
-        },
         "operations": {
           "type": "array",
           "items": {
@@ -4963,15 +5629,52 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "maxSpend": {
           "$ref": "#/$defs/Money"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSourceInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInputInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "outputTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
         }
       },
       "required": [
         "workId",
         "title",
-        "inputRevisions",
         "operations",
         "finalOutput",
-        "maxSpend"
+        "maxSpend",
+        "inputSources",
+        "reviewInputs",
+        "purpose",
+        "scope"
       ],
       "additionalProperties": false
     },
@@ -5087,6 +5790,16 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
+        },
+        "acceptanceBlocker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AcceptanceBlocker"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -5096,7 +5809,8 @@ export const contractsSchema: Record<string, unknown> = {
         "revision",
         "digest",
         "expiresAt",
-        "acceptedRunId"
+        "acceptedRunId",
+        "acceptanceBlocker"
       ],
       "additionalProperties": false
     },
@@ -5119,14 +5833,14 @@ export const contractsSchema: Record<string, unknown> = {
           "minimum": 1,
           "maximum": 9007199254740991
         },
-        "proposalId": {
-          "$ref": "#/$defs/Id"
-        },
         "createdAt": {
           "$ref": "#/$defs/Time"
         },
         "updatedAt": {
           "$ref": "#/$defs/Time"
+        },
+        "origin": {
+          "$ref": "#/$defs/RunOrigin"
         }
       },
       "required": [
@@ -5134,9 +5848,9 @@ export const contractsSchema: Record<string, unknown> = {
         "title",
         "state",
         "revision",
-        "proposalId",
         "createdAt",
-        "updatedAt"
+        "updatedAt",
+        "origin"
       ],
       "additionalProperties": false
     },
@@ -5817,7 +6531,8 @@ export const contractsSchema: Record<string, unknown> = {
         "content",
         "plan",
         "video"
-      ]
+      ],
+      "description": "仅旧固定阶段历史读取；新作品只写 reviewGroups。"
     },
     "ContentSource": {
       "oneOf": [
@@ -6001,7 +6716,8 @@ export const contractsSchema: Record<string, unknown> = {
             }
           }
         }
-      ]
+      ],
+      "description": "仅旧确认记录与旧 Pi 历史读取；新消息使用 ReviewConfirmation。"
     },
     "WorkStageView": {
       "type": "object",
@@ -6113,33 +6829,18 @@ export const contractsSchema: Record<string, unknown> = {
           "minLength": 1,
           "maxLength": 120
         },
-        "stage": {
-          "$ref": "#/$defs/WorkStage"
-        },
         "revision": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
         },
-        "stages": {
-          "type": "object",
-          "properties": {
-            "content": {
-              "$ref": "#/$defs/WorkStageView"
-            },
-            "plan": {
-              "$ref": "#/$defs/WorkStageView"
-            },
-            "video": {
-              "$ref": "#/$defs/WorkStageView"
-            }
+        "reviewGroups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewGroup"
           },
-          "required": [
-            "content",
-            "plan",
-            "video"
-          ],
-          "additionalProperties": false
+          "minItems": 0,
+          "maxItems": 64
         },
         "createdAt": {
           "$ref": "#/$defs/Time"
@@ -6151,9 +6852,8 @@ export const contractsSchema: Record<string, unknown> = {
       "required": [
         "id",
         "title",
-        "stage",
         "revision",
-        "stages",
+        "reviewGroups",
         "createdAt",
         "updatedAt"
       ],
@@ -6372,7 +7072,8 @@ export const contractsSchema: Record<string, unknown> = {
           "additionalProperties": false,
           "description": "画面声音方案：source 指向这条视频采用的内容；有有效制作提案时填 proposalRef，否则 null。"
         }
-      ]
+      ],
+      "description": "仅旧交付历史读取；新交付使用 reviewGroups。"
     },
     "ToolStartWork": {
       "type": "object",
@@ -6393,6 +7094,10 @@ export const contractsSchema: Record<string, unknown> = {
       "properties": {
         "workId": {
           "$ref": "#/$defs/Id"
+        },
+        "activate": {
+          "type": "boolean",
+          "description": "true 时把这条创作明确选为本回合后续原生工具的工作区；缺省 false 只读，不改变写入目标。"
         }
       },
       "required": [
@@ -6424,7 +7129,8 @@ export const contractsSchema: Record<string, unknown> = {
         "action",
         "subject"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "仅旧 Pi 工具历史读取，不向新回合注册 confirm_stage。"
     },
     "ToolReadMaterialBatch": {
       "type": "object",
@@ -6666,7 +7372,7 @@ export const contractsSchema: Record<string, unknown> = {
               "items": {
                 "$ref": "#/$defs/InputRef"
               },
-              "minItems": 1,
+              "minItems": 0,
               "maxItems": 24
             },
             "kind": {
@@ -6710,14 +7416,6 @@ export const contractsSchema: Record<string, unknown> = {
           "minLength": 1,
           "maxLength": 120
         },
-        "inputRevisions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/RevisionRef"
-          },
-          "minItems": 0,
-          "maxItems": 8
-        },
         "operations": {
           "type": "array",
           "items": {
@@ -6744,15 +7442,52 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "maxSpend": {
           "$ref": "#/$defs/Money"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSourceInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInputInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "outputTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
         }
       },
       "required": [
         "workId",
         "title",
-        "inputRevisions",
         "operations",
         "finalOutput",
-        "maxSpend"
+        "maxSpend",
+        "inputSources",
+        "reviewInputs",
+        "purpose",
+        "scope"
       ],
       "additionalProperties": false
     },
@@ -6816,6 +7551,49 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "audioSummary": {
           "$ref": "#/$defs/AudioSummary"
+        },
+        "projectFiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LibraryProjectFile"
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "description": "定稿来源链上各封存工程的文件清单（准确 relativePath，每行 project 指明所属工程，按来源项目分组）；多工程合成时最终主工程可为空而清单非空，供跨会话选材核对。"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LibraryMaterial"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        },
+        "reviewSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "provenanceStatus": {
+          "type": "string",
+          "enum": [
+            "recorded",
+            "not_recorded"
+          ],
+          "description": "not_recorded 表示历史当时未记录完整工程/素材来源；null/[] 不从当前 head 补齐。"
         }
       },
       "required": [
@@ -6827,7 +7605,12 @@ export const contractsSchema: Record<string, unknown> = {
         "plan",
         "content",
         "originMessageId",
-        "narrationText"
+        "narrationText",
+        "project",
+        "materials",
+        "reviewSources",
+        "provenanceStatus",
+        "projectFiles"
       ],
       "additionalProperties": false
     },
@@ -7189,6 +7972,2392 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false,
       "description": "从不可变spec与精确生成来源计算的只读声音摘要，不独立持久化。独立配音、原声与音乐分别保留证据；未知原声不清空已知配音，歌曲不算旁白。"
+    },
+    "LegacyWork": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "stage": {
+          "$ref": "#/$defs/WorkStage"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "stages": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/WorkStageView"
+            },
+            "plan": {
+              "$ref": "#/$defs/WorkStageView"
+            },
+            "video": {
+              "$ref": "#/$defs/WorkStageView"
+            }
+          },
+          "required": [
+            "content",
+            "plan",
+            "video"
+          ],
+          "additionalProperties": false
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "stage",
+        "revision",
+        "stages",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 Work；新写入不使用此形状。"
+    },
+    "LegacyMessageInput": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Target"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skillId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposalRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "new",
+            "steer"
+          ]
+        },
+        "steerRequestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stageConfirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StageConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commandId",
+        "text",
+        "target",
+        "skillId",
+        "proposalRef",
+        "mode",
+        "steerRequestId"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "steer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "steerRequestId": {
+                "$ref": "#/$defs/Id"
+              },
+              "proposalRef": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "steerRequestId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "proposalRef": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target": {
+                "type": "null"
+              },
+              "skillId": {
+                "type": "null"
+              },
+              "mode": {
+                "const": "new"
+              },
+              "steerRequestId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stageConfirmation": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "stageConfirmation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "new"
+              },
+              "steerRequestId": {
+                "type": "null"
+              },
+              "proposalRef": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stageConfirmation": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "not": {
+                      "const": "approve_content_continue"
+                    }
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            },
+            "required": [
+              "stageConfirmation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "skillId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stageConfirmation": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "approve_plan",
+                      "finalize_video"
+                    ]
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              }
+            },
+            "required": [
+              "stageConfirmation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stageConfirmation": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "const": "artifact_revision"
+                      }
+                    },
+                    "required": [
+                      "kind"
+                    ]
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "仅历史读取/旧测试输入：0.1.32 的 MessageInput；新写入不使用此形状。"
+    },
+    "LegacyProductionSpec": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "inputRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 8
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationSpec"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        },
+        "finalOutput": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "outputSlot": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "operationId",
+            "outputSlot"
+          ],
+          "additionalProperties": false
+        },
+        "maxSpend": {
+          "$ref": "#/$defs/Money"
+        }
+      },
+      "required": [
+        "workId",
+        "title",
+        "inputRevisions",
+        "operations",
+        "finalOutput",
+        "maxSpend"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 ProductionSpec；新写入不使用此形状。"
+    },
+    "LegacyProductionIntent": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "inputRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 8
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationRequest"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        },
+        "finalOutput": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "outputSlot": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "operationId",
+            "outputSlot"
+          ],
+          "additionalProperties": false
+        },
+        "maxSpend": {
+          "$ref": "#/$defs/Money"
+        }
+      },
+      "required": [
+        "workId",
+        "title",
+        "inputRevisions",
+        "operations",
+        "finalOutput",
+        "maxSpend"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 ProductionIntent；新写入不使用此形状。"
+    },
+    "LegacyToolProductionIntent": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "inputRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 8
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolOperationRequest"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        },
+        "finalOutput": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "outputSlot": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "operationId",
+            "outputSlot"
+          ],
+          "additionalProperties": false
+        },
+        "maxSpend": {
+          "$ref": "#/$defs/Money"
+        }
+      },
+      "required": [
+        "workId",
+        "title",
+        "inputRevisions",
+        "operations",
+        "finalOutput",
+        "maxSpend"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 ToolProductionIntent；新写入不使用此形状。"
+    },
+    "LegacyPrepareProposal": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "spec": {
+          "$ref": "#/$defs/LegacyProductionIntent"
+        },
+        "planSource": {
+          "$ref": "#/$defs/RevisionRef",
+          "description": "准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。"
+        },
+        "replacesProposal": {
+          "$ref": "#/$defs/ProposalRef",
+          "description": "仅在用户明确替换某份报价时提供其准确 ID 和 digest。服务端核对同一会话、事项、方案与制作范围后撤销指定旧 ready 报价；普通备选和其他事项不受影响。新额度不足时旧报价仍已撤销，新提案不可执行。此意图不进入媒体执行 spec。"
+        }
+      },
+      "required": [
+        "commandId",
+        "spec"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 PrepareProposal；新写入不使用此形状。"
+    },
+    "LegacyToolPrepareProposal": {
+      "type": "object",
+      "properties": {
+        "spec": {
+          "$ref": "#/$defs/LegacyToolProductionIntent"
+        },
+        "planSource": {
+          "$ref": "#/$defs/RevisionRef",
+          "description": "准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。"
+        },
+        "replacesProposal": {
+          "$ref": "#/$defs/ProposalRef",
+          "description": "仅在用户明确替换某份报价时提供其准确 ID 和 digest。服务端核对同一会话、事项、方案与制作范围后撤销指定旧 ready 报价；普通备选和其他事项不受影响。新额度不足时旧报价仍已撤销，新提案不可执行。此意图不进入媒体执行 spec。"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 ToolPrepareProposal；新写入不使用此形状。"
+    },
+    "LegacyToolDelivery": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeliveryItem"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "stageDrafts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageDraft"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "additionalProperties": false,
+      "description": "仅历史读取/旧测试输入：0.1.32 的 ToolDelivery；新写入不使用此形状。"
+    },
+    "LegacyCreationBinding": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "stage": {
+          "$ref": "#/$defs/WorkStage"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposalRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workId",
+        "stage",
+        "source",
+        "proposalRef"
+      ],
+      "additionalProperties": false
+    },
+    "CreationPurpose": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "preview",
+        "production"
+      ],
+      "description": "draft 为初始有范围样张，preview 为明确请求的局部试做，production 为正式范围；许可不因本字段自动成立。"
+    },
+    "ReviewRole": {
+      "type": "string",
+      "enum": [
+        "content",
+        "plan",
+        "character",
+        "scene",
+        "storyboard",
+        "voice",
+        "music",
+        "clip",
+        "video",
+        "other"
+      ]
+    },
+    "ReviewInput": {
+      "type": "object",
+      "description": "本次必要且已获真实用户认可的准确版本；不把工程文件、选材或 preview 请求许可伪装成认可。",
+      "properties": {
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "itemId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "$ref": "#/$defs/ContentSource"
+        },
+        "confirmationId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "groupId",
+        "itemId",
+        "source",
+        "confirmationId"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewInputInput": {
+      "type": "object",
+      "description": "本次必要且已获真实用户认可的准确版本；不把工程文件、选材或 preview 请求许可伪装成认可。",
+      "properties": {
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "itemId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "$ref": "#/$defs/ContentSourceInput"
+        },
+        "confirmationId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "groupId",
+        "itemId",
+        "source",
+        "confirmationId"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewItem": {
+      "type": "object",
+      "description": "required 当前稿与 approved 是否相同决定是否还需认可。draft=null 可表示同次受理已分配但尚未产出的目标；不造空媒体。finalizedSource 是只读投影：来自确认表中该项最近一条 finalize_video 记录的真实来源；非视频事项恒为 null，已认可不等于已定稿。",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "$ref": "#/$defs/ReviewRole"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "draft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approved": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finalizedSource": {
+          "description": "只读投影，服务端由 work_review_confirmations 中该事项最近的 finalize_video 记录导出；客户端不得提交。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "role",
+        "required",
+        "draft",
+        "approved",
+        "finalizedSource",
+        "confirmationId",
+        "approvedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "approved": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "approved"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confirmationId": {
+                "type": "null"
+              },
+              "approvedAt": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "confirmationId": {
+                "$ref": "#/$defs/Id"
+              },
+              "approvedAt": {
+                "$ref": "#/$defs/Time"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ReviewGroup": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewItem"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "nextIntent": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "revision",
+        "items",
+        "nextIntent"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewConfirmation": {
+      "type": "object",
+      "description": "单项或整组准确版本的真实用户认可。没有组版本锁；只认可不排请求，approve_and_continue 按钮仅排一次，finalize_video 只定稿准确最终视频。来源消息/身份由宿主注入。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "itemId": {
+                "$ref": "#/$defs/Id"
+              },
+              "source": {
+                "$ref": "#/$defs/ContentSourceInput"
+              }
+            },
+            "required": [
+              "itemId",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "approve_and_continue",
+            "finalize_video"
+          ]
+        }
+      },
+      "required": [
+        "workId",
+        "groupId",
+        "items",
+        "action"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "finalize_video"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "maxItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "artifact_revision"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ToolConfirmReview": {
+      "type": "object",
+      "description": "confirm_review 只记录当前真实用户认可，不额外排队；来源由当前请求注入。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "itemId": {
+                "$ref": "#/$defs/Id"
+              },
+              "source": {
+                "$ref": "#/$defs/ContentSourceInput"
+              }
+            },
+            "required": [
+              "itemId",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "approve_and_continue",
+            "finalize_video"
+          ]
+        }
+      },
+      "required": [
+        "workId",
+        "groupId",
+        "items",
+        "action"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "type": "string",
+                "const": "finalize_video"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "maxItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "artifact_revision"
+                        }
+                      },
+                      "required": [
+                        "kind"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CreationBinding": {
+      "type": "object",
+      "description": "由服务端解析的不可变直接绑定。inputSources 是实际执行来源，reviewInputs 仅是本次必要认可依据；不从最新 head 反推历史。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "itemId": {
+          "$ref": "#/$defs/Id"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSource"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "projectRevision": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "projectRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 64,
+          "description": "本产物来源链上的全部封存工程修订：本操作自己的工程在前，沿 operation_output 继承输入产物的工程，按 revisionId 去重。projectRevision 仍只表示本操作自己执行的工程。"
+        },
+        "runId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "workId",
+        "groupId",
+        "itemId",
+        "inputSources",
+        "reviewInputs",
+        "purpose"
+      ],
+      "additionalProperties": false
+    },
+    "RelativeProjectPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\/$)(?![A-Za-z]:)[^\\u0000-\\u001f]+$",
+      "description": "工程内规范相对路径；禁止绝对路径、盘符、反斜线、空目录段及 ./../ 段。宿主发布边界另核对真实文件与符号链接归属。"
+    },
+    "ProjectEntrypoint": {
+      "type": "object",
+      "description": "保存解释器/命令及清单内入口参数；服务端只在固定隔离环境执行，不接受宿主路径或任意挂载。",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "argv"
+      ],
+      "additionalProperties": false
+    },
+    "ProjectFile": {
+      "type": "object",
+      "properties": {
+        "relativePath": {
+          "$ref": "#/$defs/RelativeProjectPath"
+        },
+        "blobId": {
+          "$ref": "#/$defs/Id"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "relativePath",
+        "blobId",
+        "digest",
+        "purpose"
+      ],
+      "additionalProperties": false
+    },
+    "CreativeProjectContent": {
+      "type": "object",
+      "description": "运行前已持久封存的源码、模板、字体、时间线及素材引用。runtimeImage 为宿主允许的固定镜像标识；锁文件/时间线/入口须属于此清单，定稿引用旧快照而非重采工作目录。",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "project"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectFile"
+          },
+          "minItems": 1,
+          "maxItems": 512
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/ProjectEntrypoint"
+        },
+        "runtimeImage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "dependencyLocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativeProjectPath"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "timelineFiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativeProjectPath"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "sourceRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "format",
+        "files",
+        "entrypoint",
+        "runtimeImage",
+        "dependencyLocks",
+        "timelineFiles",
+        "sourceRevisions"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewGroupTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "existing"
+            },
+            "groupId": {
+              "$ref": "#/$defs/Id"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "nextIntent": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "groupId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "create"
+            },
+            "key": {
+              "$ref": "#/$defs/Id"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "nextIntent": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "key",
+            "title",
+            "nextIntent"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ReviewItemTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "existing"
+            },
+            "itemId": {
+              "$ref": "#/$defs/Id"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "role": {
+              "$ref": "#/$defs/ReviewRole"
+            },
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "itemId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "create"
+            },
+            "key": {
+              "$ref": "#/$defs/Id"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "role": {
+              "$ref": "#/$defs/ReviewRole"
+            },
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "key",
+            "label",
+            "role",
+            "required"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ReviewTarget": {
+      "type": "object",
+      "description": "已有目标传准确身份；新组/项在同次交付或受理中声明并分配。key 仅本次调用内用于去重分配，返回稳定 id；不创建占位媒体。",
+      "properties": {
+        "group": {
+          "$ref": "#/$defs/ReviewGroupTarget"
+        },
+        "item": {
+          "$ref": "#/$defs/ReviewItemTarget"
+        }
+      },
+      "required": [
+        "group",
+        "item"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "group": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "create"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            },
+            "required": [
+              "group"
+            ]
+          },
+          "then": {
+            "properties": {
+              "item": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "create"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "FrozenReviewTarget": {
+      "type": "object",
+      "properties": {
+        "groupId": {
+          "$ref": "#/$defs/Id"
+        },
+        "itemId": {
+          "$ref": "#/$defs/Id"
+        },
+        "baseRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "groupId",
+        "itemId",
+        "baseRevisionId"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewDeliveryItem": {
+      "type": "object",
+      "properties": {
+        "item": {
+          "$ref": "#/$defs/ReviewItemTarget"
+        },
+        "itemIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSourceInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInputInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "outputTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "projectRevision": {
+          "$ref": "#/$defs/RevisionRef"
+        }
+      },
+      "required": [
+        "item",
+        "itemIndex",
+        "inputSources",
+        "reviewInputs",
+        "purpose"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewGroupDelivery": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "group": {
+          "$ref": "#/$defs/ReviewGroupTarget"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewDeliveryItem"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "workId",
+        "group",
+        "items"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "group": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "const": "create"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            },
+            "required": [
+              "group"
+            ]
+          },
+          "then": {
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "item": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "const": "create"
+                        }
+                      },
+                      "required": [
+                        "mode"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "item"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "LocalOutputSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run_output"
+            },
+            "runId": {
+              "$ref": "#/$defs/Id"
+            },
+            "operationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "outputSlot": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "operationId",
+            "outputSlot"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_revision"
+            },
+            "artifactId": {
+              "$ref": "#/$defs/Id"
+            },
+            "revisionId": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "artifactId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LocalOutputInput": {
+      "type": "object",
+      "description": "仅引用已登记且已落盘的真实执行输出或可信免费工具结果修订；目标由同次 reviewGroups 绑定，修改基准由 DeliveryItem.baseRevisionId 指定。禁止裸工作区路径补推来源。",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "local_output"
+        },
+        "source": {
+          "$ref": "#/$defs/LocalOutputSource"
+        }
+      },
+      "required": [
+        "format",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "ToolPublishProject": {
+      "type": "object",
+      "description": "封存当前任务工程选定文件，宿主注入固定 runtimeImage；只发布 project 修订，不认可、不执行、不默认逐文件交付。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativeProjectPath"
+          },
+          "minItems": 1,
+          "maxItems": 512
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/ProjectEntrypoint"
+        },
+        "dependencyLocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativeProjectPath"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "timelineFiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RelativeProjectPath"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "sourceRevisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "artifactId": {
+          "$ref": "#/$defs/Id"
+        },
+        "baseRevisionId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "workId",
+        "title",
+        "files",
+        "entrypoint",
+        "dependencyLocks",
+        "timelineFiles",
+        "sourceRevisions"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "artifactId": [
+          "baseRevisionId"
+        ],
+        "baseRevisionId": [
+          "artifactId"
+        ]
+      }
+    },
+    "CodeProjectParameters": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "assembly": {
+              "type": "string",
+              "const": "code_project"
+            },
+            "projectRevision": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/ProjectEntrypoint"
+            },
+            "outputPath": {
+              "$ref": "#/$defs/RelativeProjectPath"
+            },
+            "expectedMediaKind": {
+              "type": "string",
+              "const": "image"
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "png",
+                "jpeg"
+              ]
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            }
+          },
+          "required": [
+            "assembly",
+            "projectRevision",
+            "entrypoint",
+            "outputPath",
+            "expectedMediaKind",
+            "format",
+            "width",
+            "height"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "assembly": {
+              "type": "string",
+              "const": "code_project"
+            },
+            "projectRevision": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/ProjectEntrypoint"
+            },
+            "outputPath": {
+              "$ref": "#/$defs/RelativeProjectPath"
+            },
+            "expectedMediaKind": {
+              "type": "string",
+              "const": "audio"
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "wav",
+                "mp3"
+              ]
+            },
+            "sampleRate": {
+              "type": "integer",
+              "minimum": 8000,
+              "maximum": 192000
+            },
+            "channels": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            }
+          },
+          "required": [
+            "assembly",
+            "projectRevision",
+            "entrypoint",
+            "outputPath",
+            "expectedMediaKind",
+            "format",
+            "sampleRate",
+            "channels"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "assembly": {
+              "type": "string",
+              "const": "code_project"
+            },
+            "projectRevision": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/ProjectEntrypoint"
+            },
+            "outputPath": {
+              "$ref": "#/$defs/RelativeProjectPath"
+            },
+            "expectedMediaKind": {
+              "type": "string",
+              "const": "video"
+            },
+            "format": {
+              "type": "string",
+              "const": "mp4"
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            "fps": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            }
+          },
+          "required": [
+            "assembly",
+            "projectRevision",
+            "entrypoint",
+            "outputPath",
+            "expectedMediaKind",
+            "format",
+            "width",
+            "height",
+            "fps"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "复用 kind=render；每个操作一个主要输出。图片/声音不接受 fps；代码、运行入口和输出路径均从冻结工程解析。"
+    },
+    "RequestSource": {
+      "type": "object",
+      "description": "从当前真实请求读取并注入，模型不能自报授权消息。",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/Id"
+        },
+        "messageId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "requestId",
+        "messageId"
+      ],
+      "additionalProperties": false
+    },
+    "PaidProductionSnapshot": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductionSpec"
+        },
+        {
+          "$ref": "#/$defs/LegacyProductionSpec"
+        }
+      ],
+      "description": "历史无 type 的快照只读解释为 paid_production，保持原 JSON 与 digest；新写必须为 ProductionSpec。"
+    },
+    "LocalRenderOperation": {
+      "type": "object",
+      "description": "仅本地执行，不含 quote/maxSpend/authorization/provider model；复用同一 Worker/操作状态/收据与取消。",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "outputSlot": {
+          "$ref": "#/$defs/Id"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "minItems": 0,
+          "maxItems": 24
+        },
+        "kind": {
+          "type": "string",
+          "const": "render"
+        },
+        "model": {
+          "type": "null"
+        },
+        "parameters": {
+          "$ref": "#/$defs/RenderParameters"
+        },
+        "target": {
+          "$ref": "#/$defs/FrozenReviewTarget"
+        }
+      },
+      "required": [
+        "operationId",
+        "outputSlot",
+        "inputs",
+        "kind",
+        "model",
+        "parameters",
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "LocalCreationSpec": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "local_creation"
+        },
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "requestSource": {
+          "$ref": "#/$defs/RequestSource"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSource"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LocalRenderOperation"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        },
+        "finalOutput": {
+          "type": "object",
+          "properties": {
+            "operationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "outputSlot": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "operationId",
+            "outputSlot"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "type",
+        "workId",
+        "title",
+        "requestSource",
+        "scope",
+        "purpose",
+        "inputSources",
+        "reviewInputs",
+        "operations",
+        "finalOutput"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionSnapshotSpec": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductionSpec"
+        },
+        {
+          "$ref": "#/$defs/LocalCreationSpec"
+        }
+      ],
+      "description": "新快照明确标记真实付费/本地来源。旧 JSON 由历史读取边界一次规范化，不能为本地运行伪造提案或财务。"
+    },
+    "StoredExecutionSnapshot": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProductionSpec"
+        },
+        {
+          "$ref": "#/$defs/LocalCreationSpec"
+        },
+        {
+          "$ref": "#/$defs/LegacyProductionSpec"
+        }
+      ]
+    },
+    "ProjectRenderRequestOperation": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "outputSlot": {
+          "$ref": "#/$defs/Id"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "minItems": 0,
+          "maxItems": 24
+        },
+        "parameters": {
+          "$ref": "#/$defs/CodeProjectParameters"
+        },
+        "target": {
+          "$ref": "#/$defs/ReviewTarget"
+        },
+        "baseRevisionId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "operationId",
+        "outputSlot",
+        "inputs",
+        "parameters",
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "ToolRenderProject": {
+      "type": "object",
+      "description": "当前明确制作请求的一次本地受理。宿主核对 work/scope 和必要认可、注入请求来源、分配新目标、冻结工程及操作，免费动作不准备费用卡。",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "purpose": {
+          "$ref": "#/$defs/CreationPurpose"
+        },
+        "inputSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentSourceInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "reviewInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewInputInput"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectRenderRequestOperation"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        }
+      },
+      "required": [
+        "workId",
+        "title",
+        "scope",
+        "purpose",
+        "inputSources",
+        "reviewInputs",
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "RunOrigin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "proposal"
+            },
+            "proposalId": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "proposalId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "local_request"
+            },
+            "requestId": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "requestId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LocalCreationReceipt": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/Run"
+        },
+        "reviewTargets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "$ref": "#/$defs/Id"
+              },
+              "groupId": {
+                "$ref": "#/$defs/Id"
+              },
+              "itemId": {
+                "$ref": "#/$defs/Id"
+              }
+            },
+            "required": [
+              "operationId",
+              "groupId",
+              "itemId"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 24
+        }
+      },
+      "required": [
+        "run",
+        "reviewTargets"
+      ],
+      "additionalProperties": false
+    },
+    "LibrarySelectionSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "artifact_revision"
+            },
+            "artifactId": {
+              "$ref": "#/$defs/Id"
+            },
+            "revisionId": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "kind",
+            "artifactId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "project_file"
+            },
+            "project": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "relativePath": {
+              "$ref": "#/$defs/RelativeProjectPath"
+            }
+          },
+          "required": [
+            "kind",
+            "project",
+            "relativePath"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LibrarySelection": {
+      "type": "object",
+      "description": "持久化准确来源视频和准确素材修订/工程文件；不是 sourceId、当前 head 或临时路径。发送时建立使用引用，选择本身不启动 work/制作。",
+      "properties": {
+        "sourceVideo": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "source": {
+          "$ref": "#/$defs/LibrarySelectionSource"
+        }
+      },
+      "required": [
+        "sourceVideo",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "LibraryMaterial": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "script",
+            "prompt",
+            "analysis",
+            "project"
+          ],
+          "description": "留存清单里该素材修订的 artifact 类别；文本类素材没有媒体来源记录，provenance 为空。"
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaProvenance"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "source",
+        "label",
+        "kind",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "AcceptanceBlocker": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "INPUT_APPROVAL_REQUIRED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1200
+            },
+            "action": {
+              "type": "string",
+              "const": "review_inputs"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "INPUT_CHANGED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1200
+            },
+            "action": {
+              "type": "string",
+              "const": "prepare_again"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "CAPABILITY_UNAVAILABLE"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1200
+            },
+            "action": {
+              "type": "string",
+              "const": "configure_capability"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "由同一受理前置条件即时推导的只读说明，不是另存状态机。仅 state=ready 且 blocker=null 可确认制作。过期/受理/撤销继续沿原 state 解释。"
+    },
+    "LibraryProjectFile": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/RevisionRef",
+          "description": "该文件所属的封存工程修订；多工程合成时同名 relativePath 以此区分来源，不能指向另一个工程。"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/RelativeProjectPath"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 100,
+          "description": "封存工程清单里该文件的登记 MIME；客户端据此区分媒体与文本文件。"
+        }
+      },
+      "required": [
+        "project",
+        "relativePath",
+        "mimeType"
+      ],
+      "additionalProperties": false
     }
   }
 };

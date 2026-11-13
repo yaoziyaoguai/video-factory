@@ -832,6 +832,30 @@ test("T3-D3 旧记录无 provider 字段：读取补 Pexels，采用按 Pexels �
   assert.equal(imported.mimeType, "image/jpeg");
 });
 
+test("Pixabay 视频优先下载 1080p 内的清晰档位，候选尺寸和预览跟随所选文件", async () => {
+  const file = (name: string, width: number, height: number) => ({
+    url: `https://cdn.pixabay.com/video/${name}.mp4`, width, height,
+    thumbnail: `https://cdn.pixabay.com/video/${name}.jpg`,
+  });
+  const variants = [
+    { large: file("4k", 3840, 2160), medium: file("1440p", 2560, 1440), small: file("1080p", 1920, 1080), tiny: file("720p", 1280, 720) },
+    { small: file("720p", 1280, 720), large: file("4k", 3840, 2160) },
+    { large: file("4k", 3840, 2160), medium: file("1440p", 2560, 1440) },
+  ];
+  const client = new StockClient({ pixabay: { enabled: true, apiKey: "test-key" } }, async () => new Response(JSON.stringify({
+    hits: variants.map((videos, index) => ({
+      id: index + 1, pageURL: `https://pixabay.com/videos/${index + 1}/`, user: "Author", tags: "sports", duration: 13, videos,
+    })),
+  })));
+  let id = 0;
+  const results = await client.search("pixabay", { query: "sports", kind: "video", limit: 3, newCandidateId: () => `cand-${++id}` });
+  assert.deepEqual(results.map(({ candidate, downloadUrl }) => ({
+    url: downloadUrl, width: candidate.width, height: candidate.height, preview: candidate.previewUrl, dimensionsKind: candidate.dimensionsKind,
+  })), [file("1080p", 1920, 1080), file("720p", 1280, 720), file("1440p", 2560, 1440)].map(({ url, width, height, thumbnail }) => ({
+    url, width, height, preview: thumbnail, dimensionsKind: "download",
+  })));
+});
+
 test("T3-D4 同内容跨来源采用：来源合并在一个 blob，Pixabay 下载尺寸与原作分开，重放各回各的来源", async t => {
   const jpeg = imageBytes("mjpeg", 1280, 779);
   const webJpeg = imageBytes("mjpeg", 640, 390);

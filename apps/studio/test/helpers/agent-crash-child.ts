@@ -58,7 +58,10 @@ const prepareStep: FauxResponseStep = (context) => {
       spec: {
         workId: null,
         title: "旅行开场配音",
-        inputRevisions: [{ artifactId: artifact.artifactId, revisionId: artifact.headRevisionId }],
+        inputSources: [{ kind: "artifact_revision", artifactId: artifact.artifactId, revisionId: artifact.headRevisionId, digest: artifact.digest }],
+        reviewInputs: [],
+        purpose: "draft",
+        scope: "旅行开场配音草稿",
         operations: [{
           operationId: "opVoice1",
           outputSlot: "voiceTrack",

@@ -2,7 +2,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { maxEventSeq } from "./event-log.js";
 import { decodeListCursor, encodeEventCursor, encodeListCursor } from "./paging.js";
-import { getProposalRow, listProposalRows, rowToProposal } from "./artifact-store.js";
+import { getProposalRow, listProposalRows, rowToProposal, type QuoteCatalog } from "./artifact-store.js";
 import { toRun, type RunRow } from "./production-store.js";
 import type {
   ProductionIndexPage, Proposal, ProposalIndexItem, Run, RunIndexItem, ToolListProduction,
@@ -23,6 +23,7 @@ export function toProposalIndexItem(proposal: Proposal): ProposalIndexItem {
     digest: proposal.digest,
     expiresAt: proposal.expiresAt,
     acceptedRunId: proposal.acceptedRunId,
+    acceptanceBlocker: proposal.acceptanceBlocker,
   };
 }
 
@@ -32,7 +33,7 @@ export function toRunIndexItem(run: Run): RunIndexItem {
     title: run.title,
     state: run.state,
     revision: run.revision,
-    proposalId: run.proposalId,
+    origin: run.origin,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
   };
@@ -52,7 +53,7 @@ function pageCursor(fetched: { created_seq: number }[], pageSize: number, scope:
   return encodeListCursor({ ...scope, p: fetched[pageSize - 1]!.created_seq });
 }
 
-export function listProductionIndex(db: AgentDatabase, conversationId: string, input: ToolListProduction): ProductionIndexPage {
+export function listProductionIndex(db: AgentDatabase, conversationId: string, input: ToolListProduction, catalog?: QuoteCatalog): ProductionIndexPage {
   const pageSize = boundedLimit(input.limit);
   if (input.kind === "proposals") {
     const decoded = input.cursor === undefined ? undefined : decodeListCursor(input.cursor, conversationId, "proposals");
@@ -61,7 +62,7 @@ export function listProductionIndex(db: AgentDatabase, conversationId: string, i
     const watermark = decoded ? decoded.w : maxEventSeq(db, conversationId);
     return {
       kind: "proposals",
-      items: fetched.slice(0, pageSize).map(row => toProposalIndexItem(rowToProposal(row, db))),
+      items: fetched.slice(0, pageSize).map(row => toProposalIndexItem(rowToProposal(row, db, catalog))),
       nextCursor: pageCursor(fetched, pageSize, { v: 1, c: conversationId, k: "proposals", w: watermark }),
       watermark: encodeEventCursor(conversationId, watermark),
     };
@@ -82,10 +83,10 @@ export function listProductionIndex(db: AgentDatabase, conversationId: string, i
 }
 
 // 归属读取：owner + conversation 双层范围核对，供 Pi 工具使用。
-export function getScopedProposal(db: AgentDatabase, ownerId: string, conversationId: string, proposalId: string): Proposal | undefined {
+export function getScopedProposal(db: AgentDatabase, ownerId: string, conversationId: string, proposalId: string, catalog?: QuoteCatalog): Proposal | undefined {
   const row = getProposalRow(db, ownerId, proposalId);
   if (!row || row.conversation_id !== conversationId) return undefined;
-  return rowToProposal(row, db);
+  return rowToProposal(row, db, catalog);
 }
 
 export function getScopedRunRow(db: AgentDatabase, ownerId: string, conversationId: string, runId: string): RunRow | undefined {

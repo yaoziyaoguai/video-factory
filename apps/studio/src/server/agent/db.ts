@@ -8,7 +8,13 @@ export type AgentDatabase = Database.Database;
 
 // 版本化 DDL：可重复执行；已应用版本跳过，重复迁移不毁数据。
 // MIGRATIONS 同时是测试 fixture 的事实来源（按历史版本截取构建 C1 形状库），不另建第二份 SQL。
-export const MIGRATIONS: readonly { version: number; statements: readonly string[] }[] = [
+// foreignKeys:"off" 的迁移（父表重建）在事务外关闭外键约束执行；data 是同事务内的数据改写步骤。
+export const MIGRATIONS: readonly {
+  version: number;
+  statements: readonly string[];
+  foreignKeys?: "off";
+  data?: (db: AgentDatabase) => void;
+}[] = [
   {
     version: 1,
     statements: [
@@ -561,6 +567,136 @@ export const MIGRATIONS: readonly { version: number; statements: readonly string
     `DROP TABLE free_service_settings`,
     `ALTER TABLE free_service_settings_v18 RENAME TO free_service_settings`,
   ] },
+  { version: 19, foreignKeys: "off", statements: [
+    // 组审阅模型：消息携带作品库选材；确认事实单表记录；
+    // production_runs.proposal_id 改可空并补 source_request_id（免费本地运行），保留全部旧行。
+    `ALTER TABLE messages ADD COLUMN library_selections_json TEXT`,
+    `CREATE TABLE work_review_confirmations(
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      work_id TEXT NOT NULL REFERENCES works(id),
+      group_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('approve','approve_and_continue','finalize_video')),
+      subject_json TEXT NOT NULL,
+      source_kind TEXT NOT NULL CHECK(source_kind IN ('user_message','pi_tool')),
+      source_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX work_review_confirmations_item ON work_review_confirmations(work_id, item_id, created_at)`,
+    `CREATE INDEX work_review_confirmations_owner_action ON work_review_confirmations(owner_id, action)`,
+    `CREATE TABLE production_runs_v19(
+      id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      work_id TEXT NOT NULL REFERENCES works(id), snapshot_id TEXT NOT NULL UNIQUE REFERENCES production_snapshots(id),
+      proposal_id TEXT UNIQUE REFERENCES proposals(id), source_request_id TEXT,
+      title TEXT NOT NULL, frozen_target_json TEXT,
+      state TEXT NOT NULL CHECK(state IN ('queued','running','unknown','cancel_requested','succeeded','failed','cancelled')),
+      revision INTEGER NOT NULL DEFAULT 1, created_seq INTEGER NOT NULL, issue_json TEXT,
+      lease_owner TEXT, execution_epoch INTEGER NOT NULL DEFAULT 0, lease_until TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE(conversation_id, created_seq)
+    )`,
+    `INSERT INTO production_runs_v19(id, owner_id, conversation_id, work_id, snapshot_id, proposal_id, source_request_id, title, frozen_target_json, state, revision, created_seq, issue_json, lease_owner, execution_epoch, lease_until, created_at, updated_at)
+      SELECT id, owner_id, conversation_id, work_id, snapshot_id, proposal_id, NULL, title, NULL, state, revision, created_seq, issue_json, lease_owner, execution_epoch, lease_until, created_at, updated_at FROM production_runs`,
+    `DROP INDEX work_in_flight`,
+    `DROP TABLE production_runs`,
+    `ALTER TABLE production_runs_v19 RENAME TO production_runs`,
+    `CREATE UNIQUE INDEX work_in_flight ON production_runs(work_id) WHERE state IN ('queued','running','unknown','cancel_requested')`,
+    `CREATE INDEX production_runs_source_request ON production_runs(source_request_id)`,
+    // 产物类型增加 project：冻结工程修订（publish_project 封存源码/时间线）。重建 CHECK 保留全部旧行。
+    `CREATE TABLE artifacts_v19(
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      owner_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('prompt','script','analysis','video','image','audio','project')),
+      work_id TEXT,
+      head_revision_id TEXT,
+      head_revision_number INTEGER NOT NULL DEFAULT 0,
+      created_seq INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    `INSERT INTO artifacts_v19 SELECT * FROM artifacts`,
+    `DROP TABLE artifacts`,
+    `ALTER TABLE artifacts_v19 RENAME TO artifacts`,
+    `CREATE UNIQUE INDEX artifacts_conversation_seq ON artifacts(conversation_id, created_seq)`,
+  ], data: db => {
+    // 旧固定三阶段状态一次性映射为历史审阅组；未到达且无事实的阶段不建组，不补造认可。
+    const legacyStages = [
+      { id: "content", title: "内容", role: "content" },
+      { id: "plan", title: "方案", role: "plan" },
+      { id: "video", title: "成片", role: "video" },
+    ] as const;
+    const rows = db.prepare("SELECT id, creation_state_json FROM works WHERE creation_state_json IS NOT NULL").all() as { id: string; creation_state_json: string }[];
+    const update = db.prepare("UPDATE works SET creation_state_json = ? WHERE id = ?");
+    for (const row of rows) {
+      let legacy: unknown;
+      try { legacy = JSON.parse(row.creation_state_json); } catch { update.run(JSON.stringify({ groups: [] }), row.id); continue; }
+      const state = legacy as { stage?: unknown; groups?: unknown; [key: string]: unknown };
+      if (Array.isArray(state.groups)) continue; // 已是新形状
+      if (typeof state.stage !== "string") { update.run(JSON.stringify({ groups: [] }), row.id); continue; }
+      const reached = Math.max(legacyStages.findIndex(stage => stage.id === state.stage), 0);
+      const groups = legacyStages.map((def, index) => {
+        const stage = (state[def.id] ?? {}) as Record<string, unknown>;
+        const hasFacts = stage.draft ?? stage.approved ?? stage.confirmationId ?? null;
+        if (index > reached && !hasFacts) return null;
+        return {
+          id: def.id, title: def.title, revision: 1, nextIntent: null,
+          items: [{
+            id: def.id, label: def.title, role: def.role, required: true,
+            draft: stage.draft ?? null, approved: stage.approved ?? null,
+            confirmationId: stage.confirmationId ?? null, approvedAt: stage.approvedAt ?? null,
+          }],
+        };
+      }).filter((group): group is NonNullable<typeof group> => group !== null);
+      update.run(JSON.stringify({ groups }), row.id);
+    }
+  } },
+  { version: 20, foreignKeys: "off", statements: [
+    // §11.7 来源5/6：产物类型增加 file（作品库二进制/未知类型文件卡，不再冒称 script）；
+    // library_input_preparations 记录每个 work 已按来源身份准备过的输入，保证幂等、不覆盖用户已编辑文件。
+    `CREATE TABLE artifacts_v20(
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      owner_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('prompt','script','analysis','video','image','audio','project','file')),
+      work_id TEXT,
+      head_revision_id TEXT,
+      head_revision_number INTEGER NOT NULL DEFAULT 0,
+      created_seq INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    `INSERT INTO artifacts_v20 SELECT * FROM artifacts`,
+    `DROP TABLE artifacts`,
+    `ALTER TABLE artifacts_v20 RENAME TO artifacts`,
+    `CREATE UNIQUE INDEX artifacts_conversation_seq ON artifacts(conversation_id, created_seq)`,
+    `CREATE TABLE library_input_preparations(
+      work_id TEXT NOT NULL REFERENCES works(id),
+      source_key TEXT NOT NULL,
+      path TEXT NOT NULL,
+      prepared_at TEXT NOT NULL,
+      PRIMARY KEY(work_id, source_key)
+    )`,
+  ] },
+  { version: 21, statements: [
+    // G3-2 免费配音：free_service_settings 增加 edge-tts 行（enabled/voice/pythonCommand 存 config_json）。
+    `CREATE TABLE free_service_settings_v21(
+      service_id TEXT PRIMARY KEY CHECK (service_id IN ('pexels','pixabay','unsplash','coverr','wikimedia','nasa','met','cleveland','archive','freetouse','incompetech','douyin-music','tiktok-sounds','newsnow','edge-tts')),
+      revision INTEGER NOT NULL CHECK (revision >= 0),
+      config_json TEXT NOT NULL,
+      api_key TEXT,
+      updated_at TEXT NOT NULL
+    )`,
+    `INSERT INTO free_service_settings_v21 SELECT service_id,revision,config_json,api_key,updated_at FROM free_service_settings`,
+    `DROP TABLE free_service_settings`,
+    `ALTER TABLE free_service_settings_v21 RENAME TO free_service_settings`,
+  ] },
+  // C2：消息可选携带其指向的视频创作与审阅组（reviewContext）；历史行为 NULL。
+  { version: 22, statements: ["ALTER TABLE messages ADD COLUMN review_context_json TEXT"] },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {
@@ -586,10 +722,17 @@ function migrate(db: AgentDatabase): void {
   const insert = db.prepare("INSERT INTO agent_schema_migrations(version, applied_at) VALUES (?, ?)");
   for (const migration of MIGRATIONS) {
     if (applied.has(migration.version)) continue;
+    // PRAGMA foreign_keys 在事务内是 no-op，父表重建迁移必须在开事务前关闭。
+    if (migration.foreignKeys === "off") db.pragma("foreign_keys = OFF");
     const run = db.transaction(() => {
       for (const statement of migration.statements) db.exec(statement);
+      migration.data?.(db);
       insert.run(migration.version, new Date().toISOString());
     });
-    run();
+    try {
+      run();
+    } finally {
+      if (migration.foreignKeys === "off") db.pragma("foreign_keys = ON");
+    }
   }
 }

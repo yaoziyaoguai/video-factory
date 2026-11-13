@@ -6,7 +6,7 @@ import type { EventHub } from "./event-log.js";
 import type { PiModelSelection, PiRuntimeHost, ConversationSession } from "./pi-runtime.js";
 import type { ActiveRequestContext, CrashPointHook } from "./pi-tools.js";
 import type {
-  ContextStatus, Target, ModelBinding, ModelEntry, FeedbackNote,
+  ContextStatus, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewContext,
 } from "../../shared/agent/generated/contracts.js";
 import {
   claimNextRequest, emptyReferences, finalizeRequestMessages, getConversation, insertMessage,
@@ -14,6 +14,7 @@ import {
 } from "./conversation-store.js";
 import { listArtifactRows, getProposalRow, rowToProposal } from "./artifact-store.js";
 import { listWorkRows, relatedWorkFeedback, workProjection } from "./creative-work.js";
+import type { CreativeSkill, CreativeToolContext } from "./creative-runner.js";
 import { captureStockConfigs } from "./free-service-settings.js";
 import { listMaterialBatches } from "./material-store.js";
 import { StockClient } from "./stock-providers.js";
@@ -34,6 +35,10 @@ export interface ExecutorOptions {
   mediaModels?: () => ModelEntry[];
   productionAvailable?: boolean;
   toolFactory: (holder: { current: ActiveRequestContext | null }) => ToolDefinition[];
+  /** 隔离创作环境的 Skill 资源目录；提供时原生创作工具按当前明确作品绑定工作区。 */
+  creativeSkills?: () => CreativeSkill[];
+  /** 作品库选材输入准备（§11.7 来源6/7）：回合开始且动作来源消息明确指向作品时触发；不提供时无输入准备。 */
+  prepareLibraryInputs?: (ownerId: string, conversationId: string, workId: string) => Promise<void>;
   limits?: { turnMs: number; maxToolCalls: number };
   /** 崩溃窗口注入（SIGKILL 测试）；after-claim / before-finalize 等点位见 runTurn。 */
   crashPoint?: CrashPointHook;
@@ -48,10 +53,10 @@ interface CurrentTurn {
 }
 
 const TOOL_NAMES = [
-  "read_skill_file", "read_artifact", "deliver_artifacts", "prepare_production",
+  "read_artifact", "deliver_artifacts", "prepare_production", "publish_project", "render_project",
   "read_proposal", "read_run", "list_production",
-  "search_materials", "read_material_batch", "read_trends", "import_material",
-  "start_work", "read_work", "confirm_stage", "record_work_feedback",
+  "search_materials", "read_material_batch", "read_trends", "import_material", "dub_free",
+  "start_work", "read_work", "confirm_review", "record_work_feedback", "read_skill_file",
 ] as const;
 
 export class ConversationRunner {
@@ -126,6 +131,7 @@ export class ConversationRunner {
       selection,
       recoveryCheckpoint,
       () => this.currentContext(),
+      () => this.currentCreativeContext(),
     );
     if (!this.subscribed) {
       handle.session.subscribe(event => this.onSessionEvent(event));
@@ -146,6 +152,14 @@ export class ConversationRunner {
       if (index !== -1) {
         const [entry] = this.pendingSteerSources.splice(index, 1);
         this.holder.current.actionSourceMessageId = entry!.messageId;
+        // 新消息带明确作品时按它重新明确：本回合先前的激活让位（§11.6 S7）；
+        // 无明确指向时保留当前激活，也不经旧 request target 拉回旧目标。
+        const request = this.freshRequest(current.requestId);
+        const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
+          .get(entry!.messageId) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
+        if (message && request && this.explicitWorkId(request, message, entry!.messageId) !== null) {
+          delete this.holder.current.activatedWorkId;
+        }
       }
     }
     if (!current.abortReason) this.draftStream?.accept(event);
@@ -207,6 +221,56 @@ export class ConversationRunner {
     }
   }
 
+  // 用户消息直接指向的作品：新组模型认可、旧阶段确认（历史行）与消息声明的
+  // reviewContext（C2/F05，继续按钮随消息指向作品与组）都是真实用户表达。
+  // 原消息 target 只负责初始化：steering 被原生接收后按 steering 行的指向解析，
+  // 无明确指向时不回退原消息 target 拉回旧目标（§11.6 S7）。
+  private explicitWorkId(request: RequestRow, message: { target_json: string | null; feedback_json: string | null; review_context_json: string | null }, actionSourceMessageId: string): string | null {
+    const note = message.feedback_json ? JSON.parse(message.feedback_json) as FeedbackNote : null;
+    const messageTarget = message.target_json ? JSON.parse(message.target_json) as Target : null;
+    const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
+    const confirmation = this.options.db.prepare(
+      `SELECT work_id FROM (
+         SELECT work_id FROM work_review_confirmations WHERE source_kind='user_message' AND source_id=?
+         UNION ALL
+         SELECT work_id FROM work_stage_confirmations WHERE source_kind='user_message' AND source_id=?
+       ) LIMIT 1`,
+    ).get(actionSourceMessageId, actionSourceMessageId) as { work_id: string } | undefined;
+    const initialTarget = actionSourceMessageId === request.message_id && request.target_json
+      ? JSON.parse(request.target_json) as Target : null;
+    const feedbackTarget = note ? messageTarget : messageTarget ?? initialTarget;
+    return note?.workId ?? feedbackTarget?.workId ?? reviewContext?.workId ?? confirmation?.work_id ?? null;
+  }
+
+  private effectiveEditWorkId(request: RequestRow, message: { target_json: string | null; feedback_json: string | null; review_context_json: string | null }, actionSourceMessageId: string): string | null {
+    const explicit = this.holder.current?.activatedWorkId ?? this.explicitWorkId(request, message, actionSourceMessageId);
+    if (explicit) return explicit;
+    const works = listWorkRows(this.options.db, this.conversationId, 2);
+    return works.length === 1 ? works[0]!.id : null;
+  }
+
+  // 原生创作工具的工作区上下文：有效作品 = 本回合最近一次成功显式激活
+  // （start_work / read_work activate），其次当前动作来源消息的明确指向，
+  // 再次会话唯一作品。原消息 target 只负责初始化——成功激活后不能在每次
+  // 原生调用时被它重新覆盖；不明确时只读 Skill 资源，不进入工程。每次原生
+  // 调用重新解析，不捕获首次的作品闭包；无指向的后续调用不覆盖激活（§11.6 S7）。
+  private currentCreativeContext(): CreativeToolContext | null {
+    const current = this.current;
+    if (!current || current.abortReason || !this.holder.current) return null;
+    const request = this.freshRequest(current.requestId);
+    if (!request || request.state !== "running" || request.execution_epoch !== current.epoch || request.stop_requested) return null;
+    const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
+      .get(this.holder.current.actionSourceMessageId) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
+    if (!message) return null;
+    const workId = this.effectiveEditWorkId(request, message, this.holder.current.actionSourceMessageId);
+    return {
+      conversationId: this.conversationId, workId, executionId: "project",
+      deliveryClosed: request.delivery_closed === 1,
+      ...(workId === null ? { readOnly: true } : {}),
+      skills: this.options.creativeSkills?.() ?? [],
+    };
+  }
+
   private currentContext(): string | null {
     const current = this.current;
     if (!current || current.abortReason || !this.holder.current) return null;
@@ -217,34 +281,38 @@ export class ConversationRunner {
       headRevisionId: row.head_revision_id, headRevisionNumber: row.head_revision_number,
       digest: this.options.db.prepare("SELECT digest FROM artifact_revisions WHERE id = ?").get(row.head_revision_id ?? "") as { digest: string } | undefined,
     })).map(row => ({ ...row, digest: row.digest?.digest ?? null }));
-    const target = request.target_json ? (JSON.parse(request.target_json) as Target) : null;
     const proposalIds = this.options.db.prepare(
       "SELECT DISTINCT proposal_id FROM tool_invocations WHERE request_id = ? AND proposal_id IS NOT NULL",
     ).all(request.id) as { proposal_id: string }[];
     // 引用以实际已消费的动作来源消息为准：steering 被原生接收后 context 读最新关联，
     // 不始终停留在最初 request.message_id。
-    const message = this.options.db.prepare("SELECT references_json, target_json, feedback_json FROM messages WHERE id=?")
-      .get(this.holder.current.actionSourceMessageId) as { references_json: string; target_json: string | null; feedback_json: string | null };
+    const message = this.options.db.prepare("SELECT references_json, target_json, feedback_json, library_selections_json, review_context_json FROM messages WHERE id=?")
+      .get(this.holder.current.actionSourceMessageId) as { references_json: string; target_json: string | null; feedback_json: string | null; library_selections_json: string | null; review_context_json: string | null };
     const references = JSON.parse(message.references_json) as { proposalIds: string[]; artifacts: { artifactId: string }[] };
+    // 消息声明的组审阅指向（C2/F05）：与 target 互斥，双作品会话里随消息明确当前对象。
+    const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
     const note = message.feedback_json ? JSON.parse(message.feedback_json) as FeedbackNote : null;
     const messageTarget = message.target_json ? JSON.parse(message.target_json) as Target : null;
-    const feedbackTarget = note ? messageTarget : messageTarget ?? target;
-    const confirmation = this.options.db.prepare("SELECT work_id FROM work_stage_confirmations WHERE source_kind='user_message' AND source_id=? LIMIT 1")
-      .get(this.holder.current.actionSourceMessageId) as { work_id: string } | undefined;
-    const explicitWorkId = note?.workId ?? feedbackTarget?.workId ?? confirmation?.work_id;
+    const target = messageTarget ?? (this.holder.current.actionSourceMessageId === request.message_id && request.target_json
+      ? JSON.parse(request.target_json) as Target : null);
+    const feedbackTarget = note ? messageTarget : target;
+    const explicitWorkId = this.explicitWorkId(request, message, this.holder.current.actionSourceMessageId);
+    const editingWorkId = this.effectiveEditWorkId(request, message, this.holder.current.actionSourceMessageId);
     const artifactIds = new Set(references.artifacts.map(item => item.artifactId));
     if (feedbackTarget) artifactIds.add(feedbackTarget.artifactId);
     const works = listWorkRows(this.options.db, this.conversationId, 50).map(row => workProjection(this.options.db, row));
     // 明确的意见归属优先；采用的独立稿没有 artifacts.work_id，按事项的真实来源识别。
     const referencedWorkIds = works.filter(work => explicitWorkId ? work.id === explicitWorkId :
       artifacts.some(artifact => artifact.workId === work.id && artifactIds.has(artifact.artifactId)) ||
-      Object.values(work.stages).some(stage => [stage.draft, stage.approved].some(source =>
-        source?.kind === "artifact_revision" && artifactIds.has(source.artifactId))))
+      work.reviewGroups.some(group => group.items.some(item => [item.draft, item.approved].some(source =>
+        source?.kind === "artifact_revision" && artifactIds.has(source.artifactId)))))
       .map(work => work.id);
     for (const work of works.filter(item => referencedWorkIds.includes(item.id))) {
-      for (const stage of Object.values(work.stages)) {
-        for (const source of [stage.draft, stage.approved]) {
-          if (source?.kind === "artifact_revision") artifactIds.add(source.artifactId);
+      for (const group of work.reviewGroups) {
+        for (const item of group.items) {
+          for (const source of [item.draft, item.approved]) {
+            if (source?.kind === "artifact_revision") artifactIds.add(source.artifactId);
+          }
         }
       }
     }
@@ -257,7 +325,18 @@ export class ConversationRunner {
       requestId: request.id,
       actionSourceMessageId: this.holder.current.actionSourceMessageId,
       target,
+      editingWorkId,
+      reviewContext,
       feedback,
+      // G4-2：本条消息带入的作品库选材（来源定稿视频与准确素材/工程文件）；
+      // 物化后的会话内修订已在 references.artifacts 与 artifacts 清单里，可直接 read_artifact。
+      librarySelections: message.library_selections_json ? JSON.parse(message.library_selections_json) as LibrarySelection[] : [],
+      // §11.7 来源7：当前明确作品已准备的选材输入位置（inputs/library/ 下，原字节），
+      // 由持久行重新解析，不靠客户端临时 state；未准备或只读回退时为空。
+      libraryInputs: editingWorkId
+        ? (this.options.db.prepare("SELECT source_key, path FROM library_input_preparations WHERE work_id=?")
+          .all(editingWorkId) as { source_key: string; path: string }[])
+        : [],
       referencedProposals,
       works,
       referencedWorkIds,
@@ -289,6 +368,22 @@ export class ConversationRunner {
       actionSourceMessageId: request.message_id,
     };
     this.pendingSteerSources.length = 0;
+
+    // §11.7 来源7：动作来源消息明确指向作品时，回合开始即补齐该作品的选材输入
+    // （覆盖“先发送选材、之后回合才明确作品”）；无明确指向的只读回退不写入任何作品。
+    // 准备失败如实告警并继续：上下文只披露实际已准备的输入，需要工作区的操作会在自身边界失败。
+    if (this.options.prepareLibraryInputs) {
+      const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
+        .get(request.message_id) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
+      const workId = message ? this.explicitWorkId(request, message, request.message_id) : null;
+      if (workId) {
+        try {
+          await this.options.prepareLibraryInputs(request.owner_id, this.conversationId, workId);
+        } catch (error) {
+          process.emitWarning(`agent turn ${request.id} 作品库输入准备失败（work ${workId}）: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
 
     let outcome: "completed" | "stopped" | "failed" = "completed";
     let assistantText = "";
@@ -488,6 +583,7 @@ function noticeFor(outcome: "completed" | "stopped" | "failed", abortReason: Abo
   if (outcome === "stopped") return "本回合已停止；停止前已完成的事实保持不变。";
   if (abortReason === "tool_limit") return "本回合达到工具调用上限，已提前结束；已完成的交付与提案保持不变，可继续发起新请求。";
   if (abortReason === "timeout") return "本回合超过时间上限，已提前结束；已完成的交付与提案保持不变，可继续发起新请求。";
+  if (outcome === "failed" && providerError === "Request timed out.") return "文本模型请求超时，消息已保留；请稍后重试，或检查网络与代理。";
   if (outcome === "failed") return providerError === "Connection error."
     ? "暂时无法连接文本模型，消息已保留；请稍后重试。"
     : "本回合执行失败，已提交的内容保持不变；请稍后重试。";

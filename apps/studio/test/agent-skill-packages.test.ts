@@ -8,7 +8,7 @@ import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assem
 import { buildFrameApp } from "../src/server/agent/app.js";
 import { FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot, OFFLINE_QUOTE_CATALOG, studioRoot } from "../src/server/agent/offline.js";
 import { systemClock } from "../src/server/agent/util.js";
-import { bindPreparedPlan, seedPlanStageWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { validatorFor } from "../src/server/agent/validate.js";
 import { SkillPackages } from "../src/server/agent/skill-packages.js";
 import type { SettingsManager, DefaultPackageManager } from "@earendil-works/pi-coding-agent";
@@ -212,15 +212,15 @@ test("S5 已确认后台媒体运行不阻塞 Skill 管理", async t => {
   }) } });
   t.after(async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); });
   const id = runtime.service.createConversation("local-owner", { commandId: "create", title: "后台制作" }).conversation.id;
-  // B04：视频提案须落在已进入方案阶段的事项内，受理另需方案主稿关联。
-  const planWork = seedPlanStageWork(runtime.database, systemClock(), { ownerId: "local-owner", conversationId: id }, "后台制作");
+  // 正式视频提案须落在已开始的创作内，且带真实组审阅认可（reviewInputs）。
+  const confirmedWork = seedConfirmedWork(runtime.database, systemClock(), { ownerId: "local-owner", conversationId: id }, "后台制作");
   const { proposal } = await runtime.service.prepareProposal("local-owner", id, { commandId: "prepare", spec: {
-    workId: planWork.workId, title: "模拟媒体", inputRevisions: [], operations: [{ operationId: "video", outputSlot: "clip", kind: "video",
+    workId: confirmedWork.workId, title: "模拟媒体", inputSources: [], reviewInputs: [confirmedWork.reviewInput], purpose: "production", scope: "后台媒体运行验证整片",
+    operations: [{ operationId: "video", outputSlot: "clip", kind: "video",
       model: OFFLINE_QUOTE_CATALOG["video:faux-video"].binding, inputs: [{ kind: "text", text: "模拟镜头" }], maxCreateAttempts: 1,
       parameters: { durationSeconds: 3, aspectRatio: "16:9", resolution: "640x360", audioMode: "none" } }],
-    finalOutput: { operationId: "video", outputSlot: "clip" }, maxSpend: { currency: "CNY", amountMinor: 1200 },
+    finalOutput: { operationId: "video", outputSlot: "clip" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 1200 },
   } });
-  bindPreparedPlan(runtime.database, systemClock(), { ownerId: "local-owner", conversationId: id }, proposal, planWork);
   const { run } = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: "confirm", proposalDigest: proposal.digest });
   assert.equal(run.state, "queued");
   const source = path.join(root, "empty"); await mkdir(source); await writeFile(path.join(source, "package.json"), '{"name":"empty","pi":{"skills":[]}}');

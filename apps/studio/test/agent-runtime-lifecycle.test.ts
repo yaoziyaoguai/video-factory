@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -20,10 +21,9 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGKILL"] as const) test(`A-35/39/42
   let stdout = "", stderr = "";
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
   child.stdout.on("data", chunk => { stdout += chunk; }); child.stderr.on("data", chunk => { stderr += chunk; });
-  const deadline = Date.now() + 10000;
   while (!stdout.includes('"listening"')) {
-    assert.ok(Date.now() < deadline && child.exitCode === null, stderr || "child did not start");
-    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(child.exitCode === null && child.signalCode === null, stderr || "child did not start");
+    await delay(20, undefined, { signal: t.signal });
   }
   const base = `http://127.0.0.1:${port}`;
   const post = async (url: string, body: unknown) => {

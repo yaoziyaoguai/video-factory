@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.32",
+    "version": "0.1.42",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [
@@ -527,7 +527,7 @@
     "/conversations/{conversationId}/messages": {
       "post": {
         "operationId": "sendMessage",
-        "description": "Persist before dispatch. Bound exact confirmation may atomically admit a run; runId otherwise null.",
+        "description": "先持久化再派发。reviewConfirmation 对准确单项/组版本记真实认可；按钮 approve_and_continue 只排一次普通请求，finalize_video 只定稿。librarySelections 保留准确来源并建立使用引用，不自动建 work/制作，确认命令不同时携带选材。现有绑定提案确认仍可原子受理付费 run。",
         "responses": {
           "202": {
             "description": "Accepted or replayed result",
@@ -1432,7 +1432,7 @@
     "/blobs/{blobId}/content": {
       "get": {
         "operationId": "readBlob",
-        "description": "Authenticated immutable asset content; ownership enforced; generated storage path only; support Range.",
+        "description": "鉴权读取不可变媒体或工程文件，核对归属并支持 Range；不暴露宿主路径、不提供上传。源码以受控类型下载，JS/HTML/SVG 不作为顶层同源可执行页面。",
         "parameters": [
           {
             "name": "blobId",
@@ -1453,7 +1453,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Full media",
+            "description": "完整媒体或工程文件",
             "content": {
               "application/octet-stream": {
                 "schema": {
@@ -1461,15 +1461,45 @@
                   "format": "binary"
                 }
               }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "description": "工程源码使用 attachment 下载语义，不以内联同源网页执行。",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-Type-Options": {
+                "description": "禁止浏览器猜测可执行类型。",
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
             }
           },
           "206": {
-            "description": "Byte range; Content-Range and Accept-Ranges headers required",
+            "description": "字节范围；必须包含 Content-Range/Accept-Ranges",
             "content": {
               "application/octet-stream": {
                 "schema": {
                   "type": "string",
                   "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "description": "工程源码使用 attachment 下载语义，不以内联同源网页执行。",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Content-Type-Options": {
+                "description": "禁止浏览器猜测可执行类型。",
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
                 }
               }
             }
@@ -1544,7 +1574,7 @@
     "/messages/{messageId}": {
       "get": {
         "operationId": "readMessage",
-        "description": "",
+        "description": "读取持久消息及完整 librarySelections；刷新/续聊仍引用发送时的准确视频、素材或工程文件。",
         "responses": {
           "200": {
             "description": "Success",
@@ -1826,7 +1856,7 @@
     "/settings/skills": {
       "get": {
         "operationId": "readSkillPackages",
-        "description": "读取本应用当前已配置包、实际发现的 Skill、解析诊断与当前 mutation；只读，不安装、不升级。列表反映当前配置与发现结果，不能证明依赖命令从未执行。",
+        "description": "读取本应用当前已配置包、实际发现的 Skill、解析诊断与当前 mutation；只读，不安装、不升级。列表反映当前配置与发现结果，不能证明依赖命令从未执行。 发现 status 与 runtimeStatus 分开；unchecked 不宣称执行可用，ready 有实际探测证据。",
         "responses": {
           "200": {
             "description": "当前 Skill 包目录",
@@ -2117,7 +2147,7 @@
     "/works/{workId}": {
       "get": {
         "operationId": "readWork",
-        "description": "Read one video creation work with its stage projections.",
+        "description": "读取当前唯一 reviewGroups 及各项准确 draft/approved 认可事实；固定阶段仅历史读取。",
         "responses": {
           "200": {
             "description": "Success",
@@ -2209,7 +2239,7 @@
     "/library/videos": {
       "get": {
         "operationId": "listLibraryVideos",
-        "description": "当前用户已定稿的最终视频修订列表；按首次定稿时间倒序、revisionId 稳定排序，按 video.revisionId 去重。进入作品库时读取最新列表。",
+        "description": "仅 finalize_video 的准确视频修订入库；返回冻结 project/materials/reviewSources，历史缺项为 null/[] 且 provenanceStatus=not_recorded。",
         "responses": {
           "200": {
             "description": "Success",
@@ -2296,6 +2326,36 @@
     },
     "prepare_production": {
       "$ref": "./contracts.schema.json#/$defs/ToolPrepareProposal"
+    },
+    "start_work": {
+      "$ref": "./contracts.schema.json#/$defs/ToolStartWork"
+    },
+    "read_work": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadWork"
+    },
+    "confirm_review": {
+      "$ref": "./contracts.schema.json#/$defs/ToolConfirmReview"
+    },
+    "publish_project": {
+      "$ref": "./contracts.schema.json#/$defs/ToolPublishProject"
+    },
+    "render_project": {
+      "$ref": "./contracts.schema.json#/$defs/ToolRenderProject"
+    },
+    "search_materials": {
+      "$ref": "./contracts.schema.json#/$defs/ToolSearchMaterials"
+    },
+    "read_trends": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadTrends"
+    },
+    "import_material": {
+      "$ref": "./contracts.schema.json#/$defs/ToolImportMaterial"
+    },
+    "read_material_batch": {
+      "$ref": "./contracts.schema.json#/$defs/ToolReadMaterialBatch"
+    },
+    "record_work_feedback": {
+      "$ref": "./contracts.schema.json#/$defs/ToolRecordWorkFeedback"
     }
   },
   "x-private-worker-schemas": {
@@ -2358,5 +2418,17 @@
       "readOperation": "readMaterialBatch",
       "versionField": "revision"
     }
+  },
+  "x-review-policy": {
+    "confirmation": "Exact item sources; host supplies real user action source. No whole-group revision lock.",
+    "continue": "Only approve_and_continue queues one ordinary request; confirm_review only records the current user fact.",
+    "finalization": "Only finalize_video of the current final video; preview clips and ordinary approve never enter the library.",
+    "librarySelections": "Persist exact sourceVideo and source on messages. A confirmation command cannot also carry selections."
+  },
+  "x-local-creation-policy": {
+    "origin": "local_request requestId; finance=null; no proposal, authorization or fictional bill.",
+    "snapshots": "New snapshots are typed paid_production/local_creation; preserve old untyped paid JSON/digest.",
+    "project": "Freeze and persist before render; project files are never public uploads or executable same-origin previews.",
+    "execution": "Reuse render/Worker and existing per-work admission; image/audio/video from declaration plus actual media probe."
   }
 }

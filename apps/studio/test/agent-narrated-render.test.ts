@@ -16,7 +16,7 @@ import { ArkMediaPort, RealMediaGateway } from "../src/server/agent/ark-media.js
 import { OpenAISpeechPort } from "../src/server/agent/openai-speech.js";
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import {
-  mediaBinding, narratedRenderCatalogEntry, renderCatalogEntry, timedNarratedRenderCatalogEntry,
+  mediaBinding, mixedRenderCatalogEntry, narratedRenderCatalogEntry, renderCatalogEntry, timedNarratedRenderCatalogEntry,
   openaiSpeechBinding, openaiSpeechProfile,
   type AgentMediaConfig,
 } from "../src/server/agent/media-config.js";
@@ -31,8 +31,8 @@ import { probeAudioFile, probeVideoFile } from "../src/server/agent/media-probe.
 import { blobSources, recordBlobSources } from "../src/server/agent/material-store.js";
 import { attemptsFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
-import { bindPreparedPlan, deliverStageDrafts, ensurePlanStageWork, type PlanStageWork } from "./helpers/creative-work-fixture.js";
-import { createWork, recordStageConfirmation } from "../src/server/agent/creative-work.js";
+import { deliverReviewDrafts, ensureConfirmedWork, finalVideoTarget } from "./helpers/creative-work-fixture.js";
+import { createWork, recordReviewConfirmation } from "../src/server/agent/creative-work.js";
 import { toolIntentOf } from "./helpers/tool-args.js";
 import type { AgentDatabase } from "../src/server/agent/db.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
@@ -99,10 +99,10 @@ async function outputAudioFacts(file: string): Promise<{ codec: string | undefin
 interface Ref { artifactId: string; revisionId: string; digest: string }
 
 // 媒体修订按 worker.publish 的行形状直接落库：render 输入走 artifact_revision(media) 引用。
-function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Buffer, mimeType: "video/mp4" | "audio/mpeg" | "image/png", durationMs: number): Ref {
+function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Buffer, mimeType: "video/mp4" | "audio/mpeg" | "image/png", durationMs: number, dub?: MediaContent["dub"]): Ref {
   const blobs = runtime.production!.blobs;
   const blob = blobs.persist("local-owner", conversationId, buffer, mimeType, durationMs);
-  const content = { format: "media", blobId: blob.id, mimeType, durationMs };
+  const content: MediaContent = { format: "media", blobId: blob.id, mimeType, durationMs, ...(dub ? { dub } : {}) };
   const artifactId = newAgentId("art"), revisionId = newAgentId("rev"), now = staticClock();
   const kind = mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("image/") ? "image" : "video";
   const db = runtime.database;
@@ -127,7 +127,8 @@ function narratedIntent(videos: Ref[], narration: Ref, overrides: { videoInputSl
   const parameters: NarratedParameters = { assembly: "narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24,
     videoInputSlots: (overrides.videoInputSlots ?? videos.map((_, index) => index)) as [number, ...number[]], narrationInputSlot: videos.length, durationPolicy: "preserve_all" };
   return { workId: null, title: "山脊晨光有声版",
-    inputRevisions: [...videos, narration].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: [...videos, narration].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "把已认可的画面与旁白合成有声正式成片",
     operations: [renderOp(inputs, parameters)],
     finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
@@ -135,30 +136,24 @@ function narratedIntent(videos: Ref[], narration: Ref, overrides: { videoInputSl
 function orderedIntent(clips: Ref[]): ProductionIntent {
   const inputs = clips.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })) as ProductionIntent["operations"][number]["inputs"];
   return { workId: null, title: "无声拼接",
-    inputRevisions: clips.map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: clips.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "把已认可片段按画面顺序拼成正式成片",
     operations: [renderOp(inputs, { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 })],
     finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
 
-// 视频 render/成片必须有已正式开始的创作（B04/T04）：这里用产品内核把事项推进到方案阶段，
-// 成功准备时把方案主稿按真实交付事务关联到该提案。规则本身不放宽。
+// 视频 render/成片按 §4.2.1 落在已正式开始的创作内：受理依据来自真实组审阅认可（reviewInputs），
+// 夹具用产品内核把脚本事项推进到“已认可”，prepare 前绑定 workId 与认可事实。规则本身不放宽。
 const scopeOf = (conversationId: string) => ({ ownerId: "local-owner", conversationId });
 
-function stageWork(runtime: AgentRuntime, conversationId: string, title = "有声短片"): PlanStageWork {
-  return ensurePlanStageWork(runtime.database, staticClock(), scopeOf(conversationId), title);
-}
-
-function withWork(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): PlanStageWork {
-  const work = stageWork(runtime, conversationId);
-  intent.workId = work.workId;
-  return work;
-}
-
 async function prepareIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
-  const work = withWork(runtime, conversationId, intent);
-  const prepared = await runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
-  bindPreparedPlan(runtime.database, staticClock(), scopeOf(conversationId), prepared.proposal, work);
-  return prepared;
+  const work = ensureConfirmedWork(runtime.database, staticClock(), scopeOf(conversationId), intent.title);
+  intent.workId = work.workId;
+  intent.reviewInputs = [work.reviewInput];
+  // 最终视频/渲染按 F02 声明交付目标（新组成片事项）；配音等非视频输出不带目标。
+  const final = intent.operations.find(op => op.operationId === intent.finalOutput.operationId && op.outputSlot === intent.finalOutput.outputSlot);
+  if (final && (final.kind === "video" || final.kind === "render")) intent.outputTarget = finalVideoTarget();
+  return runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
 }
 
 async function acceptIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
@@ -195,7 +190,7 @@ const workRootOf = (directory: string) => path.join(directory, "media-work");
 
 // —— 本地运行时：只有本地拼接目录（ordered + narrated 两个条目） ——
 
-const LOCAL_CATALOG = () => ({ "render:ordered_concat": renderCatalogEntry(true), "render:narrated_concat": narratedRenderCatalogEntry(), "render:timed_narrated_concat": timedNarratedRenderCatalogEntry() });
+const LOCAL_CATALOG = () => ({ "render:ordered_concat": renderCatalogEntry(true), "render:narrated_concat": narratedRenderCatalogEntry(), "render:timed_narrated_concat": timedNarratedRenderCatalogEntry(), "render:mixed_concat": mixedRenderCatalogEntry() });
 
 function buildLocalRuntime(directory: string, createPort?: (blobs: ProductionBlobs, db: AgentDatabase) => MediaExecutionPort): Promise<AgentRuntime> {
   const workRoot = path.join(directory, "media-work");
@@ -326,7 +321,8 @@ async function deliverTexts(runtime: AgentRuntime, conversationId: string, items
 
 function graphIntent(prompt: Ref, narration: Ref, config: AgentMediaConfig, speechBinding: ModelBinding): ProductionIntent {
   return { workId: null, title: "山脊晨光有声短片",
-    inputRevisions: [prompt, narration].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: [prompt, narration].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "生成镜头与旁白后合成有声正式成片",
     operations: [
       { operationId: "shot-1", outputSlot: "video-1", kind: "video", model: mediaBinding(config, config.connectionId),
         inputs: [{ kind: "artifact_revision", artifactId: prompt.artifactId, revisionId: prompt.revisionId, digest: prompt.digest }], maxCreateAttempts: 1,
@@ -407,8 +403,8 @@ it("T6-01/02：video+speech+render 一图一次确认完成，7.91 估算一次�
     const sessionHead = sessionUpdate!.session as unknown as { max_output_tokens?: number; reasoning?: { effort?: string } };
     assert.equal(sessionHead.max_output_tokens, 4096);
     assert.equal(sessionHead.reasoning?.effort, "low");
-    assert.equal(result.finance.priceKind, "estimate");
-    assert.notEqual(result.finance.state, "settled", "估价不能被称为已结算");
+    assert.equal(result.finance!.priceKind, "estimate");
+    assert.notEqual(result.finance!.state, "settled", "估价不能被称为已结算");
     const content = await outputRevisionOf(runtime, result);
     assert.equal(content.mimeType, "video/mp4");
     const file = await outputFileOf(runtime, admitted.run.id, workRootOf(directory));
@@ -443,8 +439,12 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     assert.ok(isBlue(await frameColor(longFile, Math.max(2.0, assets.longMs / 1000 - 0.2))), "画面结束后应停留最后一个画面帧");
     assert.ok(await maxVolumeDb(longFile, 2.5, Math.max(0.3, assets.longMs / 1000 - 2.7)) > -35, "旁白应播到结尾，不被截断");
     // 旁白 1.0s < 画面 2.0s：输出=画面时长，旁白结束后补静音。
+    // 合成边界夹具只核对时间线偏移和尾部字节，不冒充真实 TTS 词级对齐或试听。
+    const dub: NonNullable<MediaContent["dub"]> = { text: "山路晨光", voice: "zh-CN-XiaoxiaoNeural", rate: "+50%", granularity: "word",
+      boundaries: [{ text: "山路", offsetMs: 100, durationMs: 300 }, { text: "晨光", offsetMs: 800, durationMs: 160 }] };
+    const shortNarration = mediaRevision(runtime, conversation.id, assets.narrationShort, "audio/mpeg", assets.shortMs, dub);
     const shortRun = await drive(runtime, await acceptIntent(runtime, conversation.id,
-      narratedIntent([clipA, clipB], mediaRevision(runtime, conversation.id, assets.narrationShort, "audio/mpeg", assets.shortMs))));
+      narratedIntent([clipA, clipB], shortNarration)));
     assert.equal(shortRun.state, "succeeded");
     const shortFile = await outputFileOf(runtime, shortRun.id, workRootOf(assets.directory));
     const shortFacts = await probeVideoFile(shortFile);
@@ -453,6 +453,31 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     assert.ok(isBlue(await frameColor(shortFile, 1.6)));
     assert.ok(await maxVolumeDb(shortFile, 0.05, 0.4) > -35, "开头应能听到旁白");
     assert.ok(await maxVolumeDb(shortFile, 1.4, 0.45) < -60, "旁白结束后应补静音到画面结束");
+
+    const timelineStartMs = 750;
+    const shifted = narratedIntent([clipA, clipB], shortNarration);
+    shifted.operations[0] = renderOp(shifted.operations[0]!.inputs, {
+      assembly: "mixed_concat", format: "mp4", width: 1280, height: 720, fps: 24, segmentIds: ["a", "b"],
+      segments: [{ kind: "video", inputSlot: 0, startMs: 0, durationMs: 1200, originalGain: 0 },
+        { kind: "video", inputSlot: 1, startMs: 0, durationMs: 800, originalGain: 0 }],
+      narration: { inputSlot: 2, timelineStartMs, gain: 1 },
+    });
+    const shiftedRun = await drive(runtime, await acceptIntent(runtime, conversation.id, shifted));
+    assert.equal(shiftedRun.state, "succeeded");
+    const shiftedFile = await outputFileOf(runtime, shiftedRun.id, workRootOf(assets.directory));
+    assert.ok(Math.abs((await probeVideoFile(shiftedFile)).durationMs - 2000) <= 250);
+    assert.ok(await maxVolumeDb(shiftedFile, 0.2, 0.3) < -60, "起播偏移之前应静音");
+    const sourceRevision = runtime.service.readRevision("local-owner", shortNarration.artifactId, shortNarration.revisionId);
+    assert.equal(sourceRevision.digest, shortNarration.digest, "时间线绑定准确音频修订");
+    if (sourceRevision.content.format !== "media") assert.fail("旁白应为媒体修订");
+    assert.deepEqual(sourceRevision.content.dub, dub);
+    const cues = sourceRevision.content.dub!.boundaries.map(boundary => ({ ...boundary, offsetMs: boundary.offsetMs + timelineStartMs }));
+    for (const cue of cues) assert.ok(await maxVolumeDb(shiftedFile, cue.offsetMs / 1000, cue.durationMs / 1000) > -35, `偏移后的 ${cue.text} cue 应落在真实音频内`);
+    const lastCue = cues.at(-1)!;
+    assert.ok(await maxVolumeDb(shiftedFile, (lastCue.offsetMs + lastCue.durationMs - 80) / 1000, 0.08) > -35,
+      "末边界处仍有音频，生成时 rate 不应再次缩放或截断尾部");
+    assert.ok(await maxVolumeDb(shiftedFile, 1.86, 0.1) < -60, "偏移后的音频结束才补静音");
+    assert.equal((await outputRevisionOf(runtime, shiftedRun)).dub, undefined, "合成输出不继承源音频的 dub 坐标");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
 });
 
@@ -469,9 +494,7 @@ it("T6-04：含原声的视频 ordered 省略 audioMode 输出无声，narrated 
     const loud = mediaRevision(runtime, conversation.id, readFileSync(withAudio), "video/mp4", 2000);
     const narration = mediaRevision(runtime, conversation.id, assets.narrationShort, "audio/mpeg", assets.shortMs);
     // 0.1.23 起 ordered 声音方案由 audioMode 冻结：省略仍输出无声，有声输入整条去原声。
-    const quietWork = stageWork(runtime, conversation.id, "去原声视频");
-    const quietIntent = orderedIntent([loud]); quietIntent.workId = quietWork.workId;
-    const quietRun = await drive(runtime, await acceptIntent(runtime, conversation.id, quietIntent));
+    const quietRun = await drive(runtime, await acceptIntent(runtime, conversation.id, orderedIntent([loud])));
     assert.equal(quietRun.state, "succeeded");
     const quietFile = await outputFileOf(runtime, quietRun.id, workRootOf(assets.directory));
     assert.equal((await probeVideoFile(quietFile)).hasAudio, false, "省略 audioMode 应输出无声成片");
@@ -560,7 +583,8 @@ it("T6-11：无任务身份的配音 unknown 在用户停止后收敛为已停�
     const [narration] = await deliverTexts(runtime, conversation.id, [{ title: "旁白文本", text: "清晨的山脊铺满阳光。" }]);
     assert.ok(narration, "旁白文本应已交付");
     const intent: ProductionIntent = { workId: null, title: "单条配音",
-      inputRevisions: [{ artifactId: narration.artifactId, revisionId: narration.revisionId }],
+      inputSources: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
+      reviewInputs: [], purpose: "production", scope: "把已认可旁白文本合成为配音",
       operations: [{ operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: speechBindingOf(runtime.database),
         inputs: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
         maxCreateAttempts: 1, parameters: { voiceId: "marin", format: "mp3" } }],
@@ -570,7 +594,7 @@ it("T6-11：无任务身份的配音 unknown 在用户停止后收敛为已停�
     const unknown = runtime.service.getRun("local-owner", runId);
     assert.equal(unknown.state, "unknown");
     assert.equal(attemptsFor(runtime.database, runId)[0]!.provider_task_id, null, "单次 Realtime 会话没有任务身份");
-    assert.equal(unknown.finance.pendingUnknownMinor, 35);
+    assert.equal(unknown.finance!.pendingUnknownMinor, 35);
 
     runtime.service.cancelRun("local-owner", runId, { commandId: cmd(), expectedRevision: unknown.revision });
     await runtime.worker!.pollOnce(); // 取消查询只读本地证据 → 稳定 unknown → run 收敛，不再停留“取消中”
@@ -579,7 +603,7 @@ it("T6-11：无任务身份的配音 unknown 在用户停止后收敛为已停�
     assert.equal(cancelled.issue?.code, "CANCEL_UNSUPPORTED", "如实保留“尚未确认供应商侧取消”");
     const attempt = attemptsFor(runtime.database, runId)[0]!;
     assert.equal(attempt.state, "unknown", "不伪造供应商已取消");
-    assert.equal(cancelled.finance.pendingUnknownMinor, 35, "费用保持待对账，不虚构零费用");
+    assert.equal(cancelled.finance!.pendingUnknownMinor, 35, "费用保持待对账，不虚构零费用");
     // R2：无查询渠道的终态通知如实说“实际费用未取得”，不把无从核对待对账说成进行中的核对。
     const notice = runtime.service.snapshot("local-owner", conversation.id).messages.items
       .find(item => item.role === "system_notice" && item.text.includes("已停止"));
@@ -598,7 +622,7 @@ it("T6-11：无任务身份的配音 unknown 在用户停止后收敛为已停�
     await pending;
     const stopped = runtime.service.getRun("local-owner", activeRunId);
     assert.equal(stopped.state, "cancelled", "已退出的本地等待允许本次 execute 收敛");
-    assert.equal(stopped.finance.pendingUnknownMinor, 35);
+    assert.equal(stopped.finance!.pendingUnknownMinor, 35);
     assert.equal(hub.sessions.length, 2, "两个正式开始各仅一个会话");
   } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); closeStub(stub); }
 });
@@ -617,7 +641,8 @@ it("T6-12：服务 close 通知在途配音等待及时退出，事实落盘且�
     assert.ok(narration, "旁白文本应已交付");
     const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
     const intent: ProductionIntent = { workId: null, title: "单条配音",
-      inputRevisions: [{ artifactId: narration.artifactId, revisionId: narration.revisionId }],
+      inputSources: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
+      reviewInputs: [], purpose: "production", scope: "把已认可旁白文本合成为配音",
       operations: [{ operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: speechBindingOf(runtime.database),
         inputs: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
         maxCreateAttempts: 1, parameters: { voiceId: "marin", format: "mp3" } }],
@@ -647,7 +672,7 @@ it("T6-12：服务 close 通知在途配音等待及时退出，事实落盘且�
       const after = reopened.database.prepare("SELECT COUNT(*) AS n FROM ledger_observations WHERE attempt_id=?").get(attempt.id) as { n: number };
       assert.equal(after.n, observations.n, "同一稳定 unknown 不再产生新观测");
       assert.equal(attemptsFor(reopened.database, runId).length, 1, "重启不第二次 create");
-      assert.equal(reopened.service.getRun("local-owner", runId).finance.pendingUnknownMinor, 35, "费用不清零");
+      assert.equal(reopened.service.getRun("local-owner", runId).finance!.pendingUnknownMinor, 35, "费用不清零");
     } finally { await reopened.close(); }
   } finally { closeStub(stub); await rm(directory, { recursive: true, force: true }); }
 });
@@ -659,7 +684,8 @@ interface SpeechRef { artifactId: string; revisionId: string; digest: string }
 
 function singleSpeechIntent(narration: SpeechRef, binding: ModelBinding): ProductionIntent {
   return { workId: null, title: "单条配音",
-    inputRevisions: [{ artifactId: narration.artifactId, revisionId: narration.revisionId }],
+    inputSources: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
+    reviewInputs: [], purpose: "production", scope: "把已认可旁白文本合成为配音",
     operations: [{ operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: binding,
       inputs: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
       maxCreateAttempts: 1, parameters: { voiceId: "marin", format: "mp3" } }],
@@ -698,7 +724,7 @@ it("T6-13：unknown 观测之后落盘的完整配音由 worker 消费，不因�
     const after = runtime.service.getRun("local-owner", runId);
     assert.equal(after.state, "succeeded", "F01：停止前已有完整文件，先消费事实再收敛");
     assert.equal(after.issue, null);
-    assert.equal(after.finance.state, "pending_reconciliation", "完成不代表取得实际账单");
+    assert.equal(after.finance!.state, "pending_reconciliation", "完成不代表取得实际账单");
     assert.equal(attemptsFor(runtime.database, runId).length, 1, "不因补收据再 create");
     assert.equal(after.outputRevisions.length, 1);
     await runtime.worker!.pollOnce();
@@ -750,7 +776,7 @@ it("T6-14：重启停止一次消费多条已有完整收据，保留部分结�
       assert.equal(after.outputRevisions.length, 2, "F01：同轮消费全部已有完整结果，不能在首条observe时提前终态");
       assert.equal(attemptsFor(reopened.database, runId).length, 2, "不二次 create，也不启动第三条");
       assert.equal(after.issue, null);
-      assert.equal(after.finance.state, "pending_reconciliation");
+      assert.equal(after.finance!.state, "pending_reconciliation");
       await reopened.worker!.pollOnce();
       assert.equal(reopened.service.getRun("local-owner", runId).outputRevisions.length, 2);
       assert.equal(hub.sessions.length, 1, "恢复与停止不再创建供应商会话");
@@ -888,7 +914,8 @@ it("T6-09：已知 70s+70s 组合在旁白付费前拒绝，重复引用逐次�
     const speechBinding = speechBindingOf(runtime.database);
     const over: ProductionIntent = {
       workId: null, title: "超限组合",
-      inputRevisions: [clip70, narrationText].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+      inputSources: [clip70, narrationText].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+      reviewInputs: [], purpose: "production", scope: "重复引用同一画面时按次数核对时长上界",
       operations: [
         { operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: speechBinding,
           inputs: [{ kind: "artifact_revision", artifactId: narrationText.artifactId, revisionId: narrationText.revisionId, digest: narrationText.digest }], maxCreateAttempts: 1,
@@ -918,7 +945,8 @@ it("T6-09：已知 70s+70s 组合在旁白付费前拒绝，重复引用逐次�
     const narrationAudio = mediaRevision(runtime, conversation.id, assets.narrationShort, "audio/mpeg", assets.shortMs);
     const verifiedSpec: ProductionIntent = {
       workId: null, title: "已核实时长组合",
-      inputRevisions: [clip70, narrationAudio].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+      inputSources: [clip70, narrationAudio].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+      reviewInputs: [], purpose: "production", scope: "已核实的画面与旁白时长组合",
       operations: [renderOp([
         { kind: "artifact_revision", artifactId: clip70.artifactId, revisionId: clip70.revisionId, digest: clip70.digest },
         { kind: "artifact_revision", artifactId: narrationAudio.artifactId, revisionId: narrationAudio.revisionId, digest: narrationAudio.digest },
@@ -1041,7 +1069,8 @@ function timedRenderOp(footage: TimedFootage[], narrationInput: ProductionIntent
 function timedIntent(footage: TimedFootage[], narration: Ref): ProductionIntent {
   const refs = [...footage.map(item => item.ref), narration];
   return { workId: null, title: "有限剪辑成片",
-    inputRevisions: refs.map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: refs.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "按冻结片段裁切并叠加已认可旁白",
     operations: [timedRenderOp(footage, { kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest })],
     finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
@@ -1049,7 +1078,8 @@ function timedIntent(footage: TimedFootage[], narration: Ref): ProductionIntent 
 // 待生成配音的 timed 图：speech+render 两个操作（免费素材，配音付费）。
 function timedSpeechIntent(footage: TimedFootage[], narrationText: Ref, speechBinding: ModelBinding): ProductionIntent {
   return { workId: null, title: "待配音有限剪辑",
-    inputRevisions: [...footage.map(item => item.ref), narrationText].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: [...footage.map(item => item.ref), narrationText].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "生成配音后按冻结片段裁切合成",
     operations: [
       { operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: speechBinding,
         inputs: [{ kind: "artifact_revision", artifactId: narrationText.artifactId, revisionId: narrationText.revisionId, digest: narrationText.digest }], maxCreateAttempts: 1,
@@ -1160,10 +1190,10 @@ it("R5 连续旅程：Pi 采用聊天原文、暂停、原批次素材、交付�
     savePexelsServiceSettings(runtime.database, staticClock, "local-owner", { commandId: cmd(), expectedRevision: 0, enabled: true, apiKey: "local-fixture-only" });
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "完整创作旅程" }).conversation;
     const snapshot = () => runtime.service.snapshot("local-owner", conversation.id);
-    const send = async (text: string, stageConfirmation?: unknown) => {
+    const send = async (text: string, reviewConfirmation?: unknown) => {
       const response = await app.inject({ method: "POST", url: `/api/agent/v1/conversations/${conversation.id}/messages`, headers,
         payload: { commandId: cmd(), text, target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null,
-          ...(stageConfirmation ? { stageConfirmation } : {}) } });
+          ...(reviewConfirmation ? { reviewConfirmation } : {}) } });
       assert.equal(response.statusCode, 202, response.body);
       await waitForRequest(runtime, conversation.id);
       assert.equal(snapshot().activeRequestId, null);
@@ -1177,26 +1207,43 @@ it("R5 连续旅程：Pi 采用聊天原文、暂停、原批次素材、交付�
     };
     const script = "从城市天桥开始，走进树荫，最后留在夜色里。";
     runtime.host.faux!.setResponses([fauxAssistantMessage(script)]);
-    await send("先给我一个视频 Prompt，不开始做。");
+    await send("先给我一个视频文案，不开始做。");
     assert.equal(snapshot().works.length, 0); assert.equal(snapshot().artifacts.items.length, 0);
-    const message = snapshot().messages.items.find(item => item.role === "assistant")!;
-    const content = { kind: "message_text" as const, messageId: message.id, text: message.text };
-    runtime.host.faux!.setResponses([fauxAssistantMessage([fauxToolCall("start_work", { title: "城市 A" })]), fauxAssistantMessage("先确认内容，随时可以聊别的。")]);
-    await send("正式开始城市 A，采用刚才那段内容。");
+    // 正式开始 + 内容首采：新组模型里内容主稿由交付建立（脚本修订即草稿），认可走 reviewConfirmation。
+    runtime.host.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("start_work", { title: "城市 A" })]),
+      context => {
+        const started = lastTool<{ id: string }>(context);
+        return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [
+          { mode: "create", title: "城市 A 脚本", kind: "script", content: { format: "markdown", text: script } },
+        ], reviewGroups: [{ workId: started.id, group: { mode: "create", key: "content", title: "内容", nextIntent: null },
+          items: [{ item: { mode: "create", key: "script", label: "脚本", role: "content", required: true },
+            itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "production" }] }] })]);
+      },
+      context => { return fauxAssistantMessage("内容稿已交付，先确认再继续。"); },
+    ]);
+    await send("正式开始城市 A，就按刚才那段文案。");
     const workId = snapshot().works[0]!.id;
-    await send("只认可，暂不继续。", { workId, action: "approve_content", subject: content });
+    const contentGroup = snapshot().works[0]!.reviewGroups[0]!;
+    const contentItem = contentGroup.items[0]!;
+    assert.ok(contentItem.draft?.kind === "artifact_revision", "内容主稿应是交付的脚本修订");
+    const contentDraft = contentItem.draft;
+    await send("只认可，暂不继续。", { workId, groupId: contentGroup.id, items: [{ itemId: contentItem.id, source: contentDraft }], action: "approve" });
     assert.equal(searches, 0); assert.equal(hub.sessions.length, 0);
-    assert.equal(snapshot().artifacts.items.length, 0, "采用原文不创建稿件副本");
+    const confirmedContent = snapshot().works[0]!.reviewGroups[0]!.items[0]!;
+    assert.ok(confirmedContent.confirmationId, "认可后事项带真实确认 ID");
+    assert.deepEqual(confirmedContent.approved, contentDraft);
     let batch!: MaterialSearchResult;
     runtime.host.faux!.setResponses([
       fauxAssistantMessage([fauxToolCall("search_materials", { workId, kind: "video", query: "城市", limit: 3 })]),
       context => { batch = lastTool<MaterialSearchResult>(context); return fauxAssistantMessage("找到三段素材，请先看。") },
     ]);
-    await send("认可并继续。", { workId, action: "approve_content_continue", subject: content });
+    await send("认可并继续。", { workId, groupId: contentGroup.id, items: [{ itemId: contentItem.id, source: contentDraft }], action: "approve_and_continue" });
     assert.equal(batch.results.length, 3); assert.equal(snapshot().proposals.items.length, 0);
     // 下一轮读取原批次，再采用前两段；不是读取“最近一次搜索”。
     const adopted: MaterialImportResult[] = [];
     let proposalRef!: { proposalId: string; digest: string };
+    const contentReviewInput = { groupId: contentGroup.id, itemId: contentItem.id, source: contentDraft, confirmationId: confirmedContent.confirmationId! };
     runtime.host.faux!.setResponses([
       fauxAssistantMessage([fauxToolCall("read_material_batch", { batchId: batch.batchId })]),
       context => { assert.equal(lastTool<MaterialSearchResult>(context).results[1]!.candidateId, batch.results[1]!.candidateId);
@@ -1206,27 +1253,33 @@ it("R5 连续旅程：Pi 采用聊天原文、暂停、原批次素材、交付�
       context => fauxAssistantMessage([fauxToolCall("import_material", { workId, candidateId: lastTool<MaterialSearchResult>(context).results[0]!.candidateId })]),
       context => {
         adopted.push(lastTool<MaterialImportResult>(context));
-        const intent: ProductionIntent = { workId, title: "城市 A 配音成片", inputRevisions: [], maxSpend: { currency: "CNY", amountMinor: 40 },
+        const intent: ProductionIntent = { workId, title: "城市 A 配音成片", maxSpend: { currency: "CNY", amountMinor: 40 },
+          inputSources: [], reviewInputs: [contentReviewInput], purpose: "production", scope: "生成配音后按冻结片段裁切合成城市 A 成片",
           operations: [{ operationId: "speech", outputSlot: "audio", kind: "speech", model: speechBindingOf(runtime.database),
             inputs: [{ kind: "text", text: script }], parameters: { voiceId: "marin", format: "mp3" }, maxCreateAttempts: 1 },
           renderOp([{ kind: "blob", blobId: adopted[0]!.blobId, digest: adopted[0]!.digest }, ...adopted.slice(1).map(item => ({ kind: "blob" as const, blobId: item.blobId, digest: item.digest })), { kind: "operation_output", producerOperationId: "speech", outputSlot: "audio" }],
             { assembly: "timed_narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24,
               segments: [{ kind: "video", inputSlot: 0, startMs: 1000, durationMs: 6000 }, { kind: "video", inputSlot: 1, startMs: 2000, durationMs: 6000 }, { kind: "image", inputSlot: 2, durationMs: 8000 }], narrationInputSlot: 3 })],
-          finalOutput: { operationId: "render", outputSlot: "final" } };
+          finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget() };
         return fauxAssistantMessage([fauxToolCall("prepare_production", { spec: toolIntentOf(intent) } as never)]);
       },
       context => {
         const prepared = lastTool<{ proposalId: string; digest: string }>(context);
         proposalRef = { proposalId: prepared.proposalId, digest: prepared.digest };
-        return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "城市 A 画面与声音", kind: "script", content: { format: "markdown", text: "两段各截取六秒，静帧八秒；旁白短了补静音，长了停下讨论。", narrationText: script } }],
-          stageDrafts: [{ workId, stage: "plan", itemIndex: 0, source: content, proposalRef }] } as never)]);
+        return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [
+          { mode: "create", title: "城市 A 画面与声音", kind: "script", content: { format: "markdown", text: "两段各截取六秒，静帧八秒；旁白短了补静音，长了停下讨论。", narrationText: script } },
+        ], reviewGroups: [{ workId, group: { mode: "create", key: "plan", title: "画面与声音方案", nextIntent: null },
+          items: [{ item: { mode: "create", key: "plan", label: "方案", role: "plan", required: true },
+            itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "production" }] }] })]);
       },
       context => { lastTool(context); return fauxAssistantMessage("方案已交付，等你看完再开始。"); },
     ]);
     await send("用原批次前两段，加一张图，准备配音方案。");
-    assert.equal(snapshot().works[0]!.stages.plan.proposalId, proposalRef.proposalId);
-    const plan = snapshot().works[0]!.stages.plan.draft!;
-    await send("认可方案，但先不制作。", { workId, action: "approve_plan", subject: plan });
+    const planGroup = snapshot().works[0]!.reviewGroups.find(group => group.items.some(item => item.role === "plan"))!;
+    const planItem = planGroup.items[0]!;
+    assert.ok(planItem.draft?.kind === "artifact_revision", "方案主稿应是交付修订");
+    const planDraft = planItem.draft;
+    await send("认可方案，但先不制作。", { workId, groupId: planGroup.id, items: [{ itemId: planItem.id, source: planDraft }], action: "approve" });
     assert.equal(hub.sessions.length, 0); assert.equal(snapshot().runs.items.length, 0);
     const accepted = await app.inject({ method: "POST", url: `/api/agent/v1/proposals/${proposalRef.proposalId}/acceptances`, headers,
       payload: { commandId: cmd(), proposalDigest: proposalRef.digest } });
@@ -1242,11 +1295,18 @@ it("R5 连续旅程：Pi 采用聊天原文、暂停、原批次素材、交付�
     const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
     assert.ok(Math.abs((await probeVideoFile(file)).durationMs - 20_000) < 250);
     assert.equal((await outputAudioFacts(file)).codec, "aac");
-    const video = snapshot().works.find(work => work.id === workId)!.stages.video.draft!;
-    await send("这版定稿。", { workId, action: "finalize_video", subject: video });
+    // 受理后的产出登记：无既有视频事项时补建“成片”组，草稿即本次运行产出修订。
+    const cityWork = () => snapshot().works.find(work => work.id === workId)!;
+    const videoGroup = cityWork().reviewGroups.find(group => group.items.some(item => item.role === "video"))!;
+    const videoItem = videoGroup.items[0]!;
+    assert.ok(videoItem.draft?.kind === "artifact_revision");
+    const video = videoItem.draft;
+    await send("这版定稿。", { workId, groupId: videoGroup.id, items: [{ itemId: videoItem.id, source: video }], action: "finalize_video" });
     assert.equal(snapshot().runs.items.length, 1, "定稿不产生第二次制作");
     assert.equal(attemptsFor(runtime.database, result.id).length, 2, "配音与真实本地合成各一次");
-    assert.deepEqual(snapshot().works.find(work => work.id === workId)!.stages.video.approved, video);
+    const finalized = snapshot().works.find(work => work.id === workId)!.reviewGroups
+      .find(group => group.items.some(item => item.role === "video"))!.items[0]!;
+    assert.deepEqual(finalized.approved, video);
   } finally { await app.close(); await runtime.close(); closeStub(stub); await rm(assets.directory, { recursive: true, force: true }); }
 });
 
@@ -1303,7 +1363,8 @@ it("T6-10：整批交付结束后同请求不得 prepare，下一请求才可准
   const runtime = await buildGraphRuntime(directory, stub.base, hub);
   try {
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "交付关闭" }).conversation;
-    const work = stageWork(runtime, conversation.id, "交付关闭视频");
+    // 正式成片落在已开始创作内：受理依据是夹具按真实内核建立的组审阅认可。
+    const work = ensureConfirmedWork(runtime.database, staticClock(), scopeOf(conversation.id), "交付关闭视频");
     const spec = () => {
       const artifacts = runtime.service.snapshot("local-owner", conversation.id).artifacts.items;
       const prompt = artifacts.find(item => item.title === "山路镜头")!;
@@ -1313,7 +1374,7 @@ it("T6-10：整批交付结束后同请求不得 prepare，下一请求才可准
       const intent = graphIntent({ artifactId: prompt.id, revisionId: prompt.revisionId, digest: promptRevision.digest },
         { artifactId: narrationArtifact.id, revisionId: narrationArtifact.revisionId, digest: narrationRevision.digest },
         arkConfigOf(stub.base), speechBindingOf(runtime.database));
-      return { ...intent, workId: work.workId };
+      return { ...intent, workId: work.workId, reviewInputs: [work.reviewInput], outputTarget: finalVideoTarget() };
     };
     // 第一条请求：整批交付两份文本后，同请求内再 prepare 被拒绝（A-18/T6-10）。
     runtime.host.faux?.setResponses([
@@ -1339,7 +1400,6 @@ it("T6-10：整批交付结束后同请求不得 prepare，下一请求才可准
     const proposalRow = runtime.database.prepare("SELECT id, digest FROM proposals").get() as { id: string; digest: string };
     const proposal = (await runtime.service.readProposal("local-owner", proposalRow.id)) as Proposal;
     assert.equal(proposal.state, "ready");
-    bindPreparedPlan(runtime.database, staticClock(), scopeOf(conversation.id), proposal, work);
     runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM authorizations").get() as { n: number }).n, 1, "一次确认授权全图，不按操作重复确认");
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 1);
@@ -1402,22 +1462,28 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "分段投影" }).conversation;
     const scope = scopeOf(conversation.id), db = runtime.database, now = staticClock();
     const work = createWork(db, now, scope, "分段投影");
-    const contentReceipt = deliverStageDrafts(db, now, scope, {
+    // 内容组：分段内容主稿按真实交付事务建立；认可走新组确认并保留 confirmationId 供制作受理引用。
+    const contentReceipt = deliverReviewDrafts(db, now, scope, {
       items: [{ mode: "create", title: "分段内容", kind: "script", content: { format: "markdown", text: "全局说明。",
         sections: [
           { id: "sec-open", title: "开场", text: "清晨山脊。" },
           { id: "sec-walk", title: "行进", text: "沿山脊向上。" },
           { id: "sec-night", title: "收尾", text: "夜色收束。" },
         ] } }],
-      stageDrafts: [{ workId: work.id, stage: "content", itemIndex: 0, source: null, proposalRef: null }],
+      reviewGroups: [{ workId: work.id, group: { mode: "create", key: "content", title: "内容", nextIntent: null },
+        items: [{ item: { mode: "create", key: "script", label: "内容", role: "content", required: true },
+          itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "production" }] }],
     });
-    const seeded = runtime.service.snapshot("local-owner", conversation.id).works.find(item => item.id === work.id)!;
-    const content = seeded.stages.content.draft!;
-    assert.ok(content.kind === "artifact_revision", "内容主稿应是分段产物修订");
-    recordStageConfirmation(db, now, scope, {
-      workId: work.id, action: "approve_content_continue", subject: content,
-      sourceKind: "user_message", sourceId: contentReceipt.requestId,
-    });
+    const workOf = () => runtime.service.snapshot("local-owner", conversation.id).works.find(item => item.id === work.id)!;
+    const contentEntry = workOf().reviewGroups
+      .flatMap(group => group.items.map(item => ({ group, item })))
+      .find(({ item }) => item.role === "content")!;
+    const content = contentEntry.item.draft;
+    if (content?.kind !== "artifact_revision") assert.fail("内容主稿应是分段产物修订");
+    const [recorded] = recordReviewConfirmation(db, now, scope, {
+      workId: work.id, groupId: contentEntry.group.id, items: [{ itemId: contentEntry.item.id, source: content }], action: "approve_and_continue",
+    }, { kind: "user_message", messageId: contentReceipt.messageId }).items;
+    const contentReviewInput = { groupId: contentEntry.group.id, itemId: contentEntry.item.id, source: content, confirmationId: recorded!.confirmationId };
 
     // 冻结视觉输入（既有真实素材修订）：两段视频 + 一张静帧；旁白是既有配音修订。
     const footage = timedFootage(assets, runtime, conversation.id);
@@ -1427,28 +1493,40 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     const inputs = [...footage.map(item =>
       ({ kind: "artifact_revision" as const, artifactId: item.ref.artifactId, revisionId: item.ref.revisionId, digest: item.ref.digest })),
       { kind: "artifact_revision" as const, artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }] as unknown as ProductionIntent["operations"][number]["inputs"];
-    const intent: ProductionIntent = { workId: work.id, title: "分段成片",
-      inputRevisions: [...footage.map(item => ({ artifactId: item.ref.artifactId, revisionId: item.ref.revisionId })),
-        { artifactId: narration.artifactId, revisionId: narration.revisionId }] as unknown as ProductionIntent["inputRevisions"],
-      operations: [renderOp(inputs, { assembly: "timed_narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24,
-        segments: [{ kind: "video", inputSlot: 0, startMs: 1000, durationMs: 6000 }, { kind: "video", inputSlot: 1, startMs: 2000, durationMs: 6000 }, { kind: "image", inputSlot: 2, durationMs: 8000 }],
-        narrationInputSlot: 3, segmentIds: ["seg-open", "seg-walk", "seg-night"] })],
-      finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
-    const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent });
-    deliverStageDrafts(db, now, scope, {
+    // 方案组：分段方案主稿先行交付并认可（方案段落 segmentIds ↔ render segments），其确认作为制作受理依据；
+    // 分段投影按 spec.reviewInputs 里第一个带段落的主稿解析，即这份方案修订。
+    const planReceipt = deliverReviewDrafts(db, now, scope, {
       items: [{ mode: "create", title: "分段方案", kind: "script", content: { format: "markdown", text: "整体节奏。",
         sections: [
           { id: "seg-open", title: "开场镜头", text: "固定镜头六秒。", sourceSectionIds: ["sec-open"] },
           { id: "seg-walk", title: "行进镜头", text: "跟拍六秒。", sourceSectionIds: ["sec-walk"] },
           { id: "seg-night", title: "收尾镜头", text: "夜景静帧八秒。", sourceSectionIds: ["sec-night"] },
         ] } }],
-      stageDrafts: [{ workId: work.id, stage: "plan", itemIndex: 0, source: content,
-        proposalRef: { proposalId: proposal.id, digest: proposal.digest } }],
+      reviewGroups: [{ workId: work.id, group: { mode: "create", key: "plan", title: "方案", nextIntent: null },
+        items: [{ item: { mode: "create", key: "plan", label: "方案", role: "plan", required: true },
+          itemIndex: 0, inputSources: [content], reviewInputs: [], purpose: "production" }] }],
     });
+    const planEntry = workOf().reviewGroups
+      .flatMap(group => group.items.map(item => ({ group, item })))
+      .find(({ item }) => item.role === "plan")!;
+    const planDraft = planEntry.item.draft;
+    if (planDraft?.kind !== "artifact_revision") assert.fail("方案主稿应是分段产物修订");
+    const [planRecorded] = recordReviewConfirmation(db, now, scope, {
+      workId: work.id, groupId: planEntry.group.id, items: [{ itemId: planEntry.item.id, source: planDraft }], action: "approve",
+    }, { kind: "user_message", messageId: planReceipt.messageId }).items;
+    const planReviewInput = { groupId: planEntry.group.id, itemId: planEntry.item.id, source: planDraft, confirmationId: planRecorded!.confirmationId };
+
+    const intent: ProductionIntent = { workId: work.id, title: "分段成片",
+      inputSources: [...footage.map(item => ({ kind: "artifact_revision" as const, artifactId: item.ref.artifactId, revisionId: item.ref.revisionId, digest: item.ref.digest })),
+        { kind: "artifact_revision" as const, artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
+      reviewInputs: [planReviewInput], purpose: "production", scope: "按方案分段裁切并合成正式成片",
+      operations: [renderOp(inputs, { assembly: "timed_narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24,
+        segments: [{ kind: "video", inputSlot: 0, startMs: 1000, durationMs: 6000 }, { kind: "video", inputSlot: 1, startMs: 2000, durationMs: 6000 }, { kind: "image", inputSlot: 2, durationMs: 8000 }],
+        narrationInputSlot: 3, segmentIds: ["seg-open", "seg-walk", "seg-night"] })],
+      finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
+    const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent });
     const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
     const run = runtime.service.getRun("local-owner", admitted.run.id);
-    const planDraft = runtime.service.snapshot("local-owner", conversation.id).works.find(item => item.id === work.id)!.stages.plan.draft!;
-    assert.ok(planDraft.kind === "artifact_revision");
 
     const blobOf = (ref: Ref) =>
       (JSON.parse((db.prepare("SELECT content_json FROM artifact_revisions WHERE id = ?").get(ref.revisionId) as { content_json: string }).content_json) as { blobId: string }).blobId;

@@ -24,7 +24,7 @@ import type { ProductionCrashHook } from "../src/server/agent/production-service
 import { attemptsFor } from "../src/server/agent/production-store.js";
 import { validatorFor } from "../src/server/agent/validate.js";
 import type { ProductionIntent } from "../src/shared/agent/generated/contracts.js";
-import { bindPreparedPlan, ensurePlanStageWork, seedPlanStageWork } from "./helpers/creative-work-fixture.js";
+import { ensureConfirmedWork, finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { toolIntentOf } from "./helpers/tool-args.js";
 
 const run = promisify(execFile);
@@ -177,20 +177,22 @@ async function deliverPrompt(runtime: AgentRuntime, conversationId: string, text
 }
 
 function videoIntent(prompt: { artifactId: string; revisionId: string; digest: string }, config: AgentMediaConfig, overrides: Partial<ProductionIntent["operations"][number]> = {}): ProductionIntent {
-  return { workId: null, title: "山路镜头", inputRevisions: [{ artifactId: prompt.artifactId, revisionId: prompt.revisionId }],
+  return { workId: null, title: "山路镜头",
+    inputSources: [{ kind: "artifact_revision", artifactId: prompt.artifactId, revisionId: prompt.revisionId, digest: prompt.digest }],
+    reviewInputs: [], purpose: "production", scope: "按已认可文案生成正式山路镜头",
     operations: [{ operationId: "shot-1", outputSlot: "video-1", kind: "video", model: bindingOf(config),
       inputs: [{ kind: "artifact_revision", artifactId: prompt.artifactId, revisionId: prompt.revisionId, digest: prompt.digest }], maxCreateAttempts: 1,
       parameters: { durationSeconds: config.video.durationSeconds, aspectRatio: config.video.aspectRatio, resolution: config.video.resolution, audioMode: config.video.audioMode },
       ...overrides } as unknown as ProductionIntent["operations"][number]],
-    finalOutput: { operationId: "shot-1", outputSlot: "video-1" }, maxSpend: { currency: "CNY", amountMinor: config.quote.amountMinor } };
+    finalOutput: { operationId: "shot-1", outputSlot: "video-1" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: config.quote.amountMinor } };
 }
 
 async function acceptedVideoRun(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
-  // B04：视频提案落在已进入方案阶段的事项内；受理前把方案主稿关联到本提案。
-  const work = ensurePlanStageWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, intent.title);
+  // B04：视频提案落在已正式开始的创作事项内，受理依据来自真实组审阅认可（reviewInputs）。
+  const work = ensureConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, intent.title);
   intent.workId = work.workId;
+  intent.reviewInputs = [work.reviewInput];
   const { proposal } = await runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
-  bindPreparedPlan(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, proposal, work);
   const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
   return admitted.run.id;
 }
@@ -252,12 +254,13 @@ it("聊天文字经 Pi 准备提案，确认前不制作、不创建 Prompt 作�
       runtime.host.faux?.setResponses([fauxAssistantMessage(text)]);
       await runtime.service.sendMessage("local-owner", conversation.id, { commandId: cmd(), text: "给我一条山谷 Prompt，先不制作", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
       for (let i = 0; i < 100 && runtime.service.snapshot("local-owner", conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
-      // B04：聊天原文仍可冻结为 text 输入，但视频提案必须落在已进入方案阶段的创作事项内。
-      const planWork = seedPlanStageWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山谷镜头");
-      const spec: ProductionIntent = { workId: planWork.workId, title: "山谷镜头", inputRevisions: [],
+      // B04：聊天原文仍可冻结为 text 输入；正式视频提案落在已开始的创作内，引用真实组审阅认可。
+      const confirmed = seedConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山谷镜头");
+      const spec: ProductionIntent = { workId: confirmed.workId, title: "山谷镜头",
+        inputSources: [], reviewInputs: [confirmed.reviewInput], purpose: "production", scope: "把聊天原文冻结为正式镜头输入",
         operations: [{ operationId: "shot", outputSlot: "video", kind: "video", model: bindingOf(config),
           inputs: [{ kind: "text", text }], parameters: config.video, maxCreateAttempts: 1 }],
-        finalOutput: { operationId: "shot", outputSlot: "video" }, maxSpend: { currency: "CNY", amountMinor: config.quote.amountMinor } };
+        finalOutput: { operationId: "shot", outputSlot: "video" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: config.quote.amountMinor } };
       runtime.host.faux?.setResponses([
         fauxAssistantMessage([fauxToolCall("prepare_production", { spec: JSON.parse(JSON.stringify(toolIntentOf(spec))) })]),
         fauxAssistantMessage("提案已准备，请查看本次使用的文字和费用。"),
@@ -266,15 +269,17 @@ it("聊天文字经 Pi 准备提案，确认前不制作、不创建 Prompt 作�
       for (let i = 0; i < 100 && runtime.service.snapshot("local-owner", conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
       const snapshot = runtime.service.snapshot("local-owner", conversation.id);
       assert.equal(snapshot.activeRequestId, null);
-      assert.equal(snapshot.artifacts.items.length, 0);
+      // 认可夹具为受理依据交付了一条脚本；聊天原文本身不另建 Prompt 作品。
+      assert.equal(snapshot.artifacts.items.filter(item => item.kind === "prompt").length, 0);
       const proposal = snapshot.proposals.items[0]!;
       assert.ok(proposal, "真实 Pi 工具循环应准备出提案");
       assert.equal(validatorFor("Proposal")(proposal).ok, true);
-      assert.deepEqual(proposal.spec.inputRevisions, []);
+      assert.ok("type" in proposal.spec, "新组模型快照");
+      if (!("type" in proposal.spec)) throw new Error("expected modern spec");
+      assert.deepEqual(proposal.spec.inputSources, []);
       assert.deepEqual(proposal.spec.operations[0]!.inputs, [{ kind: "text", text }]);
       assert.equal(stub.state.posts.length, 0, "准备提案不产生供应商创建调用");
       assert.equal(snapshot.runs.items.length, 0);
-      bindPreparedPlan(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, proposal, planWork);
       const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
       runtime.host.faux?.setResponses([fauxAssistantMessage("下一版改为晚霞；已受理的版本仍使用原文。")]);
       await runtime.service.sendMessage("local-owner", conversation.id, { commandId: cmd(), text: "下一版想改成晚霞，先聊聊", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
@@ -561,13 +566,13 @@ it("C1-02：付费前目录校验——参数/尝试次数/绑定不一致在准
     try {
       const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "受理校验" }).conversation;
       const prompt = await deliverPrompt(runtime, conversation.id, "山路。");
-      const planWork = seedPlanStageWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山路镜头");
+      const confirmed = seedConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山路镜头");
       const rejects: ProductionIntent[] = [
         videoIntent(prompt, config, { parameters: { durationSeconds: 6, aspectRatio: "16:9", resolution: "720p", audioMode: "none" } } as never),
         videoIntent(prompt, config, { maxCreateAttempts: 2 } as never),
         videoIntent(prompt, config, { model: { ...bindingOf(config), connectionId: "other-connection" } } as never),
         videoIntent(prompt, config, { inputs: [] } as never),
-      ].map(intent => ({ ...intent, workId: planWork.workId }));
+      ].map(intent => ({ ...intent, workId: confirmed.workId, reviewInputs: [confirmed.reviewInput] }));
       for (const intent of rejects) {
         await assert.rejects(() => runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent }),
           (error: { code?: string }) => error.code === "CAPABILITY_UNAVAILABLE" || error.code === "INVALID_INPUT");
@@ -575,9 +580,10 @@ it("C1-02：付费前目录校验——参数/尝试次数/绑定不一致在准
       assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0, "付费前拒绝不产生运行");
       assert.equal(stub.state.posts.length, 0);
       // 正常提案：估价与披露文案进入提案。
-      const validIntent = videoIntent(prompt, config); validIntent.workId = planWork.workId;
+      const validIntent = videoIntent(prompt, config);
+      validIntent.workId = confirmed.workId;
+      validIntent.reviewInputs = [confirmed.reviewInput];
       const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: validIntent });
-      bindPreparedPlan(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, proposal, planWork);
       assert.match(proposal.priceDisclosure, /估算 7\.56/);
       // C2：Web 保存换 Key 后 current 已切到新版本，旧冻结提案被标 stale，受理拒绝（PROPOSAL_STALE）。
       const rebuilt = await buildRealRuntime(directory, config, { apiKey: "test-key" });

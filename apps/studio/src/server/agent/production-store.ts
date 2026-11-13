@@ -1,12 +1,13 @@
 import type { AgentDatabase } from "./db.js";
-import type { BillingFact, ExecutionObservation, Finance, MediaContent, OperationSpec, ProductionSpec, Run, RunSegment } from "../../shared/agent/generated/contracts.js";
+import type { BillingFact, ExecutionObservation, Finance, LocalCreationSpec, MediaContent, OperationSpec, ProductionSpec, Run, RunOrigin, RunSegment } from "../../shared/agent/generated/contracts.js";
 import { canonicalJson } from "./util.js";
 import { AgentError } from "./errors.js";
 import { productionAudioFacts } from "./artifact-store.js";
 
 export interface RunRow {
   id: string; owner_id: string; conversation_id: string; work_id: string; snapshot_id: string;
-  proposal_id: string; title: string; state: Run["state"]; revision: number; created_seq: number;
+  proposal_id: string | null; source_request_id: string | null; title: string; frozen_target_json: string | null;
+  state: Run["state"]; revision: number; created_seq: number;
   issue_json: string | null; lease_owner: string | null; execution_epoch: number; lease_until: string | null;
   created_at: string; updated_at: string;
 }
@@ -28,8 +29,17 @@ export function runRow(db: AgentDatabase, id: string): RunRow {
   if (!row) throw new AgentError("NOT_FOUND", "没有找到这个运行。");
   return row;
 }
+// 快照双形状读取：旧付费快照无 type（按 paid_production 读）；本地运行是 local_creation。
+export type RunSnapshot = { kind: "paid"; spec: ProductionSpec } | { kind: "local"; spec: LocalCreationSpec };
+export function snapshotFor(db: AgentDatabase, run: RunRow): RunSnapshot {
+  const raw = JSON.parse((db.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json);
+  if (raw.type === "local_creation") return { kind: "local", spec: raw as LocalCreationSpec };
+  return { kind: "paid", spec: raw as ProductionSpec };
+}
 export function specFor(db: AgentDatabase, run: RunRow): ProductionSpec {
-  return JSON.parse((db.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json) as ProductionSpec;
+  const snapshot = snapshotFor(db, run);
+  if (snapshot.kind !== "paid") throw new AgentError("INVALID_INPUT", "本地运行没有付费制作快照。");
+  return snapshot.spec;
 }
 export function operationsFor(db: AgentDatabase, runId: string): OperationRow[] {
   return db.prepare("SELECT * FROM production_operations WHERE run_id=? ORDER BY rowid").all(runId) as OperationRow[];
@@ -160,17 +170,37 @@ function runOperations(db: AgentDatabase, runId: string): Run["operations"] {
   });
 }
 
+// 运行来源：付费提案或本地免费请求；本地运行 finance 必须为 null。
+export function runOrigin(row: RunRow): RunOrigin {
+  return row.proposal_id
+    ? { kind: "proposal", proposalId: row.proposal_id }
+    : { kind: "local_request", requestId: row.source_request_id! };
+}
+
+// 快照里的实际输入修订：新付费 spec 取 inputSources 的 artifact_revision，旧快照读 inputRevisions。
+export function runInputRevisions(db: AgentDatabase, run: RunRow): Run["inputRevisions"] {
+  const raw = JSON.parse((db.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json) as ProductionSpec | { inputRevisions: Run["inputRevisions"] };
+  if ("type" in raw) {
+    return raw.inputSources.flatMap(source => source.kind === "artifact_revision" ? [{ artifactId: source.artifactId, revisionId: source.revisionId }] : []);
+  }
+  return raw.inputRevisions;
+}
+
 export function toRun(db: AgentDatabase, row: RunRow): Run {
   const runOrder = (db.prepare("SELECT rowid AS ordinal FROM production_runs WHERE id=?").get(row.id) as { ordinal: number }).ordinal;
-  const audioSummary = productionAudioFacts(db, specFor(db, row), runOrder).audioSummary;
+  const snapshot = snapshotFor(db, row);
+  const origin = runOrigin(row);
+  const audioSummary = productionAudioFacts(db, snapshot.spec, runOrder).audioSummary;
   return {
     id: row.id, conversationId: row.conversation_id, workId: row.work_id, snapshotId: row.snapshot_id,
-    proposalId: row.proposal_id, title: row.title, revision: row.revision, state: row.state,
-    finance: finances(db, row), inputRevisions: specFor(db, row).inputRevisions,
+    title: row.title, revision: row.revision, state: row.state,
+    finance: origin.kind === "local_request" ? null : finances(db, row),
+    inputRevisions: runInputRevisions(db, row),
     outputRevisions: (db.prepare("SELECT artifact_id AS artifactId, id AS revisionId FROM artifact_revisions WHERE run_id=? ORDER BY rowid").all(row.id)) as Run["outputRevisions"],
     operations: runOperations(db, row.id),
     segments: runSegments(db, row), ...(audioSummary ? { audioSummary } : {}),
     createdAt: row.created_at, updatedAt: row.updated_at, issue: row.issue_json ? JSON.parse(row.issue_json) as Run["issue"] : null,
+    origin,
   };
 }
 
@@ -179,22 +209,46 @@ export function toRun(db: AgentDatabase, row: RunRow): Run {
 // segmentIds 或提案无方案来源时为空数组，不虚构联动。输入是另一项 render 结果时作为一个整体
 // 片段（operation_output 解析到那项 render 的输出 blob），不递归展开。
 export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
-  const spec = specFor(db, row);
+  const snapshot = snapshotFor(db, row);
+  const spec = snapshot.spec;
   const finalOperation = spec.operations.find(op => op.operationId === spec.finalOutput.operationId);
   if (!finalOperation || finalOperation.kind !== "render") return [];
   const parameters = finalOperation.parameters;
+  if (parameters.assembly === "code_project") return [];
   const segmentIds = parameters.segmentIds;
   if (!segmentIds) return [];
-  const proposal = db.prepare("SELECT plan_source_json FROM proposals WHERE id = ?").get(row.proposal_id) as { plan_source_json: string | null } | undefined;
-  const planSource = proposal?.plan_source_json ? JSON.parse(proposal.plan_source_json) as { kind: string; artifactId?: string; revisionId?: string } : null;
-  if (!planSource || planSource.kind !== "artifact_revision" || !planSource.artifactId || !planSource.revisionId) return [];
+  // 方案来源：新快照取 reviewInputs 里的分段文稿修订；旧付费提案读 plan_source_json。
+  let planRef: { artifactId: string; revisionId: string } | null = null;
+  if ("type" in spec) {
+    for (const input of spec.reviewInputs) {
+      if (input.source.kind !== "artifact_revision") continue;
+      const revisionRow0 = db.prepare("SELECT content_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+        .get(input.source.artifactId, input.source.revisionId) as { content_json: string } | undefined;
+      const content = revisionRow0 ? JSON.parse(revisionRow0.content_json) as { format?: string; sections?: unknown[] } : undefined;
+      if (content?.format === "markdown" && Array.isArray(content.sections)) {
+        planRef = { artifactId: input.source.artifactId, revisionId: input.source.revisionId };
+        break;
+      }
+    }
+  } else if (row.proposal_id) {
+    const proposal = db.prepare("SELECT plan_source_json FROM proposals WHERE id = ?").get(row.proposal_id) as { plan_source_json: string | null } | undefined;
+    const planSource = proposal?.plan_source_json ? JSON.parse(proposal.plan_source_json) as { kind: string; artifactId?: string; revisionId?: string } : null;
+    if (planSource?.kind === "artifact_revision" && planSource.artifactId && planSource.revisionId) {
+      planRef = { artifactId: planSource.artifactId, revisionId: planSource.revisionId };
+    }
+  }
+  if (!planRef) return [];
   const planRevision = db.prepare("SELECT content_json, creation_binding_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
-    .get(planSource.artifactId, planSource.revisionId) as { content_json: string; creation_binding_json: string | null } | undefined;
+    .get(planRef.artifactId, planRef.revisionId) as { content_json: string; creation_binding_json: string | null } | undefined;
   if (!planRevision) return [];
   const planContent = JSON.parse(planRevision.content_json) as { format?: string; sections?: { id: string; title: string; sourceSectionIds?: string[] }[] };
   if (planContent.format !== "markdown" || !planContent.sections) return [];
+  // 新组模型 binding 带数组 inputSources；旧固定阶段 binding 带单个 source。两字段都按可选读取。
   const planBinding = planRevision.creation_binding_json
-    ? JSON.parse(planRevision.creation_binding_json) as { source?: { kind: string; artifactId?: string; revisionId?: string; digest?: string; messageId?: string; text?: string; author?: string } | null }
+    ? JSON.parse(planRevision.creation_binding_json) as {
+        inputSources?: { kind: string; artifactId?: string; revisionId?: string; digest?: string }[];
+        source?: { kind: string; artifactId?: string; revisionId?: string; digest?: string; messageId?: string; text?: string; author?: string } | null;
+      }
     : null;
   const sectionsById = new Map(planContent.sections.map(section => [section.id, section]));
   const operationsById = new Map(operationsFor(db, row.id).map(operation => [operation.id, operation]));
@@ -249,15 +303,15 @@ export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
     } else {
       continue; // text 输入不在视觉时间线上
     }
-    const bindingSource = planBinding?.source ?? null;
     const citesContent = (section.sourceSectionIds?.length ?? 0) > 0;
     let content: RunSegment["content"] = null;
-    if (citesContent && bindingSource) {
-      content = bindingSource as RunSegment["content"];
+    if (citesContent && planBinding) {
+      const bound = planBinding.inputSources?.find(source => source.kind === "artifact_revision") ?? planBinding.source ?? null;
+      if (bound && (bound.kind === "artifact_revision" || bound.kind === "message_text")) content = bound as RunSegment["content"];
     }
     segments.push({
       segmentId, title: section.title,
-      plan: { artifactId: planSource.artifactId, revisionId: planSource.revisionId },
+      plan: { artifactId: planRef.artifactId, revisionId: planRef.revisionId },
       content, sourceSectionIds: section.sourceSectionIds ?? [],
       media, revision, state, startMs: entry.startMs, durationMs: entry.durationMs,
     });

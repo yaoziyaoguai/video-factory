@@ -1,14 +1,19 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync, readFileSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
-import type { ExecutionInput, ExecutionObservation, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
+import type { CodeProjectParameters, CreativeProjectContent, ExecutionInput, ExecutionObservation, MediaContent, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
+import type { CreativeRunner } from "./creative-runner.js";
+import { codeProjectInputPath } from "./creative-runner.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
-import { InvalidVideoFile, probeAudioFile, probeImageFile, probeVideoFile, type VideoFileFacts } from "./media-probe.js";
+import {
+  InvalidAudioOutput, InvalidImageFile, InvalidVideoFile, probeAudioOutputFile,
+  probeImageFile, probeVideoFile, type VideoFileFacts,
+} from "./media-probe.js";
 import { digestOf, type AgentClock } from "./util.js";
 import type { RenderParameters } from "../../shared/agent/generated/contracts.js";
 
@@ -29,6 +34,13 @@ interface TrackedChild { child: ChildProcess; done: Promise<void> }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const run = promisify(execFile);
+
+// code_project 成品的确定性文件名；执行、恢复与收据补齐共用同一映射。
+function codeProjectOutputFile(parameters: CodeProjectParameters): string {
+  if (parameters.expectedMediaKind === "image") return parameters.format === "png" ? "output.png" : "output.jpg";
+  if (parameters.expectedMediaKind === "audio") return parameters.format === "wav" ? "output.wav" : "output.mp3";
+  return "output.mp4";
+}
 
 // 装配时核实本地渲染能力：ffmpeg/ffprobe 可执行且 ffmpeg 带 libx264（ordered_concat）；
 // AAC 编码器只影响 T6 narrated_concat 有声分支，缺失不阻断无声拼接。
@@ -55,7 +67,9 @@ export class LocalRenderPort implements MediaExecutionPort {
   private readonly tracked = new Map<string, TrackedChild>();
 
   constructor(private readonly db: AgentDatabase, private readonly blobs: ProductionBlobs,
-    private readonly clock: AgentClock, private readonly options: LocalRenderOptions) {}
+    private readonly clock: AgentClock, private readonly options: LocalRenderOptions,
+    /** code_project 执行所需的隔离创作环境；缺省时该类操作如实失败。 */
+    private readonly creative?: CreativeRunner) {}
 
   async submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
     consumeSubmitPermit(permit, input.attemptId);
@@ -65,6 +79,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     if (parameters.assembly === "narrated_concat") return this.submitNarrated(input, run, parameters, signal);
     if (parameters.assembly === "timed_narrated_concat") return this.submitTimed(input, run, parameters, signal);
     if (parameters.assembly === "mixed_concat") return this.submitMixed(input, run, parameters, signal);
+    if (parameters.assembly === "code_project") return this.submitCodeProject(input, run, parameters, signal);
     const filesBySlot = new Map<number, { path: string; facts: VideoFileFacts }>();
     const filesByDigest = new Map<string, { path: string; facts: VideoFileFacts }>();
     for (const resolved of input.resolvedInputs) {
@@ -147,7 +162,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     for (const resolved of input.resolvedInputs) {
       if (resolved.slot === parameters.narrationInputSlot) {
         const filePath = this.blobs.filePath(resolved.digest);
-        try { narration = { path: filePath, durationMs: (await probeAudioFile(filePath)).durationMs }; }
+        try { narration = { path: filePath, durationMs: (await probeAudioOutputFile(filePath)).durationMs }; }
         catch (error) {
           return this.terminal(input.attemptId, "failed", `旁白输入不可读：${error instanceof Error ? error.message : String(error)}`);
         }
@@ -230,7 +245,7 @@ export class LocalRenderPort implements MediaExecutionPort {
         if (narration) continue;
         const filePath = this.blobs.filePath(resolved.digest);
         let durationMs: number;
-        try { durationMs = (await probeAudioFile(filePath)).durationMs; }
+        try { durationMs = (await probeAudioOutputFile(filePath)).durationMs; }
         catch (error) {
           return this.terminal(input.attemptId, "failed", `旁白输入不可读：${error instanceof Error ? error.message : String(error)}`);
         }
@@ -336,7 +351,9 @@ export class LocalRenderPort implements MediaExecutionPort {
       try {
         if (resolved.slot === parameters.music?.inputSlot || resolved.slot === parameters.narration?.inputSlot) {
           role = resolved.slot === parameters.music?.inputSlot ? "音乐" : "旁白";
-          const file = { index, durationMs: (await probeAudioFile(filePath, signal)).durationMs };
+          // 音乐/旁白输入来自已登记本地音频（素材 MP3 或程序生成 WAV），同一解码核验；
+          // 不在此处区分来源，也不要求外部 candidateId。
+          const file = { index, durationMs: (await probeAudioOutputFile(filePath, signal)).durationMs };
           if (resolved.slot === parameters.music?.inputSlot) music = file;
           else narration = file;
           inputArgs.push(["-i", filePath]);
@@ -448,19 +465,120 @@ export class LocalRenderPort implements MediaExecutionPort {
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
+  // code_project：冻结工程逐文件恢复到本次 run+operation 的独立工作区执行；媒体输入按槽位落成
+  // inputs/<slot>.<扩展名>，输出按声明的媒体类型探测验收。执行身份固定为冻结 run 的
+  // 单个操作（同 run 不同操作互不共享目录，旧操作的残留不能冒充本操作产物）；
+  // 不复用编辑工作区；入口退出码非 0 或输出不可读即失败，本地 render 不重试。
+  private async submitCodeProject(input: ExecutionInput, run: ReturnType<typeof runRow>,
+    parameters: CodeProjectParameters, signal?: AbortSignal): Promise<ExecutionObservation> {
+    if (!this.creative) return this.terminal(input.attemptId, "failed", "隔离创作环境未装配，无法执行代码工程。");
+    const revision = this.db.prepare("SELECT content_json FROM artifact_revisions WHERE artifact_id=? AND id=?")
+      .get(parameters.projectRevision.artifactId, parameters.projectRevision.revisionId) as { content_json: string } | undefined;
+    if (!revision) return this.terminal(input.attemptId, "failed", "冻结工程修订不存在，无法执行。");
+    const content = JSON.parse(revision.content_json) as CreativeProjectContent;
+    const workspace = { conversationId: run.conversation_id, workId: run.work_id, executionId: `${run.id}:${input.operationId}` };
+    const attemptDir = path.join(this.options.workRoot, input.attemptId);
+    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+    if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
+    // 执行边界核对封存镜像身份：工程冻结时的 runtimeImage 必须与宿主当前固定镜像一致，
+    // 不默认 tag 不变、不自动换镜像；不匹配即如实失败。
+    const image = await this.creative.imageId(workspace);
+    if (image !== content.runtimeImage) {
+      return this.terminal(input.attemptId, "failed",
+        `工程封存于执行镜像 ${content.runtimeImage}，当前宿主是 ${image}；环境不匹配，本工程不能在此宿主执行。`);
+    }
+    let output: Buffer;
+    try {
+      for (const file of content.files) {
+        await this.creative.writeFile(workspace, file.relativePath,
+          readFileSync(this.blobs.filePath(this.blobs.get(run.owner_id, file.blobId).digest)));
+      }
+      for (const resolved of input.resolvedInputs) {
+        const blob = this.blobs.get(run.owner_id, resolved.blobId);
+        await this.creative.writeFile(workspace,
+          codeProjectInputPath(resolved.slot, blob.mime_type as MediaContent["mimeType"]),
+          readFileSync(this.blobs.filePath(blob.digest)));
+      }
+      // 冻结工程的 entrypoint 是执行权威：argv 逐项直传进程，不经 shell 重新解释。
+      const execution = await this.creative.executeArgv(workspace, content.entrypoint.argv,
+        { timeout: Math.ceil((this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000), ...(signal ? { signal } : {}) });
+      if (execution.exitCode !== 0) {
+        return this.terminal(input.attemptId, "failed", `工程入口命令未成功结束（exit=${execution.exitCode ?? "null"}），未生成成品。`);
+      }
+      // 输出位初始为空（outputPath 与封存文件、输入落位分离），因此读不到就只能是本次执行没有产生输出。
+      try { output = await this.creative.readFile(workspace, parameters.outputPath); }
+      catch {
+        return this.terminal(input.attemptId, "failed",
+          `工程正常结束但没有产生声明的输出 ${parameters.outputPath}；本次执行没有成品，不能交付旧文件。`);
+      }
+    } catch (error) {
+      if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
+      return this.terminal(input.attemptId, "failed", `代码工程执行失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    // 成品先按声明媒体类型校验，再原子落盘与登记；规格不符如实失败。
+    const temporary = path.join(attemptDir, "output.part");
+    const finalFile = path.join(attemptDir, codeProjectOutputFile(parameters));
+    writeFileSync(temporary, output);
+    let verified: { mimeType: MediaContent["mimeType"]; durationMs: number | null };
+    try { verified = await this.verifyCodeProjectOutput(parameters, temporary); }
+    catch (error) {
+      return this.terminal(input.attemptId, "failed", `代码工程输出不可用：${error instanceof Error ? error.message : String(error)}`);
+    }
+    renameSync(temporary, finalFile);
+    const blob = this.blobs.persist(run.owner_id, run.conversation_id, output, verified.mimeType, verified.durationMs);
+    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
+      { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    return this.succeeded(input.attemptId, blob.id, blob.digest, verified.mimeType);
+  }
+
+  // 按声明媒体类型探测并核对成品；探测失败抛 Invalid*，封装/规格不符抛普通 Error。
+  private async verifyCodeProjectOutput(parameters: CodeProjectParameters, file: string): Promise<{ mimeType: MediaContent["mimeType"]; durationMs: number | null }> {
+    if (parameters.expectedMediaKind === "image") {
+      const facts = await probeImageFile(file);
+      if (facts.mimeType !== (parameters.format === "png" ? "image/png" : "image/jpeg")) throw new Error("输出封装与声明格式不符。");
+      if (facts.width !== parameters.width || facts.height !== parameters.height) {
+        throw new Error(`输出尺寸 ${facts.width}x${facts.height} 与声明 ${parameters.width}x${parameters.height} 不符。`);
+      }
+      return { mimeType: facts.mimeType, durationMs: null };
+    }
+    if (parameters.expectedMediaKind === "audio") {
+      const facts = await probeAudioOutputFile(file);
+      if (facts.mimeType !== (parameters.format === "wav" ? "audio/wav" : "audio/mpeg")) throw new Error("输出封装与声明格式不符。");
+      if (facts.sampleRate !== parameters.sampleRate || facts.channels !== parameters.channels) {
+        throw new Error(`输出采样规格 ${facts.sampleRate}Hz/${facts.channels} 声道与声明 ${parameters.sampleRate}Hz/${parameters.channels} 声道不符。`);
+      }
+      return { mimeType: facts.mimeType, durationMs: facts.durationMs };
+    }
+    const facts = await probeVideoFile(file, this.options.ffprobePath);
+    if (facts.mimeType !== "video/mp4") throw new Error("输出不是 MP4 视频。");
+    if (facts.width !== parameters.width || facts.height !== parameters.height || facts.frameRate !== parameters.fps) {
+      throw new Error(`输出规格 ${facts.width}x${facts.height}@${facts.frameRate ?? "?"}fps 与声明 ${parameters.width}x${parameters.height}@${parameters.fps}fps 不符。`);
+    }
+    return { mimeType: "video/mp4", durationMs: facts.durationMs };
+  }
+
+  private codeProjectParametersOf(runId: string, operationId: string): CodeProjectParameters | null {
+    const row = this.db.prepare("SELECT spec_json FROM production_operations WHERE run_id=? AND id=?").get(runId, operationId) as { spec_json: string } | undefined;
+    if (!row) return null;
+    const spec = JSON.parse(row.spec_json) as { kind?: string; parameters?: RenderParameters };
+    return spec.kind === "render" && spec.parameters?.assembly === "code_project" ? spec.parameters : null;
+  }
+
   async query(query: RecoveryQuery): Promise<ExecutionObservation> {
     const run = runRow(this.db, query.runId);
     const receipt = attemptOutput(this.db, query.attemptId);
     if (receipt?.blob_id && receipt.digest) {
       const blob = this.blobs.get(run.owner_id, receipt.blob_id);
       if (blob.digest === receipt.digest) {
-        try { this.blobs.verify(blob); return this.succeeded(query.attemptId, blob.id, blob.digest); }
+        try { this.blobs.verify(blob); return this.succeeded(query.attemptId, blob.id, blob.digest, blob.mime_type); }
         catch { /* 成品文件缺失：如实返回未知，等待人工核对。 */ }
       }
     }
     if (receipt?.exit_kind === "failed") return this.terminal(query.attemptId, "failed", receipt.detail ?? "本地渲染未成功。");
     if (receipt?.exit_kind === "terminated") return this.terminal(query.attemptId, "cancelled", receipt.detail ?? "本地渲染已停止。");
     // 收据缺失但确定性位置已有完整成品：重新探测并补齐收据（文件完成而业务未提交的窗口）。
+    const codeParameters = this.codeProjectParametersOf(query.runId, query.operationId);
+    if (codeParameters) return this.adoptCodeProjectFile(query.attemptId, run, codeParameters);
     const finalFile = path.join(this.options.workRoot, query.attemptId, "output.mp4");
     let facts: VideoFileFacts;
     try { facts = await probeVideoFile(finalFile, this.options.ffprobePath); }
@@ -475,6 +593,23 @@ export class LocalRenderPort implements MediaExecutionPort {
     return this.succeeded(query.attemptId, blob.id, blob.digest);
   }
 
+  // code_project 成品窗口恢复：确定性位置按声明重新验收并补齐收据；不可读沿用稳定 unknown。
+  private async adoptCodeProjectFile(attemptId: string, run: ReturnType<typeof runRow>, parameters: CodeProjectParameters): Promise<ExecutionObservation> {
+    const finalFile = path.join(this.options.workRoot, attemptId, codeProjectOutputFile(parameters));
+    let verified: { mimeType: MediaContent["mimeType"]; durationMs: number | null };
+    try { verified = await this.verifyCodeProjectOutput(parameters, finalFile); }
+    catch (error) {
+      if (error instanceof InvalidImageFile || error instanceof InvalidAudioOutput || error instanceof InvalidVideoFile) {
+        return this.stableUnknown(attemptId, "本地执行没有退出证据；保留本地执行占用，不会重新渲染或重新提交。");
+      }
+      throw error;
+    }
+    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), verified.mimeType, verified.durationMs);
+    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId,
+      { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    return this.succeeded(attemptId, blob.id, blob.digest, verified.mimeType);
+  }
+
   async cancel(query: RecoveryQuery): Promise<ExecutionObservation> {
     const tracked = this.tracked.get(query.attemptId);
     if (!tracked) return this.stableUnknown(query.attemptId, "没有仍在运行的本地渲染进程，尚未确认取消。");
@@ -482,7 +617,10 @@ export class LocalRenderPort implements MediaExecutionPort {
     await tracked.done;
     const receipt = attemptOutput(this.db, query.attemptId);
     if (receipt?.exit_kind === "terminated") return this.terminal(query.attemptId, "cancelled", "本地渲染进程已停止。");
-    if (receipt?.exit_kind === "completed" && receipt.blob_id && receipt.digest) return this.succeeded(query.attemptId, receipt.blob_id, receipt.digest);
+    if (receipt?.exit_kind === "completed" && receipt.blob_id && receipt.digest) {
+      const blob = this.blobs.get(runRow(this.db, query.runId).owner_id, receipt.blob_id);
+      return this.succeeded(query.attemptId, receipt.blob_id, receipt.digest, blob.mime_type);
+    }
     return this.stableUnknown(query.attemptId, "本地渲染已发出停止信号，结果尚未核实。");
   }
 
@@ -529,10 +667,11 @@ export class LocalRenderPort implements MediaExecutionPort {
     };
   }
 
-  private succeeded(attemptId: string, blobId: string, digest: string): ExecutionObservation {
+  private succeeded(attemptId: string, blobId: string, digest: string, mimeType: string = "video/mp4"): ExecutionObservation {
+    // 行内 mime 由本端口的媒体路径写入（已验证枚举），恢复为契约枚举后返回观测。
     return {
       observationId: this.deterministicId(attemptId, "succeeded"), attemptId, state: "succeeded",
-      providerTaskId: null, blob: { id: blobId, digest, mimeType: "video/mp4" },
+      providerTaskId: null, blob: { id: blobId, digest, mimeType: mimeType as MediaContent["mimeType"] },
       observedAt: this.stableTime(attemptId), message: "本地拼接完成。", billing: null,
     };
   }

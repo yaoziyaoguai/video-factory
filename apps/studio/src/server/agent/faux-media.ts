@@ -71,7 +71,7 @@ export class FauxMediaPort implements MediaExecutionPort {
       const type: MediaContent["mimeType"] = input.operation.kind === "image" ? "image/png" : input.operation.kind === "speech" ? "audio/mpeg" : "video/mp4";
       const fixture = input.operation.kind === "image" ? "sample.png" : input.operation.kind === "speech" ? "sample.mp3" : "sample.mp4";
       const saved = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(path.join(this.options.fixtureRoot, fixture)), type, type.startsWith("image/") ? null : 3000);
-      blob = { id: saved.id, digest: saved.digest, mimeType: saved.mime_type };
+      blob = { id: saved.id, digest: saved.digest, mimeType: type };
       this.providerDb.prepare("UPDATE jobs SET blob_json=? WHERE identity=?").run(canonicalJson(blob), identity);
     }
     const billing = input.operation.kind === "render" ? null : this.options.billing !== undefined ? this.options.billing : {

@@ -1,40 +1,48 @@
-import { readFileSync, realpathSync, statSync } from "node:fs";
 import { VIDEO_TOPIC_CHARTS } from "../../shared/agent/video-topics.js";
-import { isAbsolute, join, relative, sep } from "node:path";
-import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { formatDimensionNote, resizeImage, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, sep } from "node:path";
+import { promisify } from "node:util";
 import { contractsSchema } from "../../shared/agent/generated/contracts-schema.js";
 import type {
-  ArtifactRevision, ContentSource, DeliveryReceipt, MaterialBatch, MaterialImportResult, MaterialSearchResult, OperationRequest,
-  ProductionIntent, Proposal, RevisionRef, Target, ToolConfirmStage, ToolDelivery, ToolImportMaterial, ToolPrepareProposal,
-  ToolReadMaterialBatch, ToolReadProposal, ToolReadRun, ToolReadWork, ToolRecordWorkFeedback,
+  ArtifactRevision, ContentSource, DeliveryReceipt, MaterialBatch, MaterialImportResult, MaterialSearchResult, MediaContent, OperationRequest,
+  ProductionIntent, Proposal, Target, ToolConfirmReview, ToolDelivery, ToolImportMaterial, ToolPrepareProposal,
+  ToolReadArtifact, ToolReadMaterialBatch, ToolReadProposal, ToolReadRun, ToolReadWork, ToolRecordWorkFeedback,
   ToolReadTrends, ToolSearchMaterials, ToolStartWork, ToolListProduction, ProductionIndexPage, Run, TrendReadResult,
-  TrendSnapshot, FeedbackReceipt, Work,
+  TrendSnapshot, FeedbackReceipt, Work, ToolPublishProject, ToolRenderProject, LocalCreationReceipt,
+  CreativeProjectContent, ProjectFile, FileContent,
+  ToolDubFree, DubFreeResult, SpeechBoundary, DubbedSpeechMeta,
 } from "../../shared/agent/generated/contracts.js";
 import type { PiBusinessTools, RequestContext, WorkFeedbackView, WorkWithFeedback } from "../../shared/agent/ports.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError, AgentToolError } from "./errors.js";
 import {
-  applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getInvocation, getRevisionRow,
-  registerInvocation, rowToArtifactRevision, rowToProposal, hasProductionLock,
+  applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getArtifactRow, getInvocation, getRevisionRow,
+  insertRevision, registerInvocation, rowToArtifactRevision, rowToProposal, hasProductionLock,
   NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
-  type ProposalRow, type QuoteCatalog, type RenderFileProbe,
+  type ArtifactRow, type ProposalRow, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
-import { probeRenderInputs } from "./media-probe.js";
-import { captureNewsNowConfig, captureStockConfigs, FREE_SERVICE_LABELS, readFreeServiceSettings } from "./free-service-settings.js";
+import { extractVideoFrames, probeAudioFile, probeRenderInputs, probeVideoFile, InvalidAudioFile, type VideoFileFacts } from "./media-probe.js";
+import { captureEdgeTtsConfig, captureNewsNowConfig, captureStockConfigs, FREE_SERVICE_LABELS, readFreeServiceSettings } from "./free-service-settings.js";
 import { insertEvent } from "./event-log.js";
 import { importMaterial, persistSearchBatch, readMaterialBatch } from "./material-store.js";
 import {
-  createWork, parseCreationState, recordStageConfirmation, relatedWorkFeedback,
-  requireContentContinued, requireWork, workInFlight, workProjection,
+  createWork, parseCreationState, recordReviewConfirmation, relatedWorkFeedback,
+  requireWork, workInFlight, workProjection,
 } from "./creative-work.js";
+import type { CreativeRunner, CreativeWorkspace } from "./creative-runner.js";
+import type { ProductionService } from "./production-service.js";
 import { readMusicChart } from "./music-charts.js";
 import { NewsNowClient } from "./newsnow-client.js";
 import { StockClient, type StockCandidateInput } from "./stock-providers.js";
 import { StockKindUnsupportedError, StockUnavailableError } from "./stock-http.js";
 import { getScopedProposal, getScopedRunRow, listProductionIndex } from "./production-index.js";
 import { toRun, runSegments } from "./production-store.js";
-import { getMessageRow, getRequestRow, saveAssistantMessage, type RequestRow } from "./conversation-store.js";
+import { getMessageRow, getRequestRow, nextSeq, saveAssistantMessage, type RequestRow } from "./conversation-store.js";
 import { digestOf, newAgentId, type AgentClock } from "./util.js";
 
 // Pi 工具层：业务函数实现 ports.PiBusinessTools（可直接被测试重放），
@@ -49,6 +57,13 @@ export interface MaterialToolsOptions {
   stockFetch?: typeof fetch;
   /** Pixabay 响应缓存目录（服务条款要求缓存 24h）；null 表示不缓存。 */
   cacheRoot?: string | null;
+}
+
+/** 隔离创作环境的宿主接线：读取工程文件与运行镜像都经同一 CreativeRunner。 */
+export interface CreativeToolsOptions {
+  runner: CreativeRunner;
+  /** 当前明确作品的编辑工作区身份；与原生创作工具同一来源，不由模型自选。 */
+  workspace: (conversationId: string, workId: string) => CreativeWorkspace;
 }
 
 const noopCrashPoint: CrashPointHook = () => {};
@@ -89,9 +104,13 @@ export class BusinessTools implements PiBusinessTools {
     private readonly blobs?: import("./production-blobs.js").ProductionBlobs,
     /** 素材/资讯工具的下载目录与替身 fetch；缺省时采用类工具不可用。 */
     private readonly materials?: MaterialToolsOptions,
+    /** 免费本地渲染受理；缺省时 render_project 不可用。 */
+    private readonly production?: ProductionService,
+    /** 工程封存（publish_project）；缺省时该工具不可用。 */
+    private readonly creative?: CreativeToolsOptions,
   ) {}
 
-  async readArtifact(context: RequestContext, input: RevisionRef): Promise<ArtifactRevision> {
+  async readArtifact(context: RequestContext, input: ToolReadArtifact): Promise<ArtifactRevision> {
     const load = this.db.transaction((): ArtifactRevision => {
       const artifact = this.db.prepare("SELECT id FROM artifacts WHERE id = ? AND conversation_id = ? AND owner_id = ?")
         .get(input.artifactId, context.conversationId, context.actorId);
@@ -104,7 +123,7 @@ export class BusinessTools implements PiBusinessTools {
 
   async readProposal(context: RequestContext, input: ToolReadProposal): Promise<Proposal> {
     this.requireRunningRequest(context);
-    const proposal = getScopedProposal(this.db, context.actorId, context.conversationId, input.proposalId);
+    const proposal = getScopedProposal(this.db, context.actorId, context.conversationId, input.proposalId, this.catalog());
     if (!proposal) throw new AgentError("NOT_FOUND", "当前会话中没有这个提案。");
     return proposal;
   }
@@ -123,9 +142,9 @@ export class BusinessTools implements PiBusinessTools {
 
   async searchMaterials(context: RequestContext, input: ToolSearchMaterials, signal?: AbortSignal): Promise<MaterialSearchResult> {
     this.requireRunningRequest(context);
-    // 关联正式事项时先核对阶段许可：内容未认可并明确继续前，不能先给这条视频找素材。
+    // 关联正式事项时核对归属；新组模型不再有固定阶段门槛，素材选择本身也不构成认可依据。
     const workId = input.workId ?? null;
-    if (workId) requireContentContinued(this.db, requireWork(this.db, context.actorId, context.conversationId, workId));
+    if (workId) requireWork(this.db, context.actorId, context.conversationId, workId);
     // 省略 provider 时用默认来源；调用开始时捕获配置，本次请求内不受后续设置修改影响。
     const client = this.stockClient();
     const provider = input.provider ?? (input.kind === "audio" ? client.enabledServices().find(service => service.kinds.includes("audio"))?.serviceId : "pexels");
@@ -145,7 +164,7 @@ export class BusinessTools implements PiBusinessTools {
     // 网络返回后的事实复核：保存候选前确认同一请求仍在运行、同 epoch。
     const persist = this.db.transaction((): MaterialSearchResult => {
       this.requireRunningRequest(context);
-      if (workId) requireContentContinued(this.db, requireWork(this.db, context.actorId, context.conversationId, workId));
+      if (workId) requireWork(this.db, context.actorId, context.conversationId, workId);
       const { batch, results } = persistSearchBatch(this.db, this.clock, {
         ownerId: context.actorId, conversationId: context.conversationId, requestId: context.requestId,
       }, { query: { provider, kind: input.kind, query: input.query, limit: input.limit }, toolCallId: context.toolCallId, workId }, found);
@@ -184,22 +203,23 @@ export class BusinessTools implements PiBusinessTools {
     const work = requireWork(this.db, context.actorId, context.conversationId, input.workId);
     const projection = workProjection(this.db, work);
     // 与 executor 上下文共用同一只读查询：无 UI target 时模型仍能读到该视频的相关意见。
-    const artifactIds = Object.values(projection.stages)
-      .flatMap(stage => stage.draft?.kind === "artifact_revision" ? [stage.draft.artifactId] : []);
+    const artifactIds = projection.reviewGroups
+      .flatMap(group => group.items)
+      .flatMap(item => [item.draft, item.approved])
+      .flatMap(source => source?.kind === "artifact_revision" ? [source.artifactId] : []);
     return { ...projection, relatedFeedback: relatedWorkFeedback(this.db, context.conversationId, { workIds: [work.id], artifactIds }) };
   }
 
-  // 普通认可只记录用户已经表达的事实；不推进未要求的下一阶段工作，也不能在这里受理制作。
-  async confirmStage(context: RequestContext, input: ToolConfirmStage): Promise<Work> {
+  // 普通认可只记录用户已经表达的事实；不推进未要求的下一组工作，也不能在这里受理制作。
+  async confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<Work> {
     const write = this.db.transaction(() => {
       this.requireRunningRequest(context);
-      const result = recordStageConfirmation(this.db, this.clock(), {
+      const { work } = recordReviewConfirmation(this.db, this.clock(), {
         ownerId: context.actorId, conversationId: context.conversationId,
       }, {
-        workId: input.workId, action: input.action, subject: input.subject,
-        sourceKind: "user_message", sourceId: context.actionSourceMessageId,
-      });
-      return workProjection(this.db, result.work);
+        workId: input.workId, groupId: input.groupId, items: input.items, action: input.action,
+      }, { kind: "user_message", messageId: context.actionSourceMessageId });
+      return workProjection(this.db, work);
     });
     return write();
   }
@@ -215,7 +235,9 @@ export class BusinessTools implements PiBusinessTools {
       const message = getMessageRow(this.db, context.actorId, context.actionSourceMessageId);
       if (!message || message.conversation_id !== context.conversationId) throw new AgentError("NOT_FOUND", "没有找到本次用户消息。");
       const state = parseCreationState(work);
-      const contentDraft = state.content.draft;
+      const items = state.groups.flatMap(group => group.items);
+      // 内容主稿：最近的内容角色事项当前稿（与视频产出归属的解析方向一致）。
+      const contentDraft = [...items].reverse().find(item => item.role === "content")?.draft ?? null;
       let target: Target | null = null;
       let contentSource: ContentSource | null = null;
       // 制作在途时，对该事项的意见都属于下一版；不在途时再看具体稿件是否被锁。
@@ -231,8 +253,8 @@ export class BusinessTools implements PiBusinessTools {
           .get(input.artifactId, input.baseRevisionId) as { creation_binding_json: string | null } | undefined;
         const binding = bound?.creation_binding_json ? JSON.parse(bound.creation_binding_json) as { workId: string } : null;
         if (binding && binding.workId !== work.id) throw new AgentError("INVALID_INPUT", "这份稿件属于其他视频创作。");
-        if (!binding && ![state.content, state.plan, state.video].some(stage =>
-          [stage.draft, stage.approved].some(source => source?.kind === "artifact_revision" && source.artifactId === input.artifactId))) {
+        if (!binding && !items.some(item =>
+          [item.draft, item.approved].some(source => source?.kind === "artifact_revision" && source.artifactId === input.artifactId))) {
           throw new AgentError("INVALID_INPUT", "这份稿件不属于该视频的主稿。");
         }
         target = { artifactId: input.artifactId, revisionId: input.baseRevisionId!, workId: work.id };
@@ -309,7 +331,7 @@ export class BusinessTools implements PiBusinessTools {
   async importMaterial(context: RequestContext, input: ToolImportMaterial, signal?: AbortSignal): Promise<MaterialImportResult> {
     const request = this.requireRunningRequest(context);
     if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能继续采用素材。");
-    if (input.workId) requireContentContinued(this.db, requireWork(this.db, context.actorId, context.conversationId, input.workId));
+    if (input.workId) requireWork(this.db, context.actorId, context.conversationId, input.workId);
     if (!this.materials || !this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "素材下载通道未装配。");
     return importMaterial(this.db, this.clock, this.blobs, this.materials.workRoot, this.stockClient(), {
       ownerId: context.actorId, conversationId: context.conversationId, requestId: context.requestId,
@@ -336,7 +358,7 @@ export class BusinessTools implements PiBusinessTools {
       const request = this.requireRequest(context);
       const delivered = this.db.prepare("SELECT batch_digest, receipt_json FROM request_deliveries WHERE request_id=?").get(request.id) as { batch_digest: string; receipt_json: string } | undefined;
       if (delivered) {
-        // 完整参数摘要（含 stageDrafts）由交付事务与这里共用；仅改关联也必须拒绝。
+        // 完整参数摘要（items 与 reviewGroups）由交付事务与这里共用；仅改关联也必须拒绝。
         if (delivered.batch_digest !== deliveryDigest(input)) throw new AgentError("DELIVERY_CLOSED", "本请求已交付其他内容，请发起新请求。");
         const receipt = { ...JSON.parse(delivered.receipt_json) as DeliveryReceipt, replayed: true };
         commitInvocationResult(this.db, this.clock(), { ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId }, receipt);
@@ -368,7 +390,7 @@ export class BusinessTools implements PiBusinessTools {
     const prior = getInvocation(this.db, context.actorId, context.requestId, context.toolCallId);
     if (prior?.state === "committed" && prior.proposal_id) {
       const row = this.db.prepare("SELECT * FROM proposals WHERE id = ?").get(prior.proposal_id) as ProposalRow | undefined;
-      if (row) return rowToProposal(row, this.db);
+      if (row) return rowToProposal(row, this.db, this.catalog());
     }
     // 仅宿主已确认的本次原生恢复可回放同规范化参数；正常请求仍可重新准备。
     const digestReplay = context.nativeRecovery ? this.db.prepare(
@@ -380,7 +402,7 @@ export class BusinessTools implements PiBusinessTools {
         this.db.transaction(() => commitInvocationResult(this.db, this.clock(), {
           ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId,
         }, { proposalId: row.id, digest: row.digest, state: row.state, expiresAt: row.expires_at }, row.id))();
-        return rowToProposal(row, this.db);
+        return rowToProposal(row, this.db, this.catalog());
       }
     }
 
@@ -402,17 +424,188 @@ export class BusinessTools implements PiBusinessTools {
       }
       const { proposal } = applyPrepareProposal(this.db, this.clock(), {
         ownerId: context.actorId, conversationId: context.conversationId,
-      }, intent, catalog, probes, input.planSource, input.replacesProposal);
+      }, intent, catalog, { requestId: context.requestId, messageId: context.actionSourceMessageId }, probes, input.replacesProposal);
       const result = { proposalId: proposal.id, digest: proposal.digest, state: proposal.state, expiresAt: proposal.expires_at };
       commitInvocationResult(this.db, this.clock(), {
         ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId,
       }, result, proposal.id);
       saveAssistantMessage(this.db, this.clock(), request, "", "running");
-      return rowToProposal(proposal, this.db);
+      return rowToProposal(proposal, this.db, this.catalog());
     });
     const proposal = apply();
     this.crashPoint("after-prepare-commit");
     return proposal;
+  }
+
+  // 工程封存（publish_project）：把当前工程选定文件与入口冻结为 project 修订。
+  // 只封存，不认可、不受理制作、不自动交付；在途制作也不阻塞保存后继工程（§4.2.1）。
+  async publishProject(context: RequestContext, input: ToolPublishProject): Promise<ArtifactRevision> {
+    const request = this.requireRunningRequest(context);
+    if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再封存工程。");
+    requireWork(this.db, context.actorId, context.conversationId, input.workId);
+    if (!this.creative || !this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "工程封存通道未装配。");
+    const manifest = new Set(input.files);
+    if (manifest.size !== input.files.length) throw new AgentToolError("INVALID_INPUT", "工程文件清单里有重复路径。");
+    // entrypoint 至少引用一个清单内文件；依赖锁与时间线必须是清单成员。路径边界由 runner 的工程路径校验兜底。
+    if (!input.entrypoint.argv.some(token => manifest.has(token))) {
+      throw new AgentToolError("INVALID_INPUT", "entrypoint 必须执行清单内的文件。");
+    }
+    for (const member of [...input.dependencyLocks, ...input.timelineFiles]) {
+      if (!manifest.has(member)) throw new AgentToolError("INVALID_INPUT", "依赖锁与时间线文件必须属于工程清单。");
+    }
+    // Skill 模板/字体/脚本只在编辑会话的只读挂载里，不随冻结工程进入执行环境；
+    // 真正用到的资源必须先进工程清单，entrypoint 不能留下 /skills/ 临时路径。
+    if (input.entrypoint.argv.some(token => token === "/skills" || token.startsWith("/skills/"))) {
+      throw new AgentToolError("INVALID_INPUT", "entrypoint 不能引用 /skills/ 临时资源；请把用到的 Skill 模板/字体/脚本复制进工程清单并以相对路径引用。");
+    }
+
+    // 事务外读取工程文件与宿主镜像标识；读取结果进入事务前不再变化（容器内文件由本轮原生工具写定）。
+    const runner = this.creative.runner;
+    const workspace = this.creative.workspace(context.conversationId, input.workId);
+    const runtimeImage = await runner.imageId(workspace);
+    const fileBytes = await Promise.all(input.files.map(file => runner.readFile(workspace, file)));
+    // input.files 契约至少一项；map 后恢复非空元组类型。
+    const files = input.files.map((file, index): ProjectFile => {
+      const blob = this.blobs!.persist(context.actorId, context.conversationId, fileBytes[index]!, projectFileMime(file), null);
+      return { relativePath: file, blobId: blob.id, digest: blob.digest, purpose: "source" };
+    }) as [ProjectFile, ...ProjectFile[]];
+
+    const content: CreativeProjectContent = {
+      format: "project", files, entrypoint: input.entrypoint, runtimeImage,
+      dependencyLocks: input.dependencyLocks, timelineFiles: input.timelineFiles, sourceRevisions: input.sourceRevisions,
+    };
+    const write = this.db.transaction((): ArtifactRevision => {
+      // 文件读取是网络往返：落库前复核请求仍在运行、交付未关闭。
+      const current = this.requireRunningRequest(context);
+      if (current.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再封存工程。");
+      for (const ref of input.sourceRevisions) {
+        const hit = this.db.prepare(
+          "SELECT r.id FROM artifact_revisions r JOIN artifacts a ON a.id = r.artifact_id WHERE r.artifact_id=? AND r.id=? AND a.conversation_id=? AND a.owner_id=?",
+        ).get(ref.artifactId, ref.revisionId, context.conversationId, context.actorId);
+        if (!hit) throw new AgentError("INVALID_INPUT", "来源修订不在当前会话，不能封存进工程。");
+      }
+      const now = this.clock();
+      let artifact: ArtifactRow;
+      if (input.artifactId !== undefined) {
+        const row = getArtifactRow(this.db, context.actorId, input.artifactId);
+        if (!row || row.conversation_id !== context.conversationId || row.kind !== "project") {
+          throw new AgentError("TARGET_SCOPE_MISMATCH", "要修改的工程不存在或不属于当前会话。");
+        }
+        // 工程修订只在归属的视频创作内续版（F04）：不能把 A 创作的工程以 baseRevisionId 续到 B 名下；
+        // B 需要同源工程时另行封存新工程。
+        if (row.work_id !== input.workId) {
+          throw new AgentError("TARGET_SCOPE_MISMATCH", "这份工程属于其他视频创作，不能在该创作下续版。");
+        }
+        if (row.head_revision_id !== input.baseRevisionId) {
+          throw new AgentError("STALE_REVISION", "工程已更新，请基于当前最新版本重新封存。", { currentRevisionId: row.head_revision_id });
+        }
+        artifact = row;
+      } else {
+        const artifactId = newAgentId("art");
+        this.db.prepare(
+          `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'project', ?, NULL, 0, ?, ?, ?)`,
+        ).run(artifactId, context.conversationId, context.actorId, input.title, input.workId,
+          nextSeq(this.db, "artifacts", context.conversationId), now, now);
+        artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
+      }
+      const revision = insertRevision(this.db, now, artifact, input.baseRevisionId ?? null,
+        { title: input.title, kind: "project", content }, context.requestId);
+      return rowToArtifactRevision(revision);
+    });
+    return write();
+  }
+
+  // 本地免费渲染受理（render_project）：核对请求边界后交给 ProductionService 冻结目标并建立 run。
+  async renderProject(context: RequestContext, input: ToolRenderProject): Promise<LocalCreationReceipt> {
+    const request = this.requireRunningRequest(context);
+    if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再受理本地渲染。");
+    if (!this.production) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费本地渲染通道未装配。");
+    return this.production.admitLocalRender(context.actorId, context.conversationId,
+      { requestId: context.requestId, messageId: context.actionSourceMessageId }, input);
+  }
+
+  // 免费配音（dub_free）：edge-tts 维护版客户端产 mp3 与词级边界；时长按真实解码结果落库，
+  // 边界放在修订内部（RevisionRef 对齐天然成立，read_artifact 读修订即可见）。失败原样透传真实原因，
+  // 不暗换付费 speech 型号、不换语音重试。
+  async dubFree(context: RequestContext, input: ToolDubFree, signal?: AbortSignal): Promise<DubFreeResult> {
+    const request = this.requireRunningRequest(context);
+    if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
+    const config = captureEdgeTtsConfig(this.db);
+    if (!config) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费配音未启用，可在「免费服务 → 配音」中选择语音并打开。");
+    if (!this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "配音存储通道未装配。");
+    const voice = input.voice ?? config.voice;
+    const rate = input.rate ?? "+0%";
+    let stdout: string;
+    try {
+      const pending = runDubPython(config.pythonCommand, ["-I", "-c", DUB_DRIVER_PYTHON], {
+        timeout: 180_000, maxBuffer: 64 * 1024 * 1024, signal,
+      });
+      // 异步 execFile 不支持 input 选项（仅同步变体支持），必须经 .child 手动写入并结束 stdin。
+      // 解释器启动失败时该流会 EPIPE，真实原因由下方 catch 承载，这里只防未处理的流错误事件。
+      pending.child.stdin?.on("error", () => {});
+      pending.child.stdin?.end(JSON.stringify({ text: input.text, voice, rate }));
+      ({ stdout } = await pending);
+    } catch (error) {
+      if ((error as Error).name === "AbortError" || signal?.aborted) throw error;
+      // 驱动 traceback 的末尾就是真实异常；退出被杀/spawn 失败时 stderr 是空串而非 undefined，需显式回退 message。
+      const stderr = ((error as { stderr?: string | Buffer }).stderr ?? "").toString().trim();
+      const detail = stderr || (error as Error).message;
+      throw new AgentToolError("TEMPORARILY_UNAVAILABLE", `免费配音调用失败：${detail.slice(-400)}`);
+    }
+    // 外部进程输出只在这里校验一次；之后的 boundaries/audioBytes 是已验证的内部数据。
+    const parsed = JSON.parse(stdout) as { audioB64?: unknown; boundaries?: unknown };
+    const boundaries = (Array.isArray(parsed.boundaries) ? parsed.boundaries : []).map((item): SpeechBoundary => {
+      const boundary = item as { text?: unknown; offsetMs?: unknown; durationMs?: unknown };
+      if (typeof boundary.text !== "string" || !boundary.text
+        || !Number.isInteger(boundary.offsetMs) || !Number.isInteger(boundary.durationMs)) {
+        throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的边界数据形状不正确。");
+      }
+      // Number.isInteger 不做类型收窄；形状在此边界校验一次后，内部按 number 使用。
+      return { text: boundary.text, offsetMs: boundary.offsetMs as number, durationMs: boundary.durationMs as number };
+    });
+    const audioBytes = typeof parsed.audioB64 === "string" ? Buffer.from(parsed.audioB64, "base64") : Buffer.alloc(0);
+    if (audioBytes.length === 0) throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音没有返回音频数据。");
+    // 时长不信任服务方口径：解码实际文件核实（也是可播放性的真实检查）。
+    let durationMs: number;
+    const dir = await mkdtemp(join(tmpdir(), "frame-dub-"));
+    try {
+      const file = join(dir, "dub.mp3");
+      await writeFile(file, audioBytes);
+      durationMs = (await probeAudioFile(file, signal)).durationMs;
+    } catch (error) {
+      if ((error as Error).name === "AbortError" || signal?.aborted) throw error;
+      if (error instanceof InvalidAudioFile) {
+        throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的音频无法解码为有效的 MP3。");
+      }
+      throw error;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    // 本次没有返回任何边界事件时如实标 none，不编造词级/句级。
+    const granularity: DubbedSpeechMeta["granularity"] = boundaries.length ? "word" : "none";
+    const title = input.text.replace(/\s+/g, " ").trim().slice(0, 40) || "免费配音";
+    const write = this.db.transaction((): DubFreeResult => {
+      // 网络往返与解码之后：落库前复核请求仍在运行、交付未关闭。
+      const current = this.requireRunningRequest(context);
+      if (current.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
+      const now = this.clock();
+      const blob = this.blobs!.persist(context.actorId, context.conversationId, audioBytes, "audio/mpeg", durationMs);
+      const content: MediaContent = {
+        format: "media", blobId: blob.id, mimeType: "audio/mpeg", durationMs,
+        dub: { text: input.text, voice, rate, granularity, boundaries },
+      };
+      const artifactId = newAgentId("art");
+      this.db.prepare(
+        `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'audio', NULL, NULL, 0, ?, ?, ?)`,
+      ).run(artifactId, context.conversationId, context.actorId, title,
+        nextSeq(this.db, "artifacts", context.conversationId), now, now);
+      const artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
+      const revision = insertRevision(this.db, now, artifact, null, { title, kind: "audio", content }, context.requestId);
+      return { artifactId, revisionId: revision.id, durationMs, granularity, boundaryCount: boundaries.length, voice, rate };
+    });
+    return write();
   }
 
   private requireRequest(context: RequestContext): RequestRow {
@@ -431,6 +624,132 @@ export class BusinessTools implements PiBusinessTools {
   }
 }
 
+// —— 免费配音驱动 ——
+// 不手写服务协议：经同一包（edge-tts 维护版）已验证的 Python API 取音频与词级边界，驱动只做
+// stdin JSON → stdout JSON 的薄封装。offset/duration 原始单位 100ns，这里换算为毫秒；
+// boundary="WordBoundary" 请求逐词事件；服务一条事件都没给时 boundaries 为空，由调用方如实标 none。
+const DUB_DRIVER_PYTHON = `
+import asyncio, base64, json, os, sys
+from urllib.parse import urlsplit
+from urllib.request import proxy_bypass_environment
+import edge_tts
+from edge_tts.constants import WSS_URL
+
+async def main():
+    request = json.loads(sys.stdin.read())
+    proxy = next((os.environ[name] for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy") if name in os.environ), None)
+    no_proxy = os.environ.get("NO_PROXY", os.environ.get("no_proxy", ""))
+    if proxy_bypass_environment(urlsplit(WSS_URL).hostname, {"no": no_proxy}):
+        proxy = None
+    communicate = edge_tts.Communicate(request["text"], request["voice"], rate=request["rate"], boundary="WordBoundary", proxy=proxy or None)
+    audio = bytearray()
+    boundaries = []
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio.extend(chunk["data"])
+        elif chunk["type"] == "WordBoundary":
+            boundaries.append({
+                "text": chunk["text"],
+                "offsetMs": round(chunk["offset"] / 1e4),
+                "durationMs": round(chunk["duration"] / 1e4),
+            })
+    sys.stdout.write(json.dumps({"audioB64": base64.b64encode(bytes(audio)).decode(), "boundaries": boundaries}))
+
+asyncio.run(main())
+`;
+
+const runDubPython = promisify(execFile);
+
+// 工程文件的描述性类型；执行时按字节写回工作区，不依赖这里的 MIME。
+const PROJECT_FILE_MIME: Record<string, string> = {
+  ".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript",
+  ".json": "application/json", ".md": "text/markdown", ".txt": "text/plain",
+  ".py": "text/x-python", ".sh": "text/x-shellscript",
+  // 媒体工程文件按扩展名登记准确 MIME：作品库选材据此区分共享 blob 与文本副本（G4-2）。
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
+};
+function projectFileMime(file: string): string {
+  return PROJECT_FILE_MIME[file.slice(file.lastIndexOf("."))] ?? "application/octet-stream";
+}
+
+// Pi 工具输出的内容块：文本或内嵌图像（SDK 层按模型能力决定是否投喂图像）。
+type ToolContentBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+
+// 视频帧带原始画布尺寸：FFmpeg 先限尺寸、SDK 可能再压，任一缩放发生时用一条说明把
+// 模型坐标映射回视频原始分辨率；帧未被缩放时不需要说明。
+async function resizedImageBlocks(bytes: Buffer, mimeType: string, video?: { width: number; height: number }): Promise<ToolContentBlock[]> {
+  const resized = await resizeImage(bytes, mimeType);
+  if (!resized) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "图像无法缩放到模型可接受的大小。");
+  const note = video && (resized.width < video.width || resized.height < video.height)
+    ? `[Image: original ${video.width}x${video.height}, displayed at ${resized.width}x${resized.height}. Multiply coordinates by ${(video.width / resized.width).toFixed(2)} to map to original image.]`
+    : formatDimensionNote(resized);
+  return [
+    ...(note ? [{ type: "text" as const, text: note }] : []),
+    { type: "image", data: resized.data, mimeType: resized.mimeType },
+  ];
+}
+
+// 头/中/尾代表帧时间基于视频轨事实：容器时长可能被更长音轨带偏，固定 0.9×时长也可能
+// 落在最后一帧之后（低帧数视频必然如此），那会让整个读取报"没有可抽取的画面"。
+// 尾点收到最后一帧，头/中点仍按视频轨时长取比例；读不出帧率时保留 0.9 比例。
+function representativeFrameTimes(video: VideoFileFacts): [number, number, number] {
+  const intervalMs = video.frameRate ? Math.round(1000 / video.frameRate) : 0;
+  const tailMs = intervalMs > 0 && video.videoDurationMs > intervalMs
+    ? video.videoDurationMs - intervalMs
+    : Math.round(video.videoDurationMs * 0.9);
+  return [Math.round(video.videoDurationMs * 0.1), Math.round(video.videoDurationMs * 0.5), tailMs];
+}
+
+// read_artifact 的媒体呈现：图片返回真实图像块；视频按 frameTimesMs 抽帧并带时间标注，
+// 未给时间点时退回头/中/尾三个代表帧并写明已看范围；音频返回 null 由调用方回退事实文本——
+// 没有独立听音能力，不假装听过。
+async function presentMedia(
+  blobs: import("./production-blobs.js").ProductionBlobs,
+  ownerId: string,
+  content: MediaContent,
+  frameTimesMs: readonly number[] | undefined,
+  signal?: AbortSignal,
+): Promise<ToolContentBlock[] | null> {
+  const file = blobs.filePath(blobs.get(ownerId, content.blobId).digest);
+  if (content.mimeType === "image/jpeg" || content.mimeType === "image/png") {
+    return resizedImageBlocks(await readFile(file), content.mimeType);
+  }
+  if (content.mimeType === "video/mp4" || content.mimeType === "video/webm") {
+    const explicit = frameTimesMs?.length ? frameTimesMs : undefined;
+    const duration = content.durationMs;
+    const facts = await probeVideoFile(file, undefined, signal);
+    const times = explicit ?? representativeFrameTimes(facts);
+    const frames = await extractVideoFrames(file, times, signal);
+    const blocks: ToolContentBlock[] = explicit ? [] : [{
+      type: "text", text: `已看范围：头/中/尾 3 个代表帧（总时长 ${duration}ms）；要核对具体画面时用 frameTimesMs 指定毫秒时间点。`,
+    }];
+    for (const [index, frame] of frames.entries()) {
+      blocks.push({ type: "text", text: `t=${times[index]}ms${explicit ? "" : "（代表帧）"}` });
+      blocks.push(...await resizedImageBlocks(frame, "image/png", facts));
+    }
+    return blocks;
+  }
+  return null;
+}
+
+// read_artifact 的作品库文件卡呈现（§11.7 来源5/6）：文本类 MIME 读回原文（超长截断并注明）；
+// 二进制只给可证实事实，不把读不出的字节冒称已理解，需要内容时由原生工具在输入位置处理。
+async function presentFile(
+  blobs: import("./production-blobs.js").ProductionBlobs,
+  ownerId: string,
+  content: FileContent,
+): Promise<ToolContentBlock[]> {
+  const blob = blobs.get(ownerId, content.blobId);
+  if (content.mimeType.startsWith("text/") || content.mimeType === "application/json") {
+    const bytes = await readFile(blobs.filePath(blob.digest));
+    const truncated = bytes.length > 262_144;
+    const text = (truncated ? bytes.subarray(0, 262_144) : bytes).toString("utf8");
+    return [{ type: "text", text: `${content.path}（${content.mimeType}${truncated ? `，已截断前 256 KiB／共 ${blob.size_bytes} 字节` : ""}）：\n${text}` }];
+  }
+  return [{ type: "text", text: `二进制文件 ${content.path}（${content.mimeType}，${blob.size_bytes} 字节）：字节不能当作文本读取；已准备到作品输入位置的文件见上下文 libraryInputs（inputs/library/ 下，用原生工具处理），未准备时先明确目标作品（read_work activate 或 start_work）。` }];
+}
+
 // —— 模型侧工具声明 ——
 
 export interface ActiveRequestContext {
@@ -441,50 +760,69 @@ export interface ActiveRequestContext {
   target: Target | null;
   /** 宿主注入的当前真实用户消息；steering 只在 Pi 原生接收后更新。 */
   actionSourceMessageId: string;
+  /** 本回合明确激活的创作（start_work 成功或 read_work activate）；新请求自动清空。 */
+  activatedWorkId?: string;
   nativeRecovery?: boolean;
 }
 
 export function buildAgentTools(
   holder: { current: ActiveRequestContext | null },
   tools: PiBusinessTools,
-  skillsRoot: string,
-  skillDirectories?: () => string[],
+  /** 媒体呈现：读取 blob 字节与视频抽帧；缺省时图像/视频只返回事实文本。 */
+  media?: { blobs: import("./production-blobs.js").ProductionBlobs },
+  /** 间接读取 Skill 参考文件（离线装配）；隔离创作环境用原生 read，不传本参数。 */
+  skills?: { root: string; directories?: () => string[] },
+  /** 作品库选材输入准备（§11.7 来源6/7）：作品明确（start_work / read_work activate）后触发。 */
+  libraryInputs?: { ensure: (actorId: string, conversationId: string, workId: string) => Promise<void> },
 ): ToolDefinition[] {
-  const skillRootReal = realpathSync(skillsRoot);
-
-  const readSkillFile: ToolDefinition = {
-    name: "read_skill_file",
-    label: "读取技能参考文件",
-    description: "读取已安装技能目录内的说明或参考文件。可使用技能相对路径或 SDK 给出的已安装技能绝对路径，不能越出技能目录。",
-    parameters: Type.Object({
-      path: Type.String({ minLength: 1, maxLength: 512, description: "技能目录内的相对路径，例如 video-script/SKILL.md" }),
-    }),
-    async execute(_toolCallId, args) {
-      const relativePath = String((args as { path?: unknown }).path ?? "");
-      let resolved: string;
-      try { resolved = realpathSync(isAbsolute(relativePath) ? relativePath : join(skillRootReal, relativePath)); }
-      catch { throw new AgentToolError("NOT_FOUND", "技能文件不存在，请使用已安装技能目录中提供的路径。"); }
-      const allowed = (skillDirectories?.() ?? [skillRootReal]).map(root => realpathSync(root));
-      const root = allowed.find(directory => resolved === directory || resolved.startsWith(directory + sep));
-      if (!root) throw new AgentToolError("FORBIDDEN", "路径超出已发现的技能目录。");
-      const rel = relative(root, resolved);
-      const stat = statSync(resolved);
-      if (!stat.isFile() || stat.size > 262_144) throw new AgentToolError("INVALID_INPUT", "技能参考文件必须是小于 256 KiB 的文件。");
-      const text = readFileSync(resolved, "utf8");
-      return { content: [{ type: "text" as const, text }], details: { path: rel } };
-    },
-  };
+  // 旧装配的间接读取：Skill 目录内只读，路径解析不能越出已发现的技能目录。
+  const readSkillFile: ToolDefinition | null = skills
+    ? (() => {
+      const skillRootReal = realpathSync(skills.root);
+      const tool: ToolDefinition = {
+        name: "read_skill_file",
+        label: "读取技能参考文件",
+        description: "读取已安装技能目录内的说明或参考文件。可使用技能相对路径或 SDK 给出的已安装技能绝对路径，不能越出技能目录。",
+        parameters: Type.Object({
+          path: Type.String({ minLength: 1, maxLength: 512, description: "技能目录内的相对路径，例如 video-script/SKILL.md" }),
+        }),
+        async execute(_toolCallId, args) {
+          const relativePath = String((args as { path?: unknown }).path ?? "");
+          let resolved: string;
+          try { resolved = realpathSync(isAbsolute(relativePath) ? relativePath : join(skillRootReal, relativePath)); }
+          catch { throw new AgentToolError("NOT_FOUND", "技能文件不存在，请使用已安装技能目录中提供的路径。"); }
+          const allowed = (skills.directories?.() ?? [skillRootReal]).map(root => realpathSync(root));
+          const root = allowed.find(directory => resolved === directory || resolved.startsWith(directory + sep));
+          if (!root) throw new AgentToolError("FORBIDDEN", "路径超出已发现的技能目录。");
+          const rel = relative(root, resolved);
+          const stat = statSync(resolved);
+          if (!stat.isFile() || stat.size > 262_144) throw new AgentToolError("INVALID_INPUT", "技能参考文件必须是小于 256 KiB 的文件。");
+          const text = readFileSync(resolved, "utf8");
+          return { content: [{ type: "text" as const, text }], details: { path: rel } };
+        },
+      };
+      return tool;
+    })()
+    : null;
 
   const readArtifact: ToolDefinition = {
     name: "read_artifact",
     label: "读取产物修订",
-    description: "读取当前会话某个产物指定修订的完整内容。修改前必须先读过用户绑定的基准修订。",
+    description: "读取当前会话某个产物指定修订的完整内容。文本与工程清单直接读回；图片返回真实图像；视频按 frameTimesMs（毫秒，最多 8 个时间点）抽取带时间标注的画面，改镜头前先用它核对实际画面；未给时间点时返回头/中/尾三个代表帧并写明已看范围。音频只返回可证实的事实（时长/采样率），没有独立听过音频的能力时不声称听过。作品库文件卡（format=file）文本类读回原文、二进制只给事实清单，不把字节冒称文本。修改前必须先读过用户绑定的基准修订。",
     parameters: inlineSchema("ToolReadArtifact"),
-    async execute(toolCallId, args) {
+    async execute(toolCallId, args, signal) {
       const context = requireContext(holder, toolCallId);
-      const revision = await tools.readArtifact(context, args as RevisionRef);
+      const input = args as ToolReadArtifact;
+      const revision = await tools.readArtifact(context, input);
+      const content = revision.content;
+      const mediaPresentation = media && content.format === "media" ? await presentMedia(media.blobs, context.actorId, content, input.frameTimesMs, signal) : null;
+      if (mediaPresentation) return { content: mediaPresentation, details: { artifactId: revision.artifactId, revisionId: revision.revisionId } };
+      const filePresentation = media && content.format === "file" ? await presentFile(media.blobs, context.actorId, content) : null;
+      if (filePresentation) return { content: filePresentation, details: { artifactId: revision.artifactId, revisionId: revision.revisionId } };
+      const note = content.format === "media" && (content.mimeType === "video/mp4" || content.mimeType === "video/webm") && !input.frameTimesMs
+        ? "（视频修订：给出 frameTimesMs 时间点后可抽取对应画面）" : "";
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(revision) }],
+        content: [{ type: "text" as const, text: JSON.stringify(revision) + note }],
         details: { artifactId: revision.artifactId, revisionId: revision.revisionId },
       };
     },
@@ -493,8 +831,12 @@ export function buildAgentTools(
   const deliverArtifacts: ToolDefinition = {
     name: "deliver_artifacts",
     label: "交付本轮草稿",
-    description: "将本轮需要用户审阅的草稿或修订放到工作台（items 为 1-8 项，可包含不同主题与类型）。这是交草稿，不是定稿或确认；视频创作中的内容草稿也必须用本工具交付，不能仅在聊天中输出。Prompt 和普通讨论仍直接在聊天中回复。准备齐本轮草稿后一次提交；成功后暂停等用户。修改项必须精确匹配用户绑定的 artifactId 与 baseRevisionId；没有预绑定也要按用户文字指名与 read_artifact 解析真实对象，不确定时只问一次。正式视频的内容/方案主稿用 stageDrafts 指明 workId（以 start_work 返回或 read_work 读到的为准，不要编造）、stage、itemIndex（同批可给 A/B 各自主稿）。stage=content 无论新写还是修改，source 与 proposalRef 都传 null；修改基准只放在 item.baseRevisionId，不放进 source。用户要采用聊天原文或已有修订作内容时不要交付副本，改用 confirm_stage 在认可动作里直接引用原文或修订。stage=plan 的主稿必须给 source，准确指向该视频当前内容主稿：artifact_revision 指该修订，或内容所采用消息的原文 message_text（逐字引用，服务端逐字核对）。方案主稿可带本轮已准备的有效 proposalRef，也可先不带提案。用户之后要求制作时，prepare_production 用 planSource 直接引用已有方案，不为绑定提案再次交付相同内容。"
-      + "多片段视频的内容/方案主稿用 MarkdownContent.sections 分段：每段带稳定 id、title 与完整可独立阅读的 text，按播放顺序排列；方案段落可用 sourceSectionIds 指向内容段落 id 建立逐段对应（仅方案段允许）。本轮同时修订内容与对应方案时成对交付：方案项 source 传 {kind:'delivery_item', itemIndex: 指向本批内容项} 且 proposalRef 必须为 null（讨论稿）；成对交付只用于已有认可内容与方案之后的改稿轮，首轮仍先交付内容、等用户认可并明确继续。暂停时可修改当前既有方案：基于其当前 baseRevisionId、同一准确内容来源交付 revise 且 proposalRef:null，保持内容稿与暂停认可原样；不要为改镜头补写继续认可。",
+    description: "将本轮需要用户审阅的草稿或修订放到工作台（items 为 1-8 项，可包含不同主题与类型）。这是交草稿，不是定稿或确认；视频创作中的内容草稿也必须用本工具交付，不能仅在聊天中输出。Prompt 和普通讨论仍直接在聊天中回复。准备齐本轮草稿后一次提交；成功后暂停等用户。修改项必须精确匹配 artifactId 与当前 baseRevisionId。修改前必须先 read_artifact 读过用户绑定的基准修订；没有预绑定也要按用户文字指名与 read_artifact 解析真实对象，不确定时只问一次。"
+      + "正式视频事项的草稿用 reviewGroups 说明归属：已有组/项传准确 groupId/itemId（以 start_work、read_work 或此前交付回执返回的为准，不要编造）；新组/项用 create 并自带 key（仅本次调用内去重）、title、label、role、required，服务端一次分配身份并在回执 reviewTargets 里返回稳定 id。新项可以先无主稿，交付后按制作进度补；不要为取得 id 先交占位媒体。"
+      + "每个交付项按需要附 inputSources（实际采用的内容来源，真实修订或逐字消息原文）与 reviewInputs（本次制作必需的认可依据，引用 read_work 返回的准确 confirmationId）；代码生成的媒体必须先 publish_project，再以对应 project 修订参与交付。"
+      + "本地产出用 content 的 local_output 分支引用已登记的 run/operation 输出或产物修订；不要引用 bash 临时文件或裸工作区路径。"
+      + "多段落文稿用 MarkdownContent.sections 分段：每段带稳定 id、title 与完整可独立阅读的 text，按阅读/播放顺序排列。用户要采用聊天原文或已有修订作内容时不要交付副本，改用 confirm_review 在认可动作里直接引用原文或修订。"
+      + "同一次交付原子完成并关闭本回合变更边界；成功后只做说明，等用户下一步。",
     parameters: inlineSchema("ToolDelivery"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
@@ -509,15 +851,14 @@ export function buildAgentTools(
   const prepareProduction: ToolDefinition = {
     name: "prepare_production",
     label: "准备制作提案",
-    description: "用户明确委托准备制作后，创建待确认的提案（含服务端报价与有效期）；本工具不能批准执行。"
-      + "对话文字可直接用 inputs:[{kind:'text',text:'完整原文'}]，没有作品引用时 inputRevisions:[]，不要为此先创建 Prompt 作品。"
+    description: "用户明确委托准备付费制作后，创建待确认的提案（含服务端报价与有效期）；本工具不能批准执行。"
+      + "对话文字可直接用 spec.inputSources 的 message_text 分支（真实 messageId 加逐字原文），没有作品引用时 inputSources 留空，不要为此先创建 Prompt 作品。"
       + "模型与启用参数取自 frame-current-state.mediaModels；render 为本地合成，model:null。按本次需要安排操作，不额外增加步骤；创建次数由通道固定，不要自行加重试。"
-      + "视频成片必须带 workId，且该视频已认可内容进入方案阶段。已有方案时，在 planSource 引用 read_work 返回的当前方案 artifactId/revisionId，直接准备其制作；不要复制方案、追加报价到方案正文或让用户重新认可同一稿。planSource 是方案关联，不要为此塞入没有用于生成的 inputRevisions。"
-      + "带独立逐字配音的方案必须在 MarkdownContent.narrationText 保存整条旁白原文，speech 的实际输入逐字一致。正文/镜头段只写声音安排。同稿同句重报直接用 planSource；换台词先交新方案。若用户同时要求新台词和报价，先 prepare 不传 planSource，再在本轮 deliver 新方案（narrationText=本次台词）并带该 proposalRef 绑定；未绑定不能受理。不得用旧方案引用配新台词，旧稿没有唯一原句时交付可审阅新稿。"
+      + "正式整片（purpose=production）的成片必须带 workId，且方案等必要依据已通过 confirm_review 认可；受理依据放 reviewInputs（引用 read_work 返回的准确 confirmationId 与事项），实际生成输入放 inputSources，两者不要混同。已认可的方案修订直接作为 inputSources 引用，不复制、不追加报价到正文、不让用户重新认可同一稿。"
+      + "spec.outputTarget 声明成片交付到哪个审阅组/事项：已有组/项传 read_work 或交付回执里的准确 groupId/itemId，或用 create 声明新组/新项（角色须接收视频，如 video/clip）。最终视频提案缺少 outputTarget 会被拒绝，服务端不会替用户猜位置；需要核对当前组结构就先 read_work。"
+      + "带独立逐字配音的方案必须在 MarkdownContent.narrationText 保存整条旁白原文，speech 的实际输入逐字一致。同稿同句重报直接引用同一方案修订；换台词先交新方案。不得用旧方案引用配新台词。"
       + "用户明确说替换某张报价（例如降低并替换原额度）时，replacesProposal 传 read_proposal 读到的准确 proposalId/digest；只撤同事项同方案同范围的指定旧单。普通备选不填。替换额度不足返回 stale 并明确旧报价已撤、本次未就绪，不让用户回用旧高额度。"
       + "为已有视频准备新版本时，先用 read_run / read_proposal 核对上一版实际使用的输入与产出：未受影响的段落直接引用原有 blob 或产物修订作为 render 输入，只为受影响的段落新增生成操作；本会话已采用的素材同样优先复用。不为省事把所有片段重新生成，也不为复用重复安排付费操作。"
-      + "该视频当前方案主稿已关联同内容提案时（例如制作终止后按原内容重提），重新准备的同内容提案会自动继承该关联，"
-      + "仅授权上限变化同样继承：不要再交付新方案稿重新绑定，也不要要求用户重新认可同一份方案；新提案展示新报价，等用户明确开始。"
       + "需要指定片段区间/图片停留时用 timed_narrated_concat：segments 按成片顺序给出视频 inputSlot/startMs/durationMs 或图片 inputSlot/durationMs，narrationInputSlot 指定旁白；成片时长取片段之和，旁白替换原声、不足补静音、超过画面总长会如实失败。"
       + "三路声音用mixed_concat：segments与必需segmentIds逐段对应方案，video逐段originalGain（省略1）；可加一路已采用music（candidateId绑定该音频槽，明确选区/位置/播放长/repeat/gain/fades/duckUnderNarration）和完整narration（槽/位置/gain）。gain0–1，画面总长≤120s，全部输入合计≤24。音乐不足不暗循环；独立配音不裁词、不变速、不延长画面；未知原声不能假装分离人声和背景乐。"
       + "换音乐或音量只安排本地render，read_run取得proposalId再read_proposal恢复原始视觉段、原声设置和既有配音；不能用已经混旧曲的整片再叠新曲，也不重生相同画面/旁白。只换型号/音色/台词才有新speech。明确本次MiniMax时用frame-current-state.mediaModels中的准确binding和voice，不改全局默认或失败偷换OpenAI。新混音仍交视频草稿，等待用户认可。"
@@ -529,6 +870,39 @@ export function buildAgentTools(
       return {
         content: [{ type: "text" as const, text: `提案已准备：${JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, state: proposal.state, expiresAt: proposal.expiresAt })}` }],
         details: { proposalId: proposal.id },
+      };
+    },
+  };
+
+  const publishProject: ToolDefinition = {
+    name: "publish_project",
+    label: "封存代码工程",
+    description: "把当前工程要留存的源码、模板、字体与时间线连同运行入口冻结为一份 project 修订（files 为 1-512 个工作区相对路径；entrypoint 执行清单内文件；dependencyLocks/timelineFiles 必须是清单成员）。只封存：不认可、不受理制作、不把文件自动当成交付卡；之后用 render_project 执行或以 local_output/artifact_revision 引用这份修订。sourceRevisions 记录本次实际采用的会话内修订，逐字素材引用真实修订，不复制内容。改工程时传 artifactId 与准确 baseRevisionId，按清单整体替换。运行前收集，不定稿时补采当前目录。"
+      + "工程真正用到的 Skill 模板/字体/脚本先复制进工作区并列入 files，entrypoint 不引用 /skills/ 只读路径（执行环境不挂载它）。"
+      + "在途制作不阻塞保存后继工程；同一工程的后续版本先改工作区文件再重新封存。",
+    parameters: inlineSchema("ToolPublishProject"),
+    async execute(toolCallId, args) {
+      const context = requireContext(holder, toolCallId);
+      const revision = await tools.publishProject(context, args as ToolPublishProject);
+      return {
+        content: [{ type: "text" as const, text: `工程已封存：${JSON.stringify({ artifactId: revision.artifactId, revisionId: revision.revisionId, digest: revision.digest })}` }],
+        details: { artifactId: revision.artifactId, revisionId: revision.revisionId },
+      };
+    },
+  };
+
+  const renderProject: ToolDefinition = {
+    name: "render_project",
+    label: "受理本地渲染",
+    description: "把冻结的 project 修订与声明输出交给现有本地 worker 免费执行，立即返回 run（后台完成，不等待结果、完成后不自动点评）。每个操作声明 operationId/outputSlot、inputs（blob/媒体修订作为数据输入，按数组下标物化为 inputs/<slot>.<扩展名>；operation_output 串接前序产物；文本与工程引用不落文件）、code_project 参数（projectRevision 指向 publish_project 返回的准确工程修订、entrypoint 与该修订冻结的入口完全一致、outputPath 是本次执行将产生的工作区相对文件——不必预先存在，也不能与封存文件或 inputs/<slot>.* 落位同名、expectedMediaKind 与该媒体实际需要的字段：图片给尺寸与 png/jpeg，音频给采样率/声道与 wav/mp3，视频才给 fps）与 target（已有组/项传准确 id，新组/项用 create 声明，服务端一次分配身份）。执行按工程冻结的 argv 逐项直传进程，入口正常结束但没生成声明输出即失败，不会交付旧文件。"
+      + "正式整片（purpose=production 的视频输出）必须先有组审阅认可，reviewInputs 引用 read_work 返回的准确 confirmationId；初始样张按 scope 判断可空。受理后该作品在途期间不再受理新制作，但保存后继工程与独立认可不受影响。产物是否交付另行用 deliver_artifacts 引用运行输出。",
+    parameters: inlineSchema("ToolRenderProject"),
+    async execute(toolCallId, args) {
+      const context = requireContext(holder, toolCallId);
+      const receipt = await tools.renderProject(context, args as ToolRenderProject);
+      return {
+        content: [{ type: "text" as const, text: `本地渲染已受理：${JSON.stringify({ runId: receipt.run.id, state: receipt.run.state, reviewTargets: receipt.reviewTargets })}` }],
+        details: { runId: receipt.run.id },
       };
     },
   };
@@ -612,11 +986,14 @@ export function buildAgentTools(
   const startWork: ToolDefinition = {
     name: "start_work",
     label: "开始视频创作",
-    description: "用户明确要正式做一条视频后，为这条视频建立创作事项（标题由用户内容概括）。普通 Prompt、热点讨论、单独写脚本不要调用。之后按内容 → 画面声音方案 → 视频初稿三阶段推进，每阶段等用户明确认可。",
+    description: "用户明确要正式做一条视频后，为这条视频建立创作事项（标题由用户内容概括）并作为本回合的创作工作区，之后的原生工具直接服务它。普通 Prompt、热点讨论、单独写脚本不要调用。推进节奏按用户需要建审阅组（内容、画面声音方案、成片等），必选依据经用户认可后才能用于正式制作；用户明确要先看局部预览时可以直接做预览，不强迫先补内容稿。",
     parameters: inlineSchema("ToolStartWork"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
       const work = await tools.startWork(context, args as ToolStartWork);
+      if (holder.current) holder.current.activatedWorkId = work.id;
+      // §11.7 来源6/7：作品明确后立即把已发送选材原字节准备到其输入位置（含“先发送选材、本消息才 start_work”）。
+      if (libraryInputs) await libraryInputs.ensure(context.actorId, context.conversationId, work.id);
       return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id } };
     },
   };
@@ -624,24 +1001,30 @@ export function buildAgentTools(
   const readWork: ToolDefinition = {
     name: "read_work",
     label: "读取视频创作状态",
-    description: "读取一条视频创作的当前阶段、各阶段主稿与已认可对象（confirmationAction 区分仅认可/认可并继续）、待更新的上游关系、关联提案与运行，并附带该视频的相关意见。回答“现在到哪一步/认可的是哪版/有哪些意见”前先用它核对事实。",
+    description: "读取一条视频创作的审阅组与各项当前稿/已认可对象（confirmationId 与 action）、组版本与关联运行，并附带该视频的相关意见。回答“现在到哪一步/认可的是哪版/有哪些意见”前先用它核对事实。默认只读，不改写入目标；要切换本回合后续原生工具服务的创作时传 activate: true（例如同时有多条创作、用户要继续另一条），它只确定工具归属，不认可、不创建制作。",
     parameters: inlineSchema("ToolReadWork"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
-      const work = await tools.readWork(context, args as ToolReadWork);
-      return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id, stage: work.stage, feedback: work.relatedFeedback.length } };
+      const input = args as ToolReadWork;
+      const work = await tools.readWork(context, input);
+      if (input.activate && holder.current) {
+        holder.current.activatedWorkId = work.id;
+        // §11.7 来源7：显式切换作品后按新目标准备输入；默认只读 read_work 不写入。
+        if (libraryInputs) await libraryInputs.ensure(context.actorId, context.conversationId, work.id);
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id, groups: work.reviewGroups.length, feedback: work.relatedFeedback.length } };
     },
   };
 
-  const confirmStage: ToolDefinition = {
-    name: "confirm_stage",
-    label: "记录阶段认可",
-    description: "只记录用户本轮明确表达的认可：approve_content（认可内容，暂停）、approve_content_continue（认可内容并进入画面阶段）、approve_plan（认可方案但暂不制作）、finalize_video（认可已存在的成片定稿）。subject 必须是当前会话真实内容来源（真实修订或本次消息原文消息）。不要因为语气接近、假设或引用别人就记录；镜头修改不包含继续认可，不能用本工具绕过改稿失败。本工具不能开始制作。",
-    parameters: inlineSchema("ToolConfirmStage"),
+  const confirmReview: ToolDefinition = {
+    name: "confirm_review",
+    label: "记录审阅认可",
+    description: "只记录用户本轮明确表达的认可：approve（认可指定项当前稿，暂停）、approve_and_continue（认可并继续下一组所需工作）、finalize_video（认可已存在的成片修订并定稿）。items 逐项给出准确 itemId 与所认可的来源（真实修订或本次消息原文消息）；不要因为语气接近、假设或引用别人就记录。镜头修改不包含继续认可，不能用本工具绕过改稿失败。本工具不能开始制作。",
+    parameters: inlineSchema("ToolConfirmReview"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
-      const work = await tools.confirmStage(context, args as ToolConfirmStage);
-      return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id, stage: work.stage } };
+      const work = await tools.confirmReview(context, args as ToolConfirmReview);
+      return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id } };
     },
   };
 
@@ -687,8 +1070,24 @@ export function buildAgentTools(
     },
   };
 
-  return [readSkillFile, readArtifact, deliverArtifacts, prepareProduction, readProposal, readRun, listProduction,
-    searchMaterials, readMaterialBatch, readTrends, importMaterial, startWork, readWork, confirmStage, recordWorkFeedback];
+  const dubFree: ToolDefinition = {
+    name: "dub_free",
+    label: "免费配音",
+    description: "把一段文字合成为免费配音的音频修订（Edge 免费语音；优先用它，不占用付费 speech 型号）。voice 省略时用免费服务设置中的当前语音，rate 如 +10% 或 -5%。返回真实解码时长 durationMs 与词级边界（毫秒，相对该音频修订起点；granularity=none 表示本次没有边界事件，不要编造）。放进时间线前按片段的 offset、trim 与 speed 换算边界时间，并按 durationMs 实际时长安排片段，避免截尾。失败返回真实原因；不会自动改用付费配音或换语音重试。",
+    parameters: inlineSchema("ToolDubFree"),
+    async execute(toolCallId, args, signal) {
+      const context = requireContext(holder, toolCallId);
+      const result = await tools.dubFree(context, args as ToolDubFree, signal);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        details: { artifactId: result.artifactId, revisionId: result.revisionId },
+      };
+    },
+  };
+
+  return [readArtifact, deliverArtifacts, prepareProduction, publishProject, renderProject, readProposal, readRun, listProduction,
+    searchMaterials, readMaterialBatch, readTrends, importMaterial, dubFree, startWork, readWork, confirmReview, recordWorkFeedback,
+    ...(readSkillFile ? [readSkillFile] : [])];
 }
 
 function requireContext(holder: { current: ActiveRequestContext | null }, toolCallId: string): RequestContext {

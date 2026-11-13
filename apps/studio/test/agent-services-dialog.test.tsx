@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FrameSettings } from "../src/client/agent/FrameSettings.js";
 import { MediaPreview } from "../src/client/agent/ProductionCards.js";
-import type { Bootstrap, MediaContent, NewsNowSettings, PexelsSettings, KeyedMaterialSettings, KeylessMaterialSettings, SaveFreeServiceSettingsReceipt } from "../src/shared/agent/generated/contracts.js";
+import type { Bootstrap, MediaContent, NewsNowSettings, PexelsSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings, SaveFreeServiceSettingsReceipt } from "../src/shared/agent/generated/contracts.js";
 
 // T3-11 等免费服务 UI：列表行/开关/配置面板沿既有编辑模式——读取失败不出表单、
 // 冲突重读保留草稿、同命令重试、清 Key。按 kinds 分四个页签，同 provider 共用配置：
@@ -26,14 +26,17 @@ const UNCONFIGURED_PEXELS: PexelsSettings = {
 const UNCONFIGURED_NEWSNOW: NewsNowSettings = {
   serviceId: "newsnow", revision: 0, enabled: false, endpoint: null, sourceIds: [], topics: [],
 };
+const UNCONFIGURED_EDGE_TTS: EdgeTtsSettings = {
+  serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3",
+};
 const unconfiguredKeyed = (serviceId: "pixabay" | "unsplash" | "coverr"): KeyedMaterialSettings =>
   ({ serviceId, revision: 0, enabled: false, credentialConfigured: false, writeUnavailableReason: null });
 const unconfiguredKeyless = (serviceId: KeylessMaterialSettings["serviceId"]): KeylessMaterialSettings =>
   ({ serviceId, revision: 0, enabled: false, writeUnavailableReason: null });
 
-const SERVICE_IDS = ["pexels", "pixabay", "unsplash", "coverr", "wikimedia", "nasa", "met", "cleveland", "archive", "freetouse", "incompetech", "douyin-music", "tiktok-sounds", "newsnow"] as const;
+const SERVICE_IDS = ["pexels", "pixabay", "unsplash", "coverr", "wikimedia", "nasa", "met", "cleveland", "archive", "freetouse", "incompetech", "douyin-music", "tiktok-sounds", "newsnow", "edge-tts"] as const;
 type ServiceId = (typeof SERVICE_IDS)[number];
-type AnyServiceSettings = PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings;
+type AnyServiceSettings = PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings | EdgeTtsSettings;
 
 type RouteHandler = (call: FetchCall) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }> | undefined;
 
@@ -56,6 +59,7 @@ function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) 
     "douyin-music": unconfiguredKeyless("douyin-music"),
     "tiktok-sounds": unconfiguredKeyless("tiktok-sounds"),
     newsnow: UNCONFIGURED_NEWSNOW,
+    "edge-tts": UNCONFIGURED_EDGE_TTS,
   } };
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -76,7 +80,7 @@ function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) 
 function defaultRoute(state: ServiceState, service: ServiceId, call: FetchCall) {
   const current = state.settings[service];
   if (call.method === "GET") return { status: 200, body: current };
-  const input = call.body as { enabled: boolean; apiKey?: string | null; endpoint?: string | null; sourceIds?: string[]; topics?: string[] };
+  const input = call.body as { enabled: boolean; apiKey?: string | null; endpoint?: string | null; sourceIds?: string[]; topics?: string[]; voice?: string; pythonCommand?: string };
   let next: AnyServiceSettings;
   if ("credentialConfigured" in current) {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled,
@@ -85,6 +89,9 @@ function defaultRoute(state: ServiceState, service: ServiceId, call: FetchCall) 
   } else if (current.serviceId === "newsnow") {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled,
       endpoint: input.endpoint ?? null, sourceIds: input.sourceIds ?? [], topics: input.topics ?? [] };
+  } else if (current.serviceId === "edge-tts") {
+    next = { ...current, revision: current.revision + 1, enabled: input.enabled,
+      voice: input.voice ?? current.voice, pythonCommand: input.pythonCommand ?? current.pythonCommand };
   } else {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled };
   }
@@ -131,7 +138,7 @@ describe("T3 免费服务列表与配置面板", () => {
     const { calls, state } = installRoutes();
     state.settings.pexels = { ...UNCONFIGURED_PEXELS, revision: 2, credentialConfigured: true, apiKey: "shared-key" };
     renderServicesPage();
-    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["视频选题", "图片素材", "视频素材", "音乐素材"]);
+    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["视频选题", "图片素材", "视频素材", "音乐素材", "配音"]);
     for (const name of ["Pexels", "Pixabay", "Unsplash", "Wikimedia Commons", "NASA", "The Met", "Cleveland"]) {
       expect(await screen.findByRole("switch", { name: `允许 Agent 使用 ${name}` })).toBeInTheDocument();
     }
@@ -216,6 +223,48 @@ describe("T3 免费服务列表与配置面板", () => {
     await waitFor(() => expect(screen.getByText("已停用")).toBeVisible());
     const patch = patches(calls).find(call => call.url.endsWith("/settings/services/newsnow"))!;
     expect(patch.body).toEqual({ commandId: expect.any(String), expectedRevision: 3, enabled: false, endpoint: "https://news.example", sourceIds: ["zhihu", "weibo"], topics: ["科技"] });
+  });
+
+  it("配音页只显示语音；运行命令默认折叠，展开编辑保存后保持折叠", async () => {
+    const { calls } = installRoutes();
+    renderServicesPage();
+    await userEvent.click(screen.getByRole("tab", { name: "配音" }));
+    const toggle = await screen.findByRole("switch", { name: "允许 Agent 使用 Edge 免费配音" });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    // 未配置时读取形状也带缺省语音，开关直接保存启用（无 Key 门槛）
+    await userEvent.click(toggle);
+    await waitFor(() => expect(screen.getByText("已选用 · 未验证")).toBeVisible());
+    const firstPatch = patches(calls).find(call => call.url.endsWith("/settings/services/edge-tts"))!;
+    expect(firstPatch.body).toEqual({ commandId: expect.any(String), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3" });
+
+    await userEvent.click(screen.getByRole("button", { name: /配置 Edge 免费配音/ }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 Edge 免费配音" });
+    const voice = within(dialog).getByLabelText("语音");
+    expect(voice).toHaveValue("zh-CN-XiaoxiaoNeural");
+    expect(within(dialog).getByLabelText("Python 命令")).not.toBeVisible();
+    await userEvent.click(within(dialog).getByText("运行设置"));
+    expect(within(dialog).getByLabelText("Python 命令")).toBeVisible();
+    await userEvent.clear(within(dialog).getByLabelText("Python 命令"));
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    expect(await within(dialog).findByText(/Python 命令不能为空/)).toBeVisible();
+    await userEvent.type(within(dialog).getByLabelText("Python 命令"), "/opt/venv/bin/python3");
+    await userEvent.clear(voice);
+    await userEvent.type(voice, "zh-CN-XiaoyiNeural");
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const patchesForDub = patches(calls).filter(call => call.url.endsWith("/settings/services/edge-tts"));
+    expect(patchesForDub[patchesForDub.length - 1]!.body).toEqual({
+      commandId: expect.any(String), expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoyiNeural", pythonCommand: "/opt/venv/bin/python3",
+    });
+    const row = screen.getByText("Edge 免费配音").closest(".agent-service-row") as HTMLElement;
+    expect(within(row).getByText("zh-CN-XiaoyiNeural")).toBeVisible();
+    expect(within(row).queryByText("/opt/venv/bin/python3")).toBeNull();
+    expect(screen.getByText(/第三方维护的免费客户端/)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /配置 Edge 免费配音/ }));
+    const reopened = await screen.findByRole("dialog", { name: "配置 Edge 免费配音" });
+    expect(within(reopened).getByLabelText("语音")).toHaveValue("zh-CN-XiaoyiNeural");
+    expect(within(reopened).getByLabelText("Python 命令")).toHaveValue("/opt/venv/bin/python3");
+    expect(within(reopened).getByLabelText("Python 命令")).not.toBeVisible();
   });
 
   it("Pexels 首次启用无 Key 只提示，不发命令；有 Key 后刷新页面开关直接保存", async () => {

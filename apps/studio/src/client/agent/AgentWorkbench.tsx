@@ -9,16 +9,17 @@ import {
 import { useFeedbackDrafts } from "./useFeedbackDrafts.js";
 import { MarkdownText, MarkdownBody } from "./markdown.js";
 import {
-  appendNotice, clearDraft, clearReadingView, loadDraft, loadPanelLayout, loadReadingView, mergeArtifacts, mergeConversations, mergeMaterialBatches, mergeMessages, mergeProposals, mergeRuns, mergeWorks,
-  mergeDraftFrames, saveDraft, savePanelLayout, saveReadingView, type DraftState, type OutputNotices, type PanelLayout, type ReadingView,
+  appendNotice, clearDraft, clearReadingView, loadDraft, loadPanelLayout, loadReadingView, mergeArtifacts, mergeConversations, mergeLibraryPicks, mergeMaterialBatches, mergeMessages, mergeProposals, mergeRuns, mergeWorks,
+  mergeDraftFrames, saveDraft, savePanelLayout, saveReadingView, type DraftState, type LibraryPick, type OutputNotices, type PanelLayout, type ReadingView,
 } from "./workspace-state.js";
-import type { MessageInput, Run, AcceptProposal, CancelRun, SkillPackageMutation, Work, WorkStage, MaterialBatch, MaterialBatchIndexItem, StageConfirmation, ContentSource } from "../../shared/agent/generated/contracts.js";
-import { MediaPreview, ProposalCard, RunCard, runEnded } from "./ProductionCards.js";
+import type { MessageInput, Run, AcceptProposal, CancelRun, SkillPackageMutation, Work, ReviewGroup, ReviewConfirmation, MaterialBatch, MaterialBatchIndexItem, ContentSource } from "../../shared/agent/generated/contracts.js";
+import { FilePreview, MediaPreview, ProjectPreview, ProposalCard, RunCard, runEnded } from "./ProductionCards.js";
 export { ProposalCard } from "./ProductionCards.js";
-import { WorkStagePanel, MaterialBatchCard, type StageAction } from "./WorkStagePanel.js";
+import { WorkStagePanel, MaterialBatchCard, type ReviewAction, type ReviewEntry } from "./WorkStagePanel.js";
 import { ArrowLeft, ArrowUp, ChevronRight, Clock3, Cpu, Film, FolderOpen, Maximize2, MessageSquare, PanelLeft, Pencil, Plus, Sparkles, X } from "lucide-react";
 import { ArtifactIcon, stageOwnedLabel, FrameEmptyPreview, FrameWelcome } from "./FramePresentation.js";
 import { FrameSettings, framePageTitle, type FramePage } from "./FrameSettings.js";
+import { LibraryPickerDialog } from "./WorkLibrary.js";
 import { hydrateReferences } from "./references.js";
 import "./agent.css";
 
@@ -106,12 +107,14 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const [skillId, setSkillId] = useState<string | null>(null);
   const [skillNotice, setSkillNotice] = useState("");
   const [skillMutation, setSkillMutation] = useState<SkillPackageMutation | null>(null);
-  // 阶段工作台的 UI 状态：选中的创作事项与被点开的素材批次；认可/制作事实全部来自服务端投影。
+  // §11.7 来源8：输入框旁的作品库选择弹层；关闭时焦点回到触发按钮，正文与阅读位置不动。
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+  const libraryPickerTrigger = useRef<HTMLButtonElement | null>(null);
+  // 审阅组工作台的 UI 状态：选中的创作事项与被点开的素材批次；认可/制作事实全部来自服务端投影。
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
-  const [stageNavigation, setStageNavigation] = useState<{ workId: string; stage: WorkStage; artifactId: string; revisionId: string } | null>(null);
-  const [preparingWorkId, setPreparingWorkId] = useState<string | null>(null);
+  const [reviewNavigation, setReviewNavigation] = useState<{ workId: string; groupId: string; itemId: string; artifactId: string; revisionId: string } | null>(null);
   const [openBatchId, setOpenBatchId] = useState<string | null>(null);
-  const [stageBusyKeys, setStageBusyKeys] = useState<string[]>([]);
+  const [reviewBusyKeys, setReviewBusyKeys] = useState<string[]>([]);
   useEffect(() => {
     if (bootstrap && skillId && !bootstrap.skills.some(skill => skill.id === skillId)) {
       setSkillId(null);
@@ -181,7 +184,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       const refresh = {
         artifacts: [...new Set([...changedMessages.flatMap(message => message.references.artifacts.map(ref => ref.artifactId)), ...(resetStream ? known?.artifacts.map(item => item.id) ?? [] : [])])].filter(itemId => !snapshot.artifacts.items.some(item => item.id === itemId)),
         proposals: [...new Set([...changedMessages.flatMap(message => message.references.proposalIds), ...(resetStream ? known?.proposals.map(item => item.id) ?? [] : [])])].filter(itemId => !snapshot.proposals.items.some(item => item.id === itemId)),
-        runs: [...new Set([...changedMessages.flatMap(message => message.references.runIds), ...(known?.runs.filter(run => resetStream || !runEnded(run.state) || run.finance.state !== "settled").map(run => run.id) ?? [])])].filter(itemId => !snapshot.runs.items.some(item => item.id === itemId)),
+        runs: [...new Set([...changedMessages.flatMap(message => message.references.runIds), ...(known?.runs.filter(run => resetStream || !runEnded(run.state) || (run.finance != null && run.finance.state !== "settled")).map(run => run.id) ?? [])])].filter(itemId => !snapshot.runs.items.some(item => item.id === itemId)),
       };
       // 同一补读入口用于快照、历史页和事件；一项失败不会拒绝整页。
       const refs = await hydrateReferences(snapshot.messages.items, {
@@ -292,7 +295,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   useEffect(() => {
     const timer = window.setInterval(() => {
       for (const [id, item] of cache.current) {
-        if (id !== activeId.current && (item.activeRequestId || item.messages.some(message => message.state === "queued") || item.runs.some(run => !runEnded(run.state) || run.finance.state !== "settled"))) void refreshSnapshot(id);
+        if (id !== activeId.current && (item.activeRequestId || item.messages.some(message => message.state === "queued") || item.runs.some(run => !runEnded(run.state) || (run.finance != null && run.finance.state !== "settled")))) void refreshSnapshot(id);
       }
     }, 2000);
     return () => window.clearInterval(timer);
@@ -301,7 +304,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   useEffect(() => {
     setView(conversationId ? cache.current.get(conversationId) ?? EMPTY_VIEW : EMPTY_VIEW);
     openIntent.current++;
-    setSelection(null); setStageNavigation(null); setFeedbackOpen(false); setInspectedRun(null); setStreaming(null); setStreamCursor(null); setActionError("");
+    setSelection(null); setReviewNavigation(null); setFeedbackOpen(false); setInspectedRun(null); setStreaming(null); setStreamCursor(null); setActionError("");
     setDraftPanels({}); setContextNote(null); setReferenceErrors({});
     setSkillId(null); setUnseenMessages(false); pinnedBottom.current = true;
     setSelectedWorkId(null); setOpenBatchId(null);
@@ -391,7 +394,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     return () => { disposed = true; };
   }, [selection, conversationId, view.conversation.id]);
 
-  // 创作事项各阶段引用的修订可能不在首屏页；按需补读进不可变缓存，不改变阅读位置。
+  // 创作事项各审阅组引用的修订可能不在首屏页；按需补读进不可变缓存，不改变阅读位置。
   useEffect(() => {
     if (!conversationId || view.conversation.id !== conversationId) return;
     const generation = viewGeneration.current.token;
@@ -400,8 +403,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     const knownHeads = new Set(view.artifacts.map(item => item.id));
     const missingHeads = new Set<string>();
     const missingRevisions: { artifactId: string; revisionId: string }[] = [];
-    for (const work of view.works) for (const stage of [work.stages.content, work.stages.plan, work.stages.video]) {
-      for (const source of [stage.draft, stage.approved]) {
+    for (const work of view.works) for (const group of work.reviewGroups) for (const item of group.items) {
+      for (const source of [item.draft, item.approved]) {
         if (!source || source.kind !== "artifact_revision") continue;
         if (!knownHeads.has(source.artifactId)) missingHeads.add(source.artifactId);
         if (!revisionCache[`${source.artifactId}:${source.revisionId}`]) missingRevisions.push({ artifactId: source.artifactId, revisionId: source.revisionId });
@@ -463,15 +466,24 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     finally { renameBusy.current = false; }
   };
 
-  const updateDraft = (update: Partial<DraftState>) => {
+  const updateDraft = (update: Partial<DraftState> | ((draft: DraftState) => Partial<DraftState>)) => {
     const id = conversationId ?? "new";
     setDrafts(current => {
-      const next = { ...(current[id] ?? { text: "", targetArtifactId: null, targetRevisionId: null }), ...update };
+      const base = current[id] ?? { text: "", targetArtifactId: null, targetRevisionId: null };
+      const next = { ...base, ...(typeof update === "function" ? update(base) : update) };
       saveDraft(id, next); return { ...current, [id]: next };
     });
   };
   const updateDraftText = (text: string) => updateDraft({ text });
   const unbindTarget = () => updateDraft({ targetArtifactId: null, targetRevisionId: null });
+  const removeLibrarySelection = (index: number) => updateDraft({ librarySelections: currentDraft.librarySelections?.filter((_, i) => i !== index) ?? [] });
+  // §11.7 来源9：库选材并入当前会话草稿后回该会话；无当前会话时并入“新对话”草稿
+  // （下一条消息发送时沿用现有建会话流程携带），不猜最近会话、不导航到来源对话。
+  const bringLibraryPicks = (picks: LibraryPick[]) => {
+    if (!picks.length) return;
+    updateDraft(draft => ({ librarySelections: mergeLibraryPicks(draft.librarySelections, picks) }));
+    setPage("chat");
+  };
   const bindTarget = (artifact: ArtifactHead) => updateDraft({ targetArtifactId: artifact.id, targetRevisionId: selection?.revisionId ?? artifact.revisionId, proposalId: null, proposalDigest: null });
   const model = bootstrap?.models.find(entry => entry.kind === "text" && entry.isDefault);
   // render没有模型条目；具体提案能否受理由服务端实际目录与受理事务判断。
@@ -507,58 +519,58 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       await refreshSnapshot(run.conversationId);
     }
   };
-  // 阶段认可走 MessageInput.stageConfirmation 原入口：每个（事项, 动作, next, 准确稿件）一个持久
-  // commandId，结果未知时原请求重试可回放；按钮独立构造请求，不动用户未发送的聊天草稿。
-  // 返回是否成功，供“认可内容，查看对应方案”这类成功后跳转的按钮使用。
-  const confirmStage = async (work: Work, action: StageAction, subject: StageConfirmation["subject"], label: string, next?: "prepare_production"): Promise<boolean> => {
+  // 组审阅认可与普通继续共用一条面板命令通道：每个（组, 命令）一个持久 commandId，
+  // 结果未知时原请求重试可回放；按钮独立构造请求，不动用户未发送的聊天草稿。
+  const sendPanelCommand = async (work: Work, group: ReviewGroup, label: string, keySuffix: string,
+    reviewConfirmation: ReviewConfirmation | null, failureHint: string): Promise<boolean> => {
     const id = view.conversation.id;
-    const variant = next ?? "plain";
-    const subjectKey = subject.kind === "artifact_revision" ? `${subject.artifactId}:${subject.revisionId}` : `msg:${subject.messageId}`;
-    const busy = `${work.id}:${action}:${variant}`;
-    if (!id || stageBusyKeys.includes(busy)) return false;
-    const storageKey = `vf:agent-stage:${id}:${work.id}:${action}:${variant}:${subjectKey}`;
-    const stageCommand: StageConfirmation = next
-      ? { workId: work.id, action, subject, next }
-      : { workId: work.id, action, subject };
+    // 组内任一认可在途时整组禁用：并发确认会互相覆盖彼此读取的条目状态。
+    const busy = `${work.id}:${group.id}`;
+    if (!id || reviewBusyKeys.includes(busy)) return false;
+    const storageKey = `vf:agent-review:${id}:${busy}:${keySuffix}`;
+    const buildCommand = (): MessageInput => ({
+      commandId: agentApi.newCommandId(), text: label, target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null,
+      reviewConfirmation,
+      // 普通继续附本条消息指向的组（F05）：不带确认时不靠服务端猜当前作品；
+      // 与 reviewConfirmation/proposalRef/target 互斥；已有缓存保持原 body，缺目标的旧继续命令提示核对。
+      reviewContext: reviewConfirmation ? null : { workId: work.id, groupId: group.id },
+    });
     let command: MessageInput;
     try {
       const saved = localStorage.getItem(storageKey);
-      command = saved ? JSON.parse(saved) as MessageInput : {
-        commandId: agentApi.newCommandId(), text: label, target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null, stageConfirmation: stageCommand,
-      };
+      command = saved ? JSON.parse(saved) as MessageInput : buildCommand();
+      if (saved && keySuffix === "continue" && command.reviewConfirmation == null && command.reviewContext == null) {
+        setActionError("这是旧版留下的继续操作。请先查看原对话，确认是否已经继续；需要接着做时，可在聊天中说明要继续的作品和分组。");
+        return false;
+      }
       if (!saved) localStorage.setItem(storageKey, JSON.stringify(command));
     } catch {
-      command = { commandId: agentApi.newCommandId(), text: label, target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null, stageConfirmation: stageCommand };
+      command = buildCommand();
     }
-    setStageBusyKeys(current => [...current, busy]);
+    setReviewBusyKeys(current => [...current, busy]);
     try {
       await agentApi.sendMessages(id, command);
       localStorage.removeItem(storageKey);
       await refreshSnapshot(id);
       return true;
     } catch (error) {
-      // 4xx 说明请求本身被拒（旧稿/在途等），丢弃原命令；结果未知时保留以便原请求重试。
+      // 4xx 说明请求本身被拒（稿已前进/条目状态变化等），丢弃原命令；结果未知时保留以便原请求重试。
       if (error instanceof AgentApiError && error.payload.status < 500) localStorage.removeItem(storageKey);
-      if (activeId.current === id) setActionError(error instanceof Error ? error.message : "认可结果未确认，可重试。");
+      if (activeId.current === id) setActionError(error instanceof Error ? error.message : failureHint);
       return false;
-    } finally { setStageBusyKeys(current => current.filter(key => key !== busy)); }
+    } finally { setReviewBusyKeys(current => current.filter(key => key !== busy)); }
   };
-
-  const prepareProduction = async (work: Work) => {
-    const id = view.conversation.id;
-    const plan = work.stages.plan.draft;
-    if (plan?.kind !== "artifact_revision") return;
-    setPreparingWorkId(work.id);
-    try {
-      await agentApi.sendMessages(id, messageInput(
-        `请按「${work.title}」当前这份已认可的画面与声音方案准备制作，展示本次费用让我确认。方案内容不变，不需要重新交稿或认可；现在先不提交生成。`,
-        { artifactId: plan.artifactId, revisionId: plan.revisionId, workId: work.id },
-      ));
-      await refreshSnapshot(id);
-    } catch (error) {
-      if (activeId.current === id) setActionError(error instanceof Error ? error.message : "准备制作失败。");
-    } finally { setPreparingWorkId(null); }
+  const confirmReview = (work: Work, group: ReviewGroup, action: ReviewAction, entries: readonly ReviewEntry[], label: string): Promise<boolean> => {
+    const subjectKey = entries.map(entry => entry.source.kind === "artifact_revision"
+      ? `${entry.source.artifactId}:${entry.source.revisionId}` : `msg:${entry.source.messageId}`).join("|");
+    const confirmationItems = entries.map(entry => ({ itemId: entry.itemId, source: entry.source }));
+    return sendPanelCommand(work, group, label, `${action}:${subjectKey}`,
+      { workId: work.id, groupId: group.id, action, items: [confirmationItems[0]!, ...confirmationItems.slice(1)] },
+      "认可结果未确认，可重试。");
   };
+  // 必选项全部认可后的普通继续：一条不带 reviewConfirmation 的普通消息，不补确认、不定稿。
+  const continueReview = (work: Work, group: ReviewGroup, label: string): Promise<boolean> =>
+    sendPanelCommand(work, group, label, "continue", null, "继续结果未确认，可重试。");
 
   const sendMessage = async (mode: "new" | "steer" = "new", retry = false) => {
     if (sendingNow || sending.current.has(conversationId ?? "new")) return;
@@ -595,6 +607,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     const command = retry ? pendingSend[id]! : {
       ...messageInput(draft.text.trim(), mode === "steer" ? activeMessage?.target ?? null : target),
       proposalRef: draft.proposalId && draft.proposalDigest ? { proposalId: draft.proposalId, digest: draft.proposalDigest } : null,
+      // G4-2：作品库选材只随 new 请求携带（steer 是对在途请求的补充说明）；重试沿用原命令。
+      ...(mode === "new" && draft.librarySelections?.length ? { librarySelections: draft.librarySelections.map(pick => pick.selection) } : {}),
       skillId: mode === "steer" ? null : skillId, mode, steerRequestId: mode === "steer" ? view.activeRequestId : null,
     };
     setActionError(""); sending.current.add(id); setSendingNow(true);
@@ -618,8 +632,13 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
           || pending.targetArtifactId !== (submittedTarget?.artifactId ?? null)
           || pending.targetRevisionId !== (submittedTarget?.revisionId ?? null)
           || (pending.proposalId ?? null) !== (command.proposalRef?.proposalId ?? null)
-          || (pending.proposalDigest ?? null) !== (command.proposalRef?.digest ?? null)) return current;
-        clearDraft(id); return { ...current, [id]: { text: "", targetArtifactId: null, targetRevisionId: null } };
+          || (pending.proposalDigest ?? null) !== (command.proposalRef?.digest ?? null)
+          || JSON.stringify(pending.librarySelections ?? []) !== JSON.stringify(draft.librarySelections ?? [])) return current;
+        // steer 不携带库选材：chips 属于下一条 new 请求，不被干预消耗；new 发送成功即消费。
+        const keepPicks = command.mode === "new" ? [] : pending.librarySelections ?? [];
+        const reset: DraftState = { text: "", targetArtifactId: null, targetRevisionId: null, librarySelections: keepPicks };
+        if (keepPicks.length) saveDraft(id, reset); else clearDraft(id);
+        return { ...current, [id]: reset };
       });
       await refreshSnapshot(id);
       // 从定位窗口发出的新消息晚于锚点，不进当前窗口；发完即回到最新窗口看到自己的消息。
@@ -635,7 +654,10 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     const id = view.conversation.id;
     if (!id || materialAdoptDisabled || sending.current.has(id)) return;
     const work = view.works.find(item => item.id === batch.workId);
-    const source = work?.stages.plan.draft ?? work?.stages.content.draft;
+    // 采用素材的默认对象：优先方案稿，其次内容稿（与旧阶段语义一致，来源改为审阅组事项）。
+    const workItems = work ? work.reviewGroups.flatMap(group => group.items) : [];
+    const source = workItems.find(item => item.role === "plan" && item.draft != null)?.draft
+      ?? workItems.find(item => item.role === "content" && item.draft != null)?.draft ?? null;
     const target = work && source?.kind === "artifact_revision" ? { artifactId: source.artifactId, revisionId: source.revisionId, workId: work.id } : null;
     const linkLabel = (text: string) => text.replaceAll("[", "［").replaceAll("]", "］").replace(/\s+/g, " ");
     const batchUrl = new URL(`/api/agent/v1/material-batches/${encodeURIComponent(batch.batchId)}`, window.location.origin);
@@ -737,11 +759,6 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     setRevisionCache(current => ({ ...current, ...refs.revisions }));
   };
   const feedback = useFeedbackDrafts(conversationId, id => refreshSnapshot(id), setActionError);
-  // 明确失败过的准备请求（按消息 target 指向的事项）：再次准备按“重新准备费用”表述，
-  // 不要求重新认可；结果未知/成功的不算。
-  const failedPrepareWorkIds = view.messages
-    .filter(message => message.role === "user" && message.state === "failed" && message.target?.workId)
-    .map(message => message.target!.workId!);
   const feedbackTarget = selection ? { ...selection, workId: null } : null;
   const { text: feedbackDraft, saved: feedbackSaved, busy: savingFeedback } = feedback.forTarget(feedbackTarget);
   const updateFeedback = (text: string) => { if (feedbackTarget) feedback.edit(feedbackTarget, text); };
@@ -820,28 +837,33 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     catch (error) { setActionError(error instanceof Error ? error.message : "读取失败。"); }
   };
 
-  // 正式阶段的卡片仍在双区阅读，不能绕进独立查看器。
-  const selectedStage = useMemo(() => {
+  // 正式审阅组的卡片仍在组面板双区阅读，不能绕进独立查看器。
+  const selectedReview = useMemo(() => {
     if (!selection) return null;
     for (const work of view.works) {
-      for (const stage of ["content", "plan", "video"] as const) {
-        if ([work.stages[stage].draft, work.stages[stage].approved].some(source =>
+      for (const group of work.reviewGroups) for (const item of group.items) {
+        if ([item.draft, item.approved].some(source =>
           source?.kind === "artifact_revision" && source.artifactId === selection.artifactId)) {
-          return { ...selection, workId: work.id, stage };
+          return { ...selection, workId: work.id, groupId: group.id, itemId: item.id };
         }
       }
-      const artifact = view.artifacts.find(item => item.id === selection.artifactId);
-      if (artifact?.workId === work.id && artifact.kind === "video") return { ...selection, workId: work.id, stage: "video" as const };
+      // 视频产物兜底：归属本作品但不被任何事项引用时，落到最近建立的视频角色事项。
+      const artifact = view.artifacts.find(candidate => candidate.id === selection.artifactId);
+      if (artifact?.workId === work.id && artifact.kind === "video") {
+        const videoItem = work.reviewGroups.flatMap(group => group.items).filter(item => item.role === "video").pop();
+        const group = work.reviewGroups.find(target => target.items.includes(videoItem!));
+        if (videoItem && group) return { ...selection, workId: work.id, groupId: group.id, itemId: videoItem.id };
+      }
     }
     return null;
   }, [selection, view.works, view.artifacts]);
   useEffect(() => {
-    if (!selectedStage) return;
-    setSelectedWorkId(selectedStage.workId);
-    setStageNavigation(selectedStage);
+    if (!selectedReview) return;
+    setSelectedWorkId(selectedReview.workId);
+    setReviewNavigation(selectedReview);
     setSelection(null);
-  }, [selectedStage]);
-  const openArtifactHead = selection && !selectedStage ? view.artifacts.find(item => item.id === selection.artifactId) ?? null : null;
+  }, [selectedReview]);
+  const openArtifactHead = selection && !selectedReview ? view.artifacts.find(item => item.id === selection.artifactId) ?? null : null;
   const openRevision = selection ? revisionCache[`${selection.artifactId}:${selection.revisionId}`] ?? null : null;
   // 独立查看器与阶段面板一致：历史修订只读，意见/修改只针对最新稿（服务端合同只接受 head）。
   const viewingOldRevision = Boolean(selection && openArtifactHead && openArtifactHead.revisionId !== selection.revisionId);
@@ -921,7 +943,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         <select className="agent-compact-nav" aria-label="选择对话" value={conversationId ?? ""} onChange={event => event.target.value ? openConversation(event.target.value) : void createConversation()}><option value="">新对话</option>{conversations.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select>
         <span className="agent-runtime-label">{model?.availability === "configured" ? `${model.name}${isSimulated ? " · 模拟媒体" : ""}` : "文本模型待配置"}</span>
       </header>
-      <FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} />
+      <FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} onLibraryBringIn={bringLibraryPicks} libraryBringTarget={conversationId ? "current" : "new"} />
       <div className="agent-chat-workspace" hidden={page !== "chat"}>
       <Group className="agent-main" orientation="horizontal" id="vf-agent-panels" onLayoutChanged={layout => { if (layout["agent-chat"]) savePanelLayout(layout); }} defaultLayout={panelLayout ?? undefined}>
         <Panel id="agent-chat" defaultSize="390px" minSize="320px" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
@@ -958,15 +980,22 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               {activeRuns.map(run => <div className="agent-activity" key={run.id}><button type="button" onClick={() => void openRun(run.id)}><span className="agent-live-dot" />{run.title} · {run.state === "queued" ? "等待制作" : run.state === "cancel_requested" ? "确认取消中" : run.state === "unknown" ? "待核实" : "制作中"}<ChevronRight /></button></div>)}
               {currentDraft.proposalId ? <div className="agent-target-chip"><span>回复《{view.proposals.find(p => p.id === currentDraft.proposalId)?.spec.title ?? "已选提案"}》 · 制作请发送「确认制作」，也可继续讨论</span><button type="button" onClick={() => updateDraft({ proposalId: null, proposalDigest: null })} aria-label="清除提案引用"><X /></button></div> : null}
               {currentDraft.targetArtifactId ? <div className="agent-target-chip">针对：{view.artifacts.find(item => item.id === currentDraft.targetArtifactId)?.title ?? "已选作品"}<button type="button" onClick={unbindTarget} aria-label="清除修改目标"><X /></button></div> : null}
+              {currentDraft.librarySelections?.length ? <div className="agent-library-chips">
+                {currentDraft.librarySelections.map((pick, index) => <span className="agent-library-chip" key={index}>作品库 · {pick.label}<button type="button" onClick={() => removeLibrarySelection(index)} aria-label={`移除 ${pick.label}`}><X /></button></span>)}
+              </div> : null}
               <div className="agent-composer-card">
                 <textarea ref={composerInput} value={currentDraft.text} onChange={event => updateDraftText(event.target.value)} onKeyDown={event => { if (canSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="说说想法，改改作品，或换件事聊…" aria-label="消息输入" aria-describedby="agent-composer-hint" />
                 <div className="agent-composer-tools"><label className="agent-skill-selector"><Sparkles /><select aria-label="指定 Skill" disabled={!!currentDraft.proposalId || Boolean(skillMutation)} value={skillId ?? ""} onChange={event => { setSkillId(event.target.value || null); setSkillNotice(""); }}><option value="">Skill · 自动选择</option>{bootstrap?.skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
+                  <button type="button" className="agent-library-picker-trigger" aria-label="从作品库选择" title="从作品库选择素材或制作文件" disabled={Boolean(skillMutation)} ref={libraryPickerTrigger} onClick={() => { setSkillNotice(""); setLibraryPickerOpen(true); }}><Film aria-hidden="true" />作品库</button>
                   <div className="agent-send-actions">{view.activeRequestId ? <button type="button" disabled={!!currentDraft.proposalId || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]} onClick={() => void sendMessage("steer")}>干预本轮</button> : null}<button className="agent-send" type="button" aria-label="发送" onClick={() => void sendMessage()} disabled={!canSend || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]}><ArrowUp /></button></div>
                 </div>
               </div>
               {canSend ? <span id="agent-composer-hint" className="agent-composer-hint">Enter 发送 · Shift + Enter 换行</span> : <div id="agent-composer-hint" className="agent-config-note" role="status">{bootstrap ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : "可以先写草稿。"}</div>}
               {conversationId && pendingSend[conversationId] && !sendingNow ? <button type="button" className="agent-retry-send" onClick={() => void sendMessage("new", true)}>重试上次发送（保留原请求）</button> : null}
             </footer>
+            {libraryPickerOpen ? <LibraryPickerDialog
+              onClose={() => { setLibraryPickerOpen(false); libraryPickerTrigger.current?.focus(); }}
+              onConfirm={picks => updateDraft(draft => ({ librarySelections: mergeLibraryPicks(draft.librarySelections, picks) }))} /> : null}
           </section>
         </Panel>
         <Separator className="agent-resizer" aria-label="调整对话与预览的宽度" title="拖动或用左右方向键调整宽度" />
@@ -975,13 +1004,13 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
             <div className="agent-workspace-status"><Clock3 />{view.activeRequestId ? "新产出会留在这里" : "慢慢看，不限时"}{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}<button type="button" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"} title={focusPreview ? "返回聊天与作品" : "展开作品区"} onClick={() => focusPreview ? chatPanel.current?.expand() : chatPanel.current?.collapse()}>{focusPreview ? <ArrowLeft /> : <Maximize2 />}</button></div>
             {view.artifacts.length ? <div className="agent-artifact-tabs" aria-label="当前会话产物">{view.artifacts.map(artifact => <button type="button" key={artifact.id} aria-label={artifact.title} title={artifact.title} aria-pressed={!inspectedRun && selection?.artifactId === artifact.id} onClick={() => openArtifact(artifact.id)}><span className="agent-artifact-icon"><ArtifactIcon kind={artifact.kind} /></span><span><strong>{artifact.title}</strong><small>{stageOwnedLabel(view.works, artifact)}就绪</small></span>{notices.byConversation.get(conversationId ?? "")?.includes(artifact.id) ? <span className="agent-output-badge">有更新</span> : null}</button>)}{view.artifactCursor ? <button type="button" onClick={() => void loadMoreOutputs("artifacts")}>更多产物</button> : null}</div> : null}
             <div className="agent-workspace-scroll" data-mode={workMode ? "work" : undefined}>
-              {selectedRun ? <article className="agent-paper"><header className="agent-preview-header"><h2>制作记录</h2><button type="button" onClick={() => { openIntent.current++; setInspectedRun(null); }}>回到作品</button></header><RunCard key={selectedRun.id} run={selectedRun} onCancel={r => void cancelProduction(r)} onOpen={openArtifact} simulated={isSimulated} proposals={view.proposals} artifacts={view.artifacts} revisions={revisionCache} onRetry={() => void retryReferences()} />
+              {selectedRun ? <article className="agent-paper"><header className="agent-preview-header"><h2>制作记录</h2><button type="button" onClick={() => { openIntent.current++; setInspectedRun(null); }}>回到作品</button></header><RunCard key={selectedRun.id} run={selectedRun} onCancel={r => void cancelProduction(r)} onOpen={openArtifact} simulated={isSimulated} proposals={view.proposals} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onRetry={() => void retryReferences()} />
                 {view.runs.length > 1 || view.runCursor ? <details className="agent-run-history"><summary>其他制作记录</summary><div className="agent-production-actions">{view.runs.filter(run => run.id !== selectedRun.id).map(run => <button key={run.id} type="button" onClick={() => void openRun(run.id)}>{run.title}</button>)}{view.runCursor ? <button type="button" onClick={() => void loadMoreOutputs("runs")}>更早的制作</button> : null}</div></details> : null}</article>
               : openArtifactHead ? <article className="agent-paper">
                 <header className="agent-preview-header"><h2>{openArtifactHead.title}</h2><div className="agent-paper-tools">{view.works.length ? <button className="agent-text-link" type="button" onClick={backToWork}>回到创作</button> : null}<details className="agent-version-picker"><summary>{stageOwnedLabel(view.works, openArtifactHead)} v{openRevision?.revisionNumber ?? "…"}</summary><div>{openRevision?.baseRevisionId ? <button type="button" onClick={() => openArtifact(openArtifactHead.id, openRevision.baseRevisionId!)}>上一版</button> : null}{selection?.revisionId !== openArtifactHead.revisionId ? <button type="button" onClick={() => openArtifact(openArtifactHead.id)}>查看最新 v{openArtifactHead.revisionNumber}</button> : <span>当前最新版本</span>}</div></details>{viewingOldRevision
                   ? <span className="agent-stage-muted">历史版本仅阅读</span>
                   : <button className="agent-feedback-trigger" type="button" disabled={lockedArtifacts.has(openArtifactHead.id)} onClick={discussArtifact}><Pencil />{lockedArtifacts.has(openArtifactHead.id) ? "制作中 · 输入已锁定" : "提意见"}</button>}</div></header>
-                <div className="agent-preview-body">{openRevision ? openRevision.content.format === "markdown" ? <MarkdownBody content={openRevision.content} /> : <MediaPreview content={openRevision.content} simulated={isSimulated} /> : <div className="agent-preview-loading">正在读取…</div>}</div>
+                <div className="agent-preview-body">{openRevision ? openRevision.content.format === "markdown" ? <MarkdownBody content={openRevision.content} /> : openRevision.content.format === "media" ? <MediaPreview content={openRevision.content} simulated={isSimulated} /> : openRevision.content.format === "file" ? <FilePreview content={openRevision.content} /> : <ProjectPreview content={openRevision.content} /> : <div className="agent-preview-loading">正在读取…</div>}</div>
                 <footer className="agent-preview-actions">
                   {viewingOldRevision ? <><span className="agent-stage-muted">正在看历史版本，意见和修改请回到最新稿。</span>{feedbackDraft ? <label>旧稿的未发送意见<textarea aria-label="意见" readOnly value={feedbackDraft} /></label> : null}</> : <>
                     <button className="agent-text-link" type="button" onClick={() => setFeedbackOpen(value => !value)}>{lockedArtifacts.has(openArtifactHead.id) ? "留下下一版意见" : "只记录意见"}</button>
@@ -1002,21 +1031,21 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               {view.works.length ? <div style={{ display: workMode ? "contents" : "none" }}><WorkStagePanel key={conversationId}
                 conversationId={conversationId!}
                 works={view.works} selectedWorkId={selectedWorkId} onSelectWork={setSelectedWorkId}
-                navigation={stageNavigation}
+                navigation={reviewNavigation}
                 artifacts={view.artifacts} revisions={revisionCache}
-                proposals={view.proposals} runs={view.runs} materialBatches={view.materialBatches}
+                runs={view.runs} materialBatches={view.materialBatches}
                 onAdoptMaterial={adoptMaterial} adoptDisabled={materialAdoptDisabled}
-                onConfirmStage={(work, action, subject, label, next) => confirmStage(work, action, subject, label, next)}
-                stageBusyKeys={stageBusyKeys} canContinueText={canSend}
-                onPrepareProduction={work => void prepareProduction(work)} preparing={preparingWorkId !== null || Boolean(view.activeRequestId)}
-                failedPrepareWorkIds={failedPrepareWorkIds}
-                onAccept={proposal => void acceptProposal(proposal)} accepting={accepting}
-                onOpenArtifact={openArtifact} onOpenRun={runId => void openRun(runId)}
+                onConfirmReview={(work, group, action, entries, label) => confirmReview(work, group, action, entries, label)}
+                onContinueReview={(work, group, label) => continueReview(work, group, label)}
+                reviewBusyKeys={reviewBusyKeys} canContinueText={canSend}
+                onOpenRun={runId => void openRun(runId)}
                 onEnsureRun={runId => void ensureRun(runId)} referenceErrors={referenceErrors}
                 feedback={feedback}
                 simulated={isSimulated} openBatchId={openBatchId}
+                onRevisionLoaded={revision => setRevisionCache(current =>
+                  ({ ...current, [`${revision.artifactId}:${revision.revisionId}`]: revision }))}
               /></div> : null}
-              {!workMode && view.proposals.length ? <details className="agent-proposals-list"><summary>制作提案 · {view.proposals.length}</summary>{view.proposals.map(proposal => <ProposalCard works={view.works} runs={view.runs} key={proposal.id} proposal={proposal} onAccept={p => void acceptProposal(p)} onReply={replyToProposal} busy={accepting.includes(proposal.id)} artifacts={view.artifacts} revisions={revisionCache} onOpen={openArtifact} onOpenRun={runId => void openRun(runId)} />)}{view.proposalCursor ? <button type="button" onClick={() => void loadMoreOutputs("proposals")}>更多提案</button> : null}</details> : null}
+              {!workMode && view.proposals.length ? <details className="agent-proposals-list"><summary>制作提案 · {view.proposals.length}</summary>{view.proposals.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} onAccept={p => void acceptProposal(p)} onReply={replyToProposal} busy={accepting.includes(proposal.id)} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onOpen={openArtifact} onOpenRun={runId => void openRun(runId)} />)}{view.proposalCursor ? <button type="button" onClick={() => void loadMoreOutputs("proposals")}>更多提案</button> : null}</details> : null}
             </div>
           </section>
         </Panel>
@@ -1050,6 +1079,9 @@ function MessageRow({ works, message, anchored, onOpenArtifact, artifacts, propo
       {message.feedback ? <span className="agent-feedback-tag">{message.feedback.disposition === "next_version" ? "意见（留给下一版）" : "修改意见"}</span> : null}
       {targetTitle ? <span className="agent-message-target">针对：{targetTitle}{segment ? ` · 片段「${segmentTitle ?? "已不在当前版本"}」` : ""}</span> : null}
       <MarkdownText text={message.text} />
+      {message.librarySelections.length ? <div className="agent-library-chips">
+        {message.librarySelections.map((selection, index) => <span className="agent-library-chip" key={index}>作品库 · {selection.source.kind === "project_file" ? selection.source.relativePath : "素材"}</span>)}
+      </div> : null}
       {message.state !== "completed" ? <span className="agent-message-state">{{ queued: "已排队", running: "处理中", failed: "未完成", stopped: "已停止" }[message.state]}</span> : null}
       <div className="agent-references">{message.references.artifacts.map(reference => {
         const artifact = artifacts.find(item => item.id === reference.artifactId);
@@ -1068,7 +1100,7 @@ function MessageRow({ works, message, anchored, onOpenArtifact, artifacts, propo
       })}</div>
       {message.references.proposalIds.map(id => {
         const proposal = proposals.find(item => item.id === id);
-        return proposal ? <ProposalCard works={works} runs={runs} key={id} proposal={proposal} onAccept={onAccept} onReply={onReply} busy={accepting.includes(id)} artifacts={artifacts} revisions={revisions} onOpen={onOpenArtifact} onOpenRun={onOpenRun} /> : unavailable(`proposal:${id}`, "制作提案");
+        return proposal ? <ProposalCard key={id} proposal={proposal} onAccept={onAccept} onReply={onReply} busy={accepting.includes(id)} artifacts={artifacts} revisions={revisions} works={works} onOpen={onOpenArtifact} onOpenRun={onOpenRun} /> : unavailable(`proposal:${id}`, "制作提案");
       })}
     </div>
   </div>;

@@ -87,6 +87,20 @@ export async function probeImageFile(file: string, signal?: AbortSignal): Promis
   return { width: image.width, height: image.height, mimeType: image.codec_name === "png" ? "image/png" : "image/jpeg" };
 }
 
+// read_artifact 的视频抽帧：按反馈目标毫秒位抽单帧 PNG；不执行任意命令、不接受模型参数。
+// 先在 FFmpeg 内把帧限制到 SDK 的默认缩放上限，避免原始超大 PNG 在 resizeImage 前顶满 stdout 缓冲区。
+export async function extractVideoFrames(file: string, timesMs: readonly number[], signal?: AbortSignal): Promise<Buffer[]> {
+  return Promise.all(timesMs.map(async timeMs => {
+    const { stdout } = await run("ffmpeg", [
+      "-v", "error", "-ss", (Math.max(0, timeMs) / 1000).toFixed(3), "-i", file,
+      "-vf", "scale=w='min(iw,2000)':h='min(ih,2000)':force_original_aspect_ratio=decrease",
+      "-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1",
+    ], { timeout: 30_000, maxBuffer: 16 * 1024 * 1024, encoding: "buffer", ...(signal ? { signal } : {}) });
+    if (!stdout.length) throw new InvalidVideoFile("指定时间点没有可抽取的画面。");
+    return stdout;
+  }));
+}
+
 // §9.3：ffprobe 只读元数据；再用 ffmpeg 实际解码一遍，截断/坏字节 MP3 必须在这里被拒绝，
 // 不相信扩展名或供应商 extra_info 代替文件本身。
 export async function probeAudioFile(file: string, signal?: AbortSignal): Promise<AudioFileFacts> {
@@ -112,6 +126,46 @@ export async function probeAudioFile(file: string, signal?: AbortSignal): Promis
   const duration = Number(parsed.format?.duration ?? Number.NaN);
   if (!Number.isFinite(duration) || duration <= 0) throw new InvalidAudioFile("音频时长不可读。");
   return { durationMs: Math.round(duration * 1000), sampleRate: Number(audio.sample_rate), channels: audio.channels ?? 0, mimeType: "audio/mpeg" };
+}
+
+export interface AudioOutputFacts {
+  durationMs: number;
+  sampleRate: number;
+  channels: number;
+  mimeType: "audio/mpeg" | "audio/wav";
+}
+
+export class InvalidAudioOutput extends Error {}
+
+// 已登记音频（code_project 成品与本地渲染的音乐/旁白输入）核验：契约只允许 wav 与 mp3，
+// 事实按文件本身核对；与 probeAudioFile 的供应商 MP3 旁白契约分开，不改变其语义。
+export async function probeAudioOutputFile(file: string, signal?: AbortSignal): Promise<AudioOutputFacts> {
+  let stdout: string;
+  try {
+    ({ stdout } = await run("ffprobe", [
+      "-v", "error", "-select_streams", "a:0",
+      "-show_entries", "stream=codec_name,channels,sample_rate:format=duration,format_name", "-of", "json", file,
+    ], { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) }));
+    await run("ffmpeg", ["-v", "error", "-xerror", "-i", file, "-map", "0:a:0", "-f", "null", "-"],
+      { timeout: 60_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) });
+  } catch (error) {
+    if (typeof (error as { code?: unknown }).code === "number") throw new InvalidAudioOutput("音频无法解码。");
+    throw error;
+  }
+  const parsed = JSON.parse(stdout) as {
+    streams?: { codec_name?: string; channels?: number; sample_rate?: string }[];
+    format?: { duration?: string; format_name?: string };
+  };
+  const audio = parsed.streams?.[0];
+  const container = parsed.format?.format_name?.split(",") ?? [];
+  const wav = container.includes("wav");
+  const mp3 = audio?.codec_name === "mp3" && container.includes("mp3");
+  if (!audio || !(wav || mp3)) throw new InvalidAudioOutput("输出不是 WAV 或 MP3 音频。");
+  const duration = Number(parsed.format?.duration ?? Number.NaN);
+  if (!Number.isFinite(duration) || duration <= 0) throw new InvalidAudioOutput("音频时长不可读。");
+  const sampleRate = Number(audio.sample_rate);
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !audio.channels) throw new InvalidAudioOutput("音频采样率或声道不可读。");
+  return { durationMs: Math.round(duration * 1000), sampleRate, channels: audio.channels, mimeType: wav ? "audio/wav" : "audio/mpeg" };
 }
 
 export async function probeVideoFile(file: string, ffprobePath = "ffprobe", signal?: AbortSignal): Promise<VideoFileFacts> {
@@ -197,8 +251,10 @@ export async function probeRenderInputs(
   const probes = new Map<string, RenderFileProbe>();
   for (const [blobId, { digest, role }] of targets) {
     try {
-      // 按槽位角色探测：旁白槽是音频事实，图片槽核实实际解码，视频槽是视频事实（timed/narrated 画面允许自带原声，执行时明确丢弃）。
-      if (role === "audio") probes.set(blobId, { ok: true, kind: "audio", durationMs: (await probeAudioFile(blobs.filePath(digest))).durationMs });
+      // 按槽位角色探测：音频槽（供应商旁白 MP3 与本地登记 WAV 音乐）按文件本身核对解码事实，
+      // 哪种槽位接受哪种封装由 prepare 的 MIME 边界决定；图片槽核实实际解码，视频槽是视频事实
+      // （timed/narrated 画面允许自带原声，执行时明确丢弃）。
+      if (role === "audio") probes.set(blobId, { ok: true, kind: "audio", durationMs: (await probeAudioOutputFile(blobs.filePath(digest))).durationMs });
       else if (role === "image") {
         const facts = await probeImageFile(blobs.filePath(digest));
         probes.set(blobId, { ok: true, kind: "image", width: facts.width, height: facts.height });
@@ -207,7 +263,7 @@ export async function probeRenderInputs(
         probes.set(blobId, { ok: true, kind: "video", ...facts });
       }
     } catch (error) {
-      if (!(error instanceof InvalidVideoFile || error instanceof InvalidAudioFile || error instanceof InvalidImageFile)) throw error;
+      if (!(error instanceof InvalidVideoFile || error instanceof InvalidAudioFile || error instanceof InvalidAudioOutput || error instanceof InvalidImageFile)) throw error;
       probes.set(blobId, { ok: false, reason: `媒体文件不可读：${String(error instanceof Error ? error.message : error)}` });
     }
   }

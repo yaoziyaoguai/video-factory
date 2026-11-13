@@ -55,6 +55,8 @@ export interface MessageRow {
   target_json: string | null;
   references_json: string;
   feedback_json: string | null;
+  library_selections_json: string | null;
+  review_context_json: string | null;
   created_seq: number;
   created_at: string;
   updated_at: string;
@@ -78,6 +80,8 @@ export function rowToMessage(row: MessageRow): Message {
     references: { ...emptyReferences(), ...JSON.parse(row.references_json) as MessageReferences },
     kind: row.kind,
     feedback: row.feedback_json ? (JSON.parse(row.feedback_json) as Message["feedback"]) : null,
+    librarySelections: row.library_selections_json ? (JSON.parse(row.library_selections_json) as Message["librarySelections"]) : [],
+    reviewContext: row.review_context_json ? (JSON.parse(row.review_context_json) as Exclude<Message["reviewContext"], undefined>) : null,
   };
 }
 
@@ -265,15 +269,19 @@ export function insertMessage(
     role: MessageRow["role"]; kind: MessageRow["kind"]; state: MessageRow["state"];
     text: string; target: Target | null; references: MessageReferences; createdSeq: number;
     feedback?: Message["feedback"];
+    librarySelections?: Message["librarySelections"];
+    reviewContext?: Message["reviewContext"];
   },
 ): void {
   db.prepare(
     `INSERT INTO messages(id, conversation_id, owner_id, request_id, role, kind, state, revision, text, target_json,
-      references_json, feedback_json, created_seq, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+      references_json, feedback_json, library_selections_json, review_context_json, created_seq, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(input.id, input.conversationId, input.ownerId, input.requestId, input.role, input.kind, input.state,
     input.text, input.target ? JSON.stringify(input.target) : null, JSON.stringify(input.references),
-    input.feedback ? JSON.stringify(input.feedback) : null, input.createdSeq, now, now);
+    input.feedback ? JSON.stringify(input.feedback) : null,
+    input.librarySelections ? JSON.stringify(input.librarySelections) : null,
+    input.reviewContext ? JSON.stringify(input.reviewContext) : null, input.createdSeq, now, now);
   insertEvent(db, now, {
     conversationId: input.conversationId, ownerId: input.ownerId, kind: "message.changed",
     entityId: input.id, entityVersion: 1,

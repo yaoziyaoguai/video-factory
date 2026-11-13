@@ -26,7 +26,7 @@ import {
 import { readProviderConnections, saveProviderConnection } from "../src/server/agent/provider-connections.js";
 import { attemptsFor, runRow, specFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
-import { bindPreparedPlan, seedPlanStageWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { toolIntentOf } from "./helpers/tool-args.js";
 import { FakeRealtimeHub } from "./helpers/agent-openai-media.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
@@ -254,7 +254,7 @@ it("T7-06 场景④：素材正式交付后下一请求准备有声提案，一�
     await sendChat(runtime, conversation.id, "用这段素材配旁白");
     assert.equal(countOf(runtime, "proposals"), 0, "交付关闭本请求，不暗中准备提案");
     // 第二条请求（用户明确要求）：准备 speech+render 有声提案。
-    const planWork = seedPlanStageWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山脊晨光有声版");
+    const confirmedWork = seedConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "山脊晨光有声版");
     const specOf = (): ProductionIntent => {
       const artifacts = runtime.service.snapshot("local-owner", conversation.id).artifacts.items;
       const narrationArtifact = artifacts.find(item => item.title === "旁白文本")!;
@@ -264,15 +264,16 @@ it("T7-06 场景④：素材正式交付后下一请求准备有声提案，一�
       const inputs = [{ kind: "artifact_revision" as const, artifactId: material.artifactId, revisionId: material.revisionId, digest: material.digest },
         { kind: "operation_output" as const, producerOperationId: "speech-1", outputSlot: "speech-1" }] as ProductionIntent["operations"][number]["inputs"];
       const parameters: Extract<RenderParameters, { assembly: "narrated_concat" }> = { assembly: "narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24, videoInputSlots: [0], narrationInputSlot: 1, durationPolicy: "preserve_all" };
-      return { workId: planWork.workId, title: "山脊晨光有声版",
-        inputRevisions: [material, narration].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+      return { workId: confirmedWork.workId, title: "山脊晨光有声版",
+        inputSources: [material, narration].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+        reviewInputs: [confirmedWork.reviewInput], purpose: "production", scope: "山脊晨光有声版整片制作",
         operations: [
           { operationId: "speech-1", outputSlot: "speech-1", kind: "speech", model: speechBinding,
             inputs: [{ kind: "artifact_revision", artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }],
             maxCreateAttempts: 1 as const, parameters: { voiceId: "marin", format: "mp3" } },
           { operationId: "render", outputSlot: "final", kind: "render" as const, model: null, inputs, maxCreateAttempts: 1 as const, parameters },
         ],
-        finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 40 } };
+        finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 40 } };
     };
     runtime.host.faux?.setResponses([
       () => fauxAssistantMessage([fauxToolCall("prepare_production", { spec: JSON.parse(JSON.stringify(toolIntentOf(specOf()))) })]),
@@ -283,7 +284,6 @@ it("T7-06 场景④：素材正式交付后下一请求准备有声提案，一�
     const proposal = (await runtime.service.readProposal("local-owner", proposalRow.id)) as Proposal;
     assert.equal(proposal.state, "ready");
     assert.match(proposal.priceDisclosure, /使用旁白替换原声/);
-    bindPreparedPlan(runtime.database, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, proposal, planWork);
     // 第三条请求：用户确认 → 后台制作有声成片。
     runtime.host.faux?.setResponses([fauxAssistantMessage("已开始制作。")]);
     const confirmed = await sendChat(runtime, conversation.id, "确认制作", { proposalRef: { proposalId: proposal.id, digest: proposal.digest } });
@@ -389,15 +389,15 @@ it("T7-05 场景③：制作进行中另聊热点并切默认模型，旧制作�
     // 制作：无声拼接在后台执行（慢包装让执行可观察）。
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "制作与切换" }).conversation;
     const material = mediaRevision(runtime, conversation.id, readFileSync(path.join(directory, "clip.mp4")), "video/mp4", 1200);
-    const planWork = seedPlanStageWork(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "后台拼接");
-    const intent: ProductionIntent = { workId: planWork.workId, title: "后台拼接",
-      inputRevisions: [{ artifactId: material.artifactId, revisionId: material.revisionId }] as unknown as ProductionIntent["inputRevisions"],
+    const confirmed = seedConfirmedWork(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "后台拼接");
+    const intent: ProductionIntent = { workId: confirmed.workId, title: "后台拼接",
+      inputSources: [{ kind: "artifact_revision", artifactId: material.artifactId, revisionId: material.revisionId, digest: material.digest }],
+      reviewInputs: [confirmed.reviewInput], purpose: "production", scope: "后台拼接整片制作",
       operations: [{ operationId: "render", outputSlot: "final", kind: "render", model: null,
         inputs: [{ kind: "artifact_revision", artifactId: material.artifactId, revisionId: material.revisionId, digest: material.digest }],
         maxCreateAttempts: 1, parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 } }],
-      finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
+      finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
     const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent });
-    bindPreparedPlan(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, proposal, planWork);
     const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
     pending = runtime.worker!.pollOnce();
     for (let i = 0; i < 500 && !existsSync(startedFile); i++) await new Promise(resolve => setTimeout(resolve, 20));

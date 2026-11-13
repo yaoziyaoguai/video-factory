@@ -1,9 +1,15 @@
-import type { ArtifactDraft, ArtifactHead, Conversation, FeedbackInput, MaterialBatchIndexItem, Message, Proposal, Run, Work, WorkStage } from "../../shared/agent/generated/contracts.js";
+import type { ArtifactDraft, ArtifactHead, Conversation, FeedbackInput, LibrarySelection, MaterialBatchIndexItem, Message, Proposal, Run, Work } from "../../shared/agent/generated/contracts.js";
 
 // 工作台状态合并规则（纯函数，可独立测试）：
 // - 一律按 id + 实体版本合并，旧版本不覆盖新版本（旧页晚到、重复乱序事件都吸收）；
 // - 页面 watermark 只用于继续翻页，不推进 SSE 游标；
 // - 新产出只产生提示：已打开的预览与输入绑定目标绝不被新结果抢占。
+
+/** 作品库“带入对话”的本地选材：label 只用于输入框展示，selection 才是发送契约。 */
+export interface LibraryPick {
+  label: string;
+  selection: LibrarySelection;
+}
 
 export interface DraftState {
   text: string;
@@ -11,6 +17,8 @@ export interface DraftState {
   targetRevisionId: string | null;
   proposalId?: string | null;
   proposalDigest?: string | null;
+  /** G4-2：随下一条 new 请求携带的作品库选材；steer 不携带。 */
+  librarySelections?: LibraryPick[];
 }
 
 export interface OutputNotices {
@@ -127,6 +135,16 @@ export function savePanelLayout(layout: PanelLayout): void {
 
 const DRAFT_PREFIX = "vf:agent-draft:";
 
+// G4-2 作品库“带入对话”可能连续触发（同一会话多次选材）：同一来源定稿下的同一素材/工程文件只保留一份。
+const libraryPickKey = (pick: LibraryPick) => pick.selection.source.kind === "artifact_revision"
+  ? `m:${pick.selection.source.revisionId}:${pick.selection.sourceVideo.revisionId}`
+  : `f:${pick.selection.source.relativePath}:${pick.selection.sourceVideo.revisionId}`;
+
+export function mergeLibraryPicks(existing: readonly LibraryPick[] | undefined, incoming: readonly LibraryPick[]): LibraryPick[] {
+  const seen = new Set((existing ?? []).map(libraryPickKey));
+  return [...(existing ?? []), ...incoming.filter(pick => !seen.has(libraryPickKey(pick)))];
+}
+
 export function draftStorageKey(conversationId: string): string {
   return `${DRAFT_PREFIX}${conversationId}`;
 }
@@ -145,11 +163,15 @@ export function loadDraft(conversationId: string): DraftState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DraftState>;
     if (typeof parsed.text !== "string") return null;
+    const picks = Array.isArray(parsed.librarySelections)
+      ? parsed.librarySelections.filter(pick => typeof pick?.label === "string" && !!pick.selection?.source && !!pick.selection?.sourceVideo)
+      : [];
     return {
       text: parsed.text,
       targetArtifactId: typeof parsed.targetArtifactId === "string" ? parsed.targetArtifactId : null,
       targetRevisionId: typeof parsed.targetRevisionId === "string" ? parsed.targetRevisionId : null,
       ...(typeof parsed.proposalId === "string" && typeof parsed.proposalDigest === "string" ? { proposalId: parsed.proposalId, proposalDigest: parsed.proposalDigest } : {}),
+      ...(picks.length ? { librarySelections: picks } : {}),
     };
   } catch {
     return null;
@@ -225,9 +247,10 @@ export function clearReadingView(conversationId: string): void {
   }
 }
 
-// —— 阶段工作台阅读（B03）—— 各事项正在看的阶段、该阶段正在看的准确修订（null=尚未打开）
-// 与展开的素材批次。键内含 work/revision，A/B 与各阶段互不覆盖。修订引用必须成对记产物与修订：
+// —— 审阅组工作台阅读（B03）—— 各作品正在看的组、各事项正在看的准确修订（null=尚未打开）
+// 与展开的素材批次。键内含 work/group/item/revision，各事项互不覆盖。修订引用必须成对记产物与修订：
 // 新一版制作输出是新产物，只记修订号会把它配到当前草稿产物上读错。
+// 旧固定阶段格式（stageByWork）不再解释：组的默认视图按当前快照回落。
 
 export interface StageRevisionRef {
   artifactId: string;
@@ -235,31 +258,30 @@ export interface StageRevisionRef {
 }
 
 export interface StageReading {
-  stageByWork: Record<string, WorkStage>;
-  revisionByStage: Record<string, StageRevisionRef | null>;
+  groupByWork: Record<string, string>;
+  revisionByItem: Record<string, StageRevisionRef | null>;
   batchId: string | null;
 }
 
 const STAGE_READING_KEY = "vf:agent-stage-reading:";
 
 export function loadStageReading(conversationId: string): StageReading {
-  const empty: StageReading = { stageByWork: {}, revisionByStage: {}, batchId: null };
+  const empty: StageReading = { groupByWork: {}, revisionByItem: {}, batchId: null };
   try {
     const raw = window.localStorage.getItem(`${STAGE_READING_KEY}${conversationId}`);
     if (!raw) return empty;
     const parsed = JSON.parse(raw) as Partial<StageReading>;
-    const stageByWork: Record<string, WorkStage> = {};
-    for (const [workId, stage] of Object.entries(parsed.stageByWork ?? {})) {
-      if (stage === "content" || stage === "plan" || stage === "video") stageByWork[workId] = stage;
+    const groupByWork: Record<string, string> = {};
+    for (const [workId, groupId] of Object.entries(parsed.groupByWork ?? {})) {
+      if (typeof groupId === "string") groupByWork[workId] = groupId;
     }
-    const revisionByStage: Record<string, StageRevisionRef | null> = {};
-    for (const [stageKey, ref] of Object.entries(parsed.revisionByStage ?? {})) {
+    const revisionByItem: Record<string, StageRevisionRef | null> = {};
+    for (const [itemKey, ref] of Object.entries(parsed.revisionByItem ?? {})) {
       if (ref === null || (typeof ref === "object" && typeof ref.artifactId === "string" && typeof ref.revisionId === "string")) {
-        revisionByStage[stageKey] = ref as StageRevisionRef | null;
+        revisionByItem[itemKey] = ref as StageRevisionRef | null;
       }
-      // 旧格式只存修订号，无法还原所属产物；首次打开时记录当前稿的准确引用。
     }
-    return { stageByWork, revisionByStage, batchId: typeof parsed.batchId === "string" ? parsed.batchId : null };
+    return { groupByWork, revisionByItem, batchId: typeof parsed.batchId === "string" ? parsed.batchId : null };
   } catch {
     return empty;
   }

@@ -1,48 +1,42 @@
 import type { AgentDatabase } from "../../src/server/agent/db.js";
-import { applyDelivery, productionNarrationText } from "../../src/server/agent/artifact-store.js";
+import { applyDelivery } from "../../src/server/agent/artifact-store.js";
 import {
   emptyReferences, finalizeRequestMessages, getRequestRow, insertMessage, insertQueuedRequest, markRequestTerminal,
   nextQueueSeq, nextSeq,
 } from "../../src/server/agent/conversation-store.js";
-import { createWork, parseCreationState, recordStageConfirmation, type WorkRow } from "../../src/server/agent/creative-work.js";
+import { createWork, parseCreationState, recordReviewConfirmation, type WorkRow } from "../../src/server/agent/creative-work.js";
 import { newAgentId } from "../../src/server/agent/util.js";
-import type { ContentSource, DeliveryReceipt, ProductionSpec, ToolDelivery } from "../../src/shared/agent/generated/contracts.js";
+import type { ContentSource, DeliveryReceipt, ReviewInputInput, ReviewTarget, ToolDelivery } from "../../src/shared/agent/generated/contracts.js";
 
-// 阶段边界夹具：用产品自己的内核（createWork / recordStageConfirmation / applyDelivery）把一条视频
-// 推进到“内容已认可、方案主稿已与提案关联”，让渲染与制作套件专注自身语义，而不是各自重写阶段规则。
-// 不直接手写 creation_binding_json，关联一律经真实交付事务写入。
+// 组审阅夹具：用产品自己的内核（createWork / applyDelivery(reviewGroups) / recordReviewConfirmation）
+// 把一条视频推进到“脚本组已交付并认可”，让渲染与制作套件直接引用真实认可事实（reviewInputs），
+// 而不是各自重写组规则。不直接手写 creation_binding_json，关联一律经真实交付事务写入。
 
-export interface PlanStageWork {
+export interface ConfirmedReviewWork {
   workId: string;
+  groupId: string;
+  itemId: string;
+  /** 已认可的脚本修订来源；可直接作为 inputSources 的引用事实。 */
   content: ContentSource;
+  /** 可直接放进 ProductionIntent.reviewInputs 的认可依据。 */
+  reviewInput: ReviewInputInput;
 }
 
-export function seedPlanStageWork(
-  db: AgentDatabase, now: string,
-  scope: { ownerId: string; conversationId: string },
-  title = "测试视频",
-): PlanStageWork {
-  const work = createWork(db, now, scope, title);
-  const messageId = newAgentId("msg"), text = `正式做一条视频：${title}`;
-  insertMessage(db, now, {
-    id: messageId, conversationId: scope.conversationId, ownerId: scope.ownerId, requestId: null,
-    role: "user", kind: "chat", state: "completed", text, target: null,
-    createdSeq: nextSeq(db, "messages", scope.conversationId), references: emptyReferences(),
-  });
-  recordStageConfirmation(db, now, scope, {
-    workId: work.id, action: "approve_content_continue",
-    subject: { kind: "message_text", messageId, text }, sourceKind: "user_message", sourceId: messageId,
-  });
-  return { workId: work.id, content: { kind: "message_text", messageId, text, author: "user" } };
+// 正式视频提案的交付目标夹具（F02）：声明新组成片事项，受理时分配身份；准备阶段不写占位草稿。
+export function finalVideoTarget(label = "成片"): ReviewTarget {
+  return {
+    group: { mode: "create", key: "final", title: "成片审阅", nextIntent: null },
+    item: { mode: "create", key: "video", label, role: "video", required: true },
+  };
 }
 
-// 按真实交付事务在会话里交付任意 items/stageDrafts：建立一条 running 请求 → applyDelivery →
-// 收尾。分段投影等需要自定义稿件内容的用例与方案阶段夹具共用这一入口，不各自重写请求样板。
-export function deliverStageDrafts(
+// 按真实交付事务在会话里交付任意 items/reviewGroups：建立一条 running 请求 → applyDelivery →
+// 收尾。分段投影等需要自定义稿件内容的用例与认可夹具共用这一入口，不各自重写请求样板。
+export function deliverReviewDrafts(
   db: AgentDatabase, now: string,
   scope: { ownerId: string; conversationId: string },
   delivery: ToolDelivery,
-): DeliveryReceipt {
+): { receipt: DeliveryReceipt; messageId: string } {
   const requestId = newAgentId("req"), messageId = newAgentId("msg"), text = "把这一批稿件交付给我";
   insertMessage(db, now, {
     id: messageId, conversationId: scope.conversationId, ownerId: scope.ownerId, requestId,
@@ -60,51 +54,62 @@ export function deliverStageDrafts(
   // 真实回合在交付后由执行器收尾；夹具同样把请求与消息落到终态，不留悬挂的 running。
   markRequestTerminal(db, now, request, "completed");
   finalizeRequestMessages(db, now, request, "completed");
-  return receipt;
+  return { receipt, messageId };
 }
 
-// 方案主稿按真实交付事务写入：建立一条 running 请求，整批交付一份文本方案并关联该提案。
-export function deliverPlanDraft(
-  db: AgentDatabase, now: string,
-  scope: { ownerId: string; conversationId: string },
-  work: PlanStageWork,
-  proposal: { id: string; digest: string } | null,
-  title = "画面声音方案",
-): DeliveryReceipt {
-  const prepared = proposal ? db.prepare("SELECT spec_json FROM proposals WHERE id = ?").get(proposal.id) as { spec_json: string } | undefined : undefined;
-  const narrationText = prepared ? productionNarrationText(db, JSON.parse(prepared.spec_json) as ProductionSpec) : null;
-  return deliverStageDrafts(db, now, scope, {
-    items: [{ mode: "create", title, kind: "script", content: { format: "markdown", text: `# ${title}\n\n镜头顺序与旁白安排。`,
-      ...(narrationText !== null ? { narrationText } : {}) } }],
-    stageDrafts: [{ workId: work.workId, stage: "plan", itemIndex: 0, source: work.content,
-      proposalRef: proposal ? { proposalId: proposal.id, digest: proposal.digest } : null }],
-  });
-}
-
-// 一条已推进到方案阶段、并把方案主稿关联到给定提案的视频。
-export function bindPreparedPlan(
-  db: AgentDatabase, now: string,
-  scope: { ownerId: string; conversationId: string },
-  proposal: { id: string; digest: string },
-  existing?: PlanStageWork,
-): PlanStageWork {
-  const work = existing ?? seedPlanStageWork(db, now, scope, proposal.id);
-  deliverPlanDraft(db, now, scope, work, proposal);
-  return work;
-}
-
-// 需要“同一个会话里已有可准备视频的事项”的套件用这个：已有进入方案阶段的事项就直接复用，
-// 否则按真实内核新建一条；跨重启读同一行，不重复塞入第二条创作事项。
-export function ensurePlanStageWork(
+// 新建一条视频创作并推进到“脚本已认可”：脚本组一个内容事项，草稿为本次交付的脚本修订，
+// 认可来源即该修订。制作套件从这里拿到 reviewInputs 需要的真实 confirmationId。
+export function seedConfirmedWork(
   db: AgentDatabase, now: string,
   scope: { ownerId: string; conversationId: string },
   title = "测试视频",
-): PlanStageWork {
+): ConfirmedReviewWork {
+  const work = createWork(db, now, scope, title);
+  const seeded = deliverReviewDrafts(db, now, scope, {
+    items: [{ mode: "create", title: `${title}脚本`, kind: "script",
+      content: { format: "markdown", text: `# ${title}\n\n镜头顺序与旁白安排。` } }],
+    reviewGroups: [{ workId: work.id,
+      group: { mode: "create", key: "content", title: "脚本与内容", nextIntent: null },
+      items: [{ item: { mode: "create", key: "script", label: "脚本", role: "content", required: true },
+        itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "production" }] }],
+  });
+  const revision = seeded.receipt.revisions[0]!;
+  const source = {
+    kind: "artifact_revision" as const,
+    artifactId: revision.artifactId, revisionId: revision.revisionId,
+    digest: (db.prepare("SELECT digest FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+      .get(revision.artifactId, revision.revisionId) as { digest: string }).digest,
+  };
+  const item = parseCreationState(db.prepare("SELECT * FROM works WHERE id = ?").get(work.id) as WorkRow)
+    .groups.flatMap(group => group.items.map(entry => ({ group, entry })))
+    .find(({ entry }) => entry.draft?.kind === "artifact_revision" && entry.draft.revisionId === revision.revisionId)!;
+  const [recorded] = recordReviewConfirmation(db, now, scope, {
+    workId: work.id, groupId: item.group.id, items: [{ itemId: item.entry.id, source }], action: "approve",
+  }, { kind: "user_message", messageId: seeded.messageId }).items;
+  return {
+    workId: work.id, groupId: item.group.id, itemId: item.entry.id, content: source,
+    reviewInput: { groupId: item.group.id, itemId: item.entry.id, source, confirmationId: recorded!.confirmationId },
+  };
+}
+
+// 需要“同一个会话里已有可认可脚本的视频”的套件用这个：已有带认可事实的事项就直接复用，
+// 否则按真实内核新建一条；跨重启读同一行，不重复塞入第二条创作。
+export function ensureConfirmedWork(
+  db: AgentDatabase, now: string,
+  scope: { ownerId: string; conversationId: string },
+  title = "测试视频",
+): ConfirmedReviewWork {
   const rows = db.prepare("SELECT * FROM works WHERE conversation_id = ? AND owner_id = ? ORDER BY rowid DESC")
     .all(scope.conversationId, scope.ownerId) as WorkRow[];
   for (const row of rows) {
-    const state = parseCreationState(row);
-    if (state.stage !== "content" && state.content.draft) return { workId: row.id, content: state.content.draft };
+    for (const group of parseCreationState(row).groups) {
+      const item = group.items.find(candidate => candidate.role === "content"
+        && candidate.approved?.kind === "artifact_revision" && candidate.confirmationId);
+      if (item && item.approved) return {
+        workId: row.id, groupId: group.id, itemId: item.id, content: item.approved,
+        reviewInput: { groupId: group.id, itemId: item.id, source: item.approved, confirmationId: item.confirmationId! },
+      };
+    }
   }
-  return seedPlanStageWork(db, now, scope, title);
+  return seedConfirmedWork(db, now, scope, title);
 }

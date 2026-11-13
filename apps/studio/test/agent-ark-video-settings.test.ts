@@ -19,7 +19,7 @@ import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js
 import { validatorFor } from "../src/server/agent/validate.js";
 import { DEFAULT_ARK_VIDEO_PROFILE, type AgentMediaConfig } from "../src/server/agent/media-config.js";
 import type { ProductionIntent, ProviderConnection } from "../src/shared/agent/generated/contracts.js";
-import { bindPreparedPlan, seedPlanStageWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 
 // F13：原 C2 的冻结、失效、事务、权限、Pi 连续性与首次导入行为迁到统一配置入口。
 // 旧 CRUD 的固定回执形状和隔离 503 已退役；最终服务对 GET/PATCH 均正常 404。
@@ -130,13 +130,13 @@ it("统一 current 闭合 bootstrap/prepare/admit：换Key使ready失效，已�
   const makeProposal = (title: string) => {
     const conversation = f.runtime.service.createConversation("local-owner", { commandId: cmd(), title }).conversation;
     const ref = prompt(db, conversation.id);
-    const work = seedPlanStageWork(db, clock(), { ownerId: "local-owner", conversationId: conversation.id }, title);
-    const spec: ProductionIntent = { workId: work.workId, title, inputRevisions: [{ artifactId: ref.artifactId, revisionId: ref.revisionId }],
+    const work = seedConfirmedWork(db, clock(), { ownerId: "local-owner", conversationId: conversation.id }, title);
+    const spec: ProductionIntent = { workId: work.workId, title, inputSources: [{ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }],
+      reviewInputs: [work.reviewInput], purpose: "production", scope: `${title}整片制作`,
       operations: [{ operationId: "shot", outputSlot: "video", kind: "video", model: JSON.parse(readArkVideoCurrent(db)!.version.binding_json), inputs: [{ kind: "artifact_revision", ...ref }], maxCreateAttempts: 1,
         parameters: { durationSeconds: 5, aspectRatio: "16:9", resolution: "720p", audioMode: "none" } }],
-      finalOutput: { operationId: "shot", outputSlot: "video" }, maxSpend: { currency: "CNY", amountMinor: 755 } };
-    const proposal = applyPrepareProposal(db, clock(), { ownerId: "local-owner", conversationId: conversation.id }, spec, arkVideoCatalog(readArkVideoCurrent(db), render)).proposal;
-    bindPreparedPlan(db, clock(), { ownerId: "local-owner", conversationId: conversation.id }, proposal, work);
+      finalOutput: { operationId: "shot", outputSlot: "video" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 755 } };
+    const proposal = applyPrepareProposal(db, clock(), { ownerId: "local-owner", conversationId: conversation.id }, spec, arkVideoCatalog(readArkVideoCurrent(db), render), { requestId: newAgentId("req"), messageId: newAgentId("msg") }).proposal;
     return { conversation, proposal, spec };
   };
   const ready = makeProposal("待受理"), accepted = makeProposal("已受理");

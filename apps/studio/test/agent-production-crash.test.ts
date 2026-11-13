@@ -32,11 +32,11 @@ for (const point of ["before-admission-commit", "after-admission-commit", "after
         assert.equal(count("production_runs"), 1); assert.equal(count("authorizations"), 1);
         const jobs = (resumed.port.providerDb.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n;
         if (point === "after-submit-started") {
-          // 输入锁同时覆盖 spec 输入与方案主稿：制作期间主稿同样不可改（admit 的有限来源锁定）。
-          assert.equal(run.state, "unknown"); assert.equal(jobs, 0, "是否发出不明时不盲目首次/再次 create"); assert.equal(count("production_input_locks"), 2);
+          // 输入锁只覆盖 spec 声明的实际输入修订：认可依据是事实记录，不再额外锁方案主稿。
+          assert.equal(run.state, "unknown"); assert.equal(jobs, 0, "是否发出不明时不盲目首次/再次 create"); assert.equal(count("production_input_locks"), 1);
         } else {
           assert.equal(run.state, "succeeded"); assert.equal(jobs, local ? 2 : 1); assert.equal(run.outputRevisions.length, local ? 2 : 1);
-          assert.equal(run.finance.settledMinor, 1200); assert.equal(run.finance.state, "settled"); assert.equal(count("production_input_locks"), 0);
+          assert.equal(run.finance!.settledMinor, 1200); assert.equal(run.finance!.state, "settled"); assert.equal(count("production_input_locks"), 0);
         }
         assert.equal(count("production_attempts"), local ? 2 : 1);
       } finally { await resumed.close(); }

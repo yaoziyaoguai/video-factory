@@ -557,3 +557,35 @@
 .agent-library-text { padding:2px 16px 14px; font-size:13px; max-height:340px; overflow:auto; }
 .agent-root .agent-library-back { background:var(--frame-green); color:white; padding:8px 18px; font-size:13px; }
 .agent-root .agent-library-back:hover { background:#28573f; }
+.agent-root .agent-library-back:disabled { background:#a9bfb0; cursor:default; }
+
+/* G4-2 详情勾选区与输入框 chips：勾选只随下一条消息带入，不是采用清单。 */
+.agent-library-select { border:1px solid var(--frame-line); border-radius:8px; background:#fbfcfa; margin-top:16px; padding:11px 14px 13px; }
+.agent-library-select h4 { font-size:13px; font-weight:500; color:#4d6b53; }
+.agent-library-select p { font-size:11px; margin:2px 0 6px; }
+.agent-library-select ul { list-style:none; margin:0; padding:0; display:grid; gap:2px; }
+.agent-library-select li.agent-library-project-group { font-size:11px; color:#8b9b8d; padding-top:4px; }
+.agent-library-select label { display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 0; cursor:pointer; }
+.agent-library-select small { font-size:11px; color:#8b9b8d; }
+.agent-library-chips { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:7px; }
+.agent-library-chip { display:inline-flex; align-items:center; gap:4px; max-width:100%; padding:4px 8px; background:#edf4ee; border:1px solid #dce8df; border-radius:6px; font-size:11px; overflow-wrap:anywhere; }
+.agent-root .agent-library-chip button { padding:0; border:none; background:none; color:#5f7a64; cursor:pointer; display:inline-flex; }
+.agent-root .agent-library-chip button:hover { color:#28573f; }
+.agent-library-chip svg { width:13px; height:13px; }
+
+/* §11.7 来源5/8：作品库文件卡预览与输入框旁的选择弹层。 */
+.agent-preview-file { font-size:12px; }
+.agent-file-facts { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; color:#4d6b53; font-size:13px; }
+.agent-file-facts small { font-size:11px; color:#8b9b8d; overflow-wrap:anywhere; }
+.agent-file-text { max-height:420px; overflow:auto; margin:10px 0; padding:10px 12px; border:1px solid var(--frame-line); border-radius:6px; background:#fbfcfa; font-size:12px; line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; }
+.agent-preview-file p { font-size:11px; }
+.agent-preview-file a { font-size:11px; }
+.agent-root .agent-library-picker-trigger { display:inline-flex; align-items:center; gap:4px; border:1px solid #d4e1d8; border-radius:5px; padding:5px 8px; background:#f4f8f5; color:#638474; font-size:11px; }
+.agent-root .agent-library-picker-trigger svg { width:13px; height:13px; }
+.agent-root .agent-library-picker-trigger:hover:not(:disabled) { background:#e9f1ea; }
+.agent-library-picker-body h4 { margin:10px 0 2px; font-size:13px; font-weight:500; color:#4d6b53; }
+.agent-library-picker-list { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+.agent-library-picker-list button { display:grid; gap:2px; width:100%; text-align:left; border:1px solid var(--frame-line); border-radius:7px; background:#fbfcfa; padding:9px 12px; }
+.agent-library-picker-list button:hover { background:#f1f6f1; }
+.agent-library-picker-list strong { font-size:13px; color:#3c5a46; font-weight:500; }
+.agent-library-picker-list small { font-size:11px; color:#8b9b8d; }

@@ -139,10 +139,10 @@ async function searchPixabay(req: { query: string; kind: StockKind; limit: numbe
   return out;
 }
 
-/** 供应商返回的同片多档转码里选像素最大的一档；预览用同片官方缩略图。 */
+/** 默认选 1080p 内最清晰的一档，避免普通混剪下载 4K；只有超高清时选其中最小档。 */
 function pickPixabayVideo(value: unknown): { url: string; width: number; height: number; thumbnail: string | null } | null {
   if (!value || typeof value !== "object") return null;
-  let best: { url: string; width: number; height: number; thumbnail: string | null } | null = null;
+  const variants: { url: string; width: number; height: number; thumbnail: string | null }[] = [];
   for (const rendition of Object.values(value)) {
     if (!rendition || typeof rendition !== "object") continue;
     const file = rendition as Record<string, unknown>;
@@ -150,9 +150,11 @@ function pickPixabayVideo(value: unknown): { url: string; width: number; height:
     const width = asPositiveInt(file.width);
     const height = asPositiveInt(file.height);
     if (!url || !width || !height) continue;
-    if (!best || width * height > best.width * best.height) best = { url, width, height, thumbnail: asUrl(file.thumbnail) };
+    variants.push({ url, width, height, thumbnail: asUrl(file.thumbnail) });
   }
-  return best;
+  const hd = variants.filter(file => Math.max(file.width, file.height) <= 1920 && Math.min(file.width, file.height) <= 1080);
+  if (hd.length) return hd.sort((a, b) => b.width * b.height - a.width * a.height)[0]!;
+  return variants.sort((a, b) => a.width * a.height - b.width * b.height)[0] ?? null;
 }
 
 // —— Unsplash（Keyed；仅图片；采用时上报 download_location） ——

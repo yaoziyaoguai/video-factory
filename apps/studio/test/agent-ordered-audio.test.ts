@@ -16,7 +16,7 @@ import { openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js
 import { ProductionBlobs, type BlobRow } from "../src/server/agent/production-blobs.js";
 import { issueSubmitPermit } from "../src/server/agent/submit-permit.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
-import { bindPreparedPlan, ensurePlanStageWork, type PlanStageWork } from "./helpers/creative-work-fixture.js";
+import { ensureConfirmedWork, finalVideoTarget } from "./helpers/creative-work-fixture.js";
 import type { ExecutionInput, ProductionIntent, RecoveryQuery, RenderParameters, Run } from "../src/shared/agent/generated/contracts.js";
 
 // M3 ordered_concat audioMode 验收（§11.4）：preserve 按画面时段保留可识别原声并可调序、
@@ -84,7 +84,8 @@ function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Bu
 function orderedIntent(clips: Ref[], audioMode?: "none" | "preserve"): ProductionIntent {
   const inputs = clips.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })) as ProductionIntent["operations"][number]["inputs"];
   return { workId: null, title: audioMode === "preserve" ? "保留原声拼接" : "无声拼接",
-    inputRevisions: clips.map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: clips.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "把已认可片段按画面顺序拼成正式成片",
     operations: [{ operationId: "render", outputSlot: "final", kind: "render" as const, model: null, inputs,
       maxCreateAttempts: 1 as const,
       parameters: { assembly: "ordered_concat" as const, format: "mp4" as const, width: 1280, height: 720, fps: 24, ...(audioMode ? { audioMode } : {}) } }],
@@ -95,7 +96,8 @@ function orderedIntent(clips: Ref[], audioMode?: "none" | "preserve"): Productio
 function chainedIntent(first: Ref[], tail: Ref): ProductionIntent {
   const firstInputs = first.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })) as ProductionIntent["operations"][number]["inputs"];
   return { workId: null, title: "链式保留原声",
-    inputRevisions: [...first, tail].map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId })) as unknown as ProductionIntent["inputRevisions"],
+    inputSources: [...first, tail].map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest })),
+    reviewInputs: [], purpose: "production", scope: "链式保留原声拼成正式成片",
     operations: [
       { operationId: "mid", outputSlot: "mid", kind: "render" as const, model: null, inputs: firstInputs, maxCreateAttempts: 1 as const,
         parameters: { assembly: "ordered_concat" as const, format: "mp4" as const, width: 1280, height: 720, fps: 24, audioMode: "preserve" as const } },
@@ -111,10 +113,13 @@ function chainedIntent(first: Ref[], tail: Ref): ProductionIntent {
 const scopeOf = (conversationId: string) => ({ ownerId: "local-owner", conversationId });
 
 async function acceptIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<{ runId: string; disclosure: string }> {
-  const work: PlanStageWork = ensurePlanStageWork(runtime.database, staticClock(), scopeOf(conversationId), intent.title);
+  // 正式成片落在已开始的创作内，受理依据来自真实组审阅认可（reviewInputs）；
+  // 最终视频按 F02 声明交付目标（新组成片事项）。
+  const work = ensureConfirmedWork(runtime.database, staticClock(), scopeOf(conversationId), intent.title);
   intent.workId = work.workId;
+  intent.reviewInputs = [work.reviewInput];
+  intent.outputTarget = finalVideoTarget();
   const prepared = await runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
-  bindPreparedPlan(runtime.database, staticClock(), scopeOf(conversationId), prepared.proposal, work);
   const admitted = runtime.service.acceptProposal("local-owner", prepared.proposal.id, { commandId: cmd(), proposalDigest: prepared.proposal.digest });
   return { runId: admitted.run.id, disclosure: prepared.proposal.priceDisclosure };
 }

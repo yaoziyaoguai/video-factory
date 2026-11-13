@@ -1,11 +1,13 @@
 import type {
-  RevisionRef, Target, ArtifactRevision, ToolDelivery, DeliveryReceipt,
+  Target, ArtifactRevision, ToolDelivery, DeliveryReceipt,
   ToolPrepareProposal, Proposal, AcceptProposal, AdmissionReceipt,
   ExecutionInput, RecoveryQuery, ExecutionObservation,
   ToolReadProposal, ToolReadRun, ToolListProduction, ProductionIndexPage, Run,
   ToolSearchMaterials, MaterialSearchResult, ToolReadTrends, TrendReadResult,
   ToolImportMaterial, MaterialImportResult,
-  ToolStartWork, ToolReadWork, ToolConfirmStage, ToolReadMaterialBatch, ToolRecordWorkFeedback,
+  ToolStartWork, ToolReadWork, ToolConfirmReview, ToolReadMaterialBatch, ToolRecordWorkFeedback,
+  ToolReadArtifact, ToolPublishProject, ToolRenderProject, LocalCreationReceipt,
+  ToolDubFree, DubFreeResult,
   Work, MaterialBatch, FeedbackReceipt, ContentSource,
 } from "./generated/contracts.js";
 
@@ -51,7 +53,7 @@ export interface UserActionContext {
 }
 
 export interface PiBusinessTools {
-  readArtifact(context: RequestContext, input: RevisionRef): Promise<ArtifactRevision>;
+  readArtifact(context: RequestContext, input: ToolReadArtifact): Promise<ArtifactRevision>;
   deliverArtifacts(context: RequestContext, input: ToolDelivery): Promise<DeliveryReceipt>;
   prepareProduction(context: RequestContext, input: ToolPrepareProposal): Promise<Proposal>;
   // 三个窄只读查询：核对运行请求与会话归属，不产生业务写入。
@@ -65,9 +67,13 @@ export interface PiBusinessTools {
   // 视频创作事项：只在用户正式开始一条视频后建立；确认只记录普通认可，不能受理制作。
   startWork(context: RequestContext, input: ToolStartWork): Promise<Work>;
   readWork(context: RequestContext, input: ToolReadWork): Promise<WorkWithFeedback>;
-  confirmStage(context: RequestContext, input: ToolConfirmStage): Promise<Work>;
+  confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<Work>;
+  publishProject(context: RequestContext, input: ToolPublishProject): Promise<ArtifactRevision>;
+  renderProject(context: RequestContext, input: ToolRenderProject): Promise<LocalCreationReceipt>;
   readMaterialBatch(context: RequestContext, input: ToolReadMaterialBatch): Promise<MaterialBatch>;
   recordWorkFeedback(context: RequestContext, input: ToolRecordWorkFeedback): Promise<FeedbackReceipt>;
+  // 免费配音（edge-tts 维护版客户端）：在线免费服务，不占用付费 speech 型号；失败原因原样透传。
+  dubFree(context: RequestContext, input: ToolDubFree, signal?: AbortSignal): Promise<DubFreeResult>;
 }
 
 export interface AdmissionService {

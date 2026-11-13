@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir, writeFile, symlink, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import { assembleOfflineAgent, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
-import type { MessageInput, ProductionIntent } from "../src/shared/agent/generated/contracts.js";
+import type { MessageInput, OperationRequest, ProductionIntent } from "../src/shared/agent/generated/contracts.js";
 import { inlineSchema } from "../src/server/agent/pi-tools.js";
 
 test("Pi 原生工具入口执行 canonical 正反例，业务层不重复解析同一结构", async () => {
@@ -186,26 +186,16 @@ test("A-19 one bad reference rejects the entire batch without consuming delivery
   assert.deepEqual(snap(a, id).artifacts.items.map(item => item.title), ["retry valid"]);
 });
 
-test("A-24 controlled Skill reader rejects escape, symlink and oversized files, accepts native SDK paths", async t => {
+test("A-24 普通装配工具白名单随合同同步；Skill 读取不再有间接业务工具", async t => {
   const { buildAgentTools, BusinessTools } = await import("../src/server/agent/pi-tools.js");
   const a = await fixture(t);
-  const root = await mkdtemp(path.join(tmpdir(), "frame-skills-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const skills = path.join(root, "skills"); await mkdir(skills);
-  await writeFile(path.join(root, "outside.txt"), "private fixture");
-  await writeFile(path.join(skills, "ok.txt"), "approved");
-  await writeFile(path.join(skills, "large.txt"), "a".repeat(262145));
-  await symlink(path.join(root, "outside.txt"), path.join(skills, "link.txt"));
-  const definitions = buildAgentTools({ current: null }, new BusinessTools(a.database, () => new Date().toISOString(), () => ({})), skills);
-  // S2 新增视频创作事项与素材批次读取工具；白名单随合同同步，不额外暴露其他能力。
+  const definitions = buildAgentTools({ current: null }, new BusinessTools(a.database, () => new Date().toISOString(), () => ({})));
+  // Skill 参考文件读取已收敛到隔离创作环境的原生 read（/skills）；普通装配只保留业务工具白名单。
   assert.deepEqual(definitions.map(tool => tool.name).sort(), [
-    "confirm_stage", "deliver_artifacts", "import_material", "list_production", "prepare_production",
-    "read_artifact", "read_material_batch", "read_proposal", "read_run", "read_skill_file",
-    "read_trends", "read_work", "record_work_feedback", "search_materials", "start_work",
+    "confirm_review", "deliver_artifacts", "dub_free", "import_material", "list_production", "prepare_production",
+    "publish_project", "read_artifact", "read_material_batch", "read_proposal", "read_run",
+    "read_trends", "read_work", "record_work_feedback", "render_project", "search_materials", "start_work",
   ]);
-  const reader = definitions.find(tool => tool.name === "read_skill_file")!;
-  for (const file of ["../outside.txt", "link.txt", "large.txt", "."]) await assert.rejects(reader.execute("call", { path: file }, undefined, undefined, {} as never));
-  for (const file of ["ok.txt", path.join(skills, "ok.txt")]) assert.match(JSON.stringify(await reader.execute("call", { path: file }, undefined, undefined, {} as never)), /approved/);
 });
 
 test("A-16 timeout ends the turn and the next queued request still completes", async t => {
@@ -221,7 +211,7 @@ test("A-16 timeout ends the turn and the next queued request still completes", a
 
 test("A-16 the 33rd tool cannot execute; no retry or automatic next turn", async t => {
   const a = await fixture(t), id = create(a, "tool limit");
-  a.faux!.setResponses([fauxAssistantMessage(Array.from({ length: 33 }, (_, i) => fauxToolCall("read_skill_file", { path: "travel-prompt-kit/SKILL.md" }, { id: `call-${i}` })))]);
+  a.faux!.setResponses([fauxAssistantMessage(Array.from({ length: 33 }, (_, i) => fauxToolCall("list_production", { kind: "proposals" }, { id: `call-${i}` })))]);
   await a.service.sendMessage("local-owner", id, input("many tools")); await done(a, id);
   const handle = await a.host.openConversationSession(id, "s1", undefined, [], await a.host.modelForBinding(a.service.bootstrap("local-owner").models[0]!.binding));
   try {
@@ -283,8 +273,10 @@ test("A-09/22/37 proposals validate graph/full model binding; expiry can be prep
   const head = snap(a, id).artifacts.items[0]!;
   const revision = a.service.readRevision("local-owner", head.id, head.revisionId);
   const { OFFLINE_QUOTE_CATALOG } = await import("../src/server/agent/offline.js");
-  const spec: ProductionIntent = { workId: null, title: "voice", inputRevisions: [{ artifactId: head.id, revisionId: head.revisionId }],
-    operations: [{ operationId: "voice", outputSlot: "audio", inputs: [{ kind: "artifact_revision" as const, artifactId: head.id, revisionId: head.revisionId, digest: revision.digest }], maxCreateAttempts: 2, kind: "speech" as const, model: OFFLINE_QUOTE_CATALOG["speech:faux-speech"].binding, parameters: { voiceId: "voice", format: "mp3" as const } }],
+  const voiceOperation: Extract<OperationRequest, { kind: "speech" }> = { operationId: "voice", outputSlot: "audio", inputs: [{ kind: "artifact_revision" as const, artifactId: head.id, revisionId: head.revisionId, digest: revision.digest }], maxCreateAttempts: 2, kind: "speech", model: OFFLINE_QUOTE_CATALOG["speech:faux-speech"].binding, parameters: { voiceId: "voice", format: "mp3" } };
+  const spec: ProductionIntent = { workId: null, title: "voice", purpose: "production", scope: "独立配音提案", reviewInputs: [],
+    inputSources: [{ kind: "artifact_revision" as const, artifactId: head.id, revisionId: head.revisionId, digest: revision.digest }],
+    operations: [voiceOperation],
     finalOutput: { operationId: "voice", outputSlot: "audio" }, maxSpend: { currency: "CNY" as const, amountMinor: 500 } };
   const prepare = async (value = spec) => (await a.service.prepareProposal("local-owner", id, { commandId: `cmd-${crypto.randomUUID()}`, spec: value })).proposal;
   const initial = await prepare(); assert.equal(initial.spec.operations[0]!.maxCreateAttempts, 2);
@@ -292,8 +284,8 @@ test("A-09/22/37 proposals validate graph/full model binding; expiry can be prep
   assert.equal(a.service.readProposal("local-owner", initial.id).state, "expired");
   const renewed = await prepare(); assert.notEqual(initial.id, renewed.id); assert.equal(renewed.state, "ready");
   await assert.rejects(() => prepare({ ...spec, finalOutput: { operationId: "missing", outputSlot: "audio" } }));
-  await assert.rejects(() => prepare({ ...spec, operations: [{ ...spec.operations[0]!, kind: "speech", parameters: { voiceId: "voice", format: "mp3" }, model: { ...OFFLINE_QUOTE_CATALOG["speech:faux-speech"].binding, connectionId: "unrelated" } }] }));
-  await assert.rejects(() => prepare({ ...spec, operations: [{ ...spec.operations[0]!, inputs: [{ kind: "artifact_revision", artifactId: head.id, revisionId: head.revisionId, digest: "0".repeat(64) }] }] }));
+  await assert.rejects(() => prepare({ ...spec, operations: [{ ...voiceOperation, kind: "speech", parameters: { voiceId: "voice", format: "mp3" }, model: { ...OFFLINE_QUOTE_CATALOG["speech:faux-speech"].binding, connectionId: "unrelated" } }] }));
+  await assert.rejects(() => prepare({ ...spec, operations: [{ ...voiceOperation, inputs: [{ kind: "artifact_revision", artifactId: head.id, revisionId: head.revisionId, digest: "0".repeat(64) }] }] }));
   const other = create(a, "other");
   assert.throws(() => a.service.sendMessage("local-owner", other, input("discuss", { proposalRef: { proposalId: renewed.id, digest: renewed.digest } })), (error: any) => error.code === "NOT_FOUND");
   let received = "";

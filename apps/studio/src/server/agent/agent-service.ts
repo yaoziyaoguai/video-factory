@@ -1,11 +1,12 @@
 import { readProviderConnections, saveProviderConnection, listAvailableProviderModels } from "./provider-connections.js";
 import type {
   AcceptProposal, ArtifactHead, ArtifactRevision, Bootstrap, CancelRun, Conversation, ConversationPage,
-  ContentSource, CreateConversation, FeedbackInput, FeedbackReceipt, LibraryVideo, LibraryVideoPage, Message,
+  ContentSource, CreateConversation, FeedbackInput, FeedbackReceipt, LibrarySelection, LibraryVideo, LibraryVideoPage, Message,
   MessageInput, MessagePage, MessageReferences, ModelBinding, Proposal, ProposalPage, RenameConversation,
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
   PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch,
   FreeServiceSettings, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
+  CreationBinding, MediaProvenance,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
@@ -21,13 +22,13 @@ import {
   stopQueuedRequest, storeCommandReceipt, touchConversation, type RequestRow,
 } from "./conversation-store.js";
 import {
-  feedbackNote, getArtifactRow, getProposalRow, getRevisionRow, listArtifactRows, listProposalRows,
+  feedbackNote, getArtifactRow, getProposalRow, getRevisionRow, insertRevision, listArtifactRows, listProposalRows,
   maxArtifactSeq, maxProposalSeq, rowToArtifactHead, rowToArtifactRevision, rowToProposal, productionAudioFacts,
   applyPrepareProposal, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import { probeRenderInputs } from "./media-probe.js";
-import { getWorkRow, hasPlanDraftForContent, listWorkRows, recordStageConfirmation, requireWork, workProjection } from "./creative-work.js";
+import { getWorkRow, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, workInFlight, workProjection } from "./creative-work.js";
 import { listMaterialBatches, readMaterialBatch as readMaterialBatchRow } from "./material-store.js";
 import { ConversationRunnerRegistry, recoverInterruptedRequests } from "./executor.js";
 import type { PiRuntimeHost } from "./pi-runtime.js";
@@ -37,8 +38,9 @@ import type { ProductionService } from "./production-service.js";
 import { readUserProfile, saveUserProfile as saveUserProfileRow } from "./text-model-settings.js";
 import {
   freeServiceIdOf, readFreeServiceSettings, saveKeyedServiceSettings, saveKeylessServiceSettings, saveNewsNowServiceSettings,
+  saveEdgeTtsServiceSettings,
 } from "./free-service-settings.js";
-import type { SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings } from "../../shared/agent/generated/contracts.js";
+import type { SaveEdgeTtsSettings, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings } from "../../shared/agent/generated/contracts.js";
 import { toRun, runSegments, type RunRow } from "./production-store.js";
 import { getScopedRunRow } from "./production-index.js";
 
@@ -192,6 +194,7 @@ export class AgentService {
   saveFreeServiceSettings(ownerId: string, serviceId: string, input: unknown): SaveFreeServiceSettingsReceipt {
     const id = freeServiceIdOf(serviceId);
     if (id === "newsnow") return saveNewsNowServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveNewsNowSettings);
+    if (id === "edge-tts") return saveEdgeTtsServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveEdgeTtsSettings);
     if (id === "pexels" || id === "pixabay" || id === "unsplash" || id === "coverr") {
       return saveKeyedServiceSettings(this.options.db, this.options.clock, ownerId, id, input as SavePexelsSettings);
     }
@@ -350,29 +353,50 @@ export class AgentService {
   }
 
   // 作品库（§6）：从已有 finalize_video 认可与不可变修订/binding 只读投影，按视频修订去重，
-  // 首次定稿时间（确认 rowid）倒序 + revisionId 稳定排序；重复定稿不把旧作品顶到最前。
+  // 首次定稿时间倒序 + revisionId 稳定排序；重复定稿不把旧作品顶到最前。
+  // 新表行都晚于旧表行（迁移时新表为空），流序为新表在前；游标把阶段编进 p（src*2^32+pos）。
   listLibraryVideos(ownerId: string, cursor: string | undefined, limit: number | undefined): LibraryVideoPage {
     const pageSize = boundedPageSize(limit);
     const beforePos = cursor === undefined ? undefined : decodeListCursor(cursor, ownerId, "library").p;
+    const phase = beforePos === undefined ? undefined : Math.floor(beforePos / 2 ** 32);
+    const newPos = beforePos === undefined ? null : phase === 1 ? 0 : beforePos;
+    const legacyPos = phase === 1 ? beforePos : null;
     const db = this.options.db;
     const fetched = db.prepare(`
-      SELECT fc.rowid AS pos, fc.conversation_id AS conversation_id, fc.work_id AS work_id,
-             fc.subject_json AS subject_json, fc.created_at AS created_at
-      FROM work_stage_confirmations fc
-      WHERE fc.owner_id = ? AND fc.action = 'finalize_video'
-        AND fc.rowid = (SELECT MIN(f2.rowid) FROM work_stage_confirmations f2
-                        WHERE f2.owner_id = fc.owner_id AND f2.action = 'finalize_video'
-                          AND json_extract(f2.subject_json, '$.revisionId') = json_extract(fc.subject_json, '$.revisionId'))
-        AND (? IS NULL OR fc.rowid < ?)
-      ORDER BY fc.rowid DESC
-      LIMIT ?`).all(ownerId, beforePos ?? null, beforePos ?? null, pageSize + 1) as LibraryConfirmationRow[];
-    const items = fetched.slice(0, pageSize)
-      .map(row => this.libraryVideoEntry(ownerId, row))
-      .filter((entry): entry is LibraryVideo => entry !== null);
+      SELECT * FROM (
+        SELECT 0 AS src, rowid AS pos, conversation_id, work_id, subject_json, created_at
+        FROM work_review_confirmations
+        WHERE owner_id = ? AND action = 'finalize_video'
+          AND rowid = (SELECT MIN(f2.rowid) FROM work_review_confirmations f2
+                       WHERE f2.owner_id = work_review_confirmations.owner_id AND f2.action = 'finalize_video'
+                         AND json_extract(f2.subject_json, '$.revisionId') = json_extract(work_review_confirmations.subject_json, '$.revisionId'))
+          AND (? IS NULL OR rowid < ?)
+        UNION ALL
+        SELECT 1 AS src, rowid AS pos, conversation_id, work_id, subject_json, created_at
+        FROM work_stage_confirmations
+        WHERE owner_id = ? AND action = 'finalize_video'
+          AND rowid = (SELECT MIN(f2.rowid) FROM work_stage_confirmations f2
+                       WHERE f2.owner_id = work_stage_confirmations.owner_id AND f2.action = 'finalize_video'
+                         AND json_extract(f2.subject_json, '$.revisionId') = json_extract(work_stage_confirmations.subject_json, '$.revisionId'))
+          AND (? IS NULL OR rowid < ?)
+      )
+      ORDER BY src ASC, pos DESC
+      LIMIT ?`).all(ownerId, newPos, newPos, ownerId, legacyPos, legacyPos, pageSize + 1) as LibraryConfirmationRow[];
+    const seen = new Set<string>();
+    const items: LibraryVideo[] = [];
+    for (const row of fetched.slice(0, pageSize)) {
+      const revisionId = (JSON.parse(row.subject_json) as { revisionId?: string }).revisionId;
+      if (revisionId) {
+        if (seen.has(revisionId)) continue;
+        seen.add(revisionId);
+      }
+      const entry = this.libraryVideoEntry(ownerId, row);
+      if (entry) items.push(entry);
+    }
     return {
       items,
       nextCursor: fetched.length > pageSize
-        ? encodeListCursor({ v: 1, c: ownerId, k: "library", p: fetched[pageSize - 1]!.pos, w: 0 })
+        ? encodeListCursor({ v: 1, c: ownerId, k: "library", p: fetched[pageSize - 1]!.src * 2 ** 32 + fetched[pageSize - 1]!.pos, w: 0 })
         : null,
     };
   }
@@ -419,10 +443,54 @@ export class AgentService {
           ORDER BY m.created_seq DESC LIMIT 1`).get(ownerId, row.conversation_id, run.id, subject.revisionId) as { id: string } | undefined)?.id ?? null;
       }
     }
+    // 新组模型来源（§4.3）：定稿当时的冻结绑定记录工程、素材与认可来源；
+    // 旧阶段绑定未记录这些来源，如实标 not_recorded，不从当前 head 补齐。
+    const parsedBinding = revision.creation_binding_json ? JSON.parse(revision.creation_binding_json) as CreationBinding : null;
+    const modernBinding = parsedBinding && Array.isArray(parsedBinding.inputSources) ? parsedBinding : null;
+    // 留存清单完整投影（G4-2）：全部 input source 修订（含文本稿）与封存工程文件清单
+    // 都可跨会话选材；服务端入口验证与这份清单同源。
+    const materials: LibraryVideo["materials"] = [];
+    if (modernBinding) {
+      for (const source of modernBinding.inputSources) {
+        if (source.kind !== "artifact_revision") continue;
+        const materialArtifact = getArtifactRow(db, ownerId, source.artifactId);
+        const materialRevision = getRevisionRow(db, source.artifactId, source.revisionId);
+        if (!materialArtifact || !materialRevision) continue;
+        const materialContent = JSON.parse(materialRevision.content_json) as { format?: string; sources?: MediaProvenance[] };
+        materials.push({ source: { artifactId: source.artifactId, revisionId: source.revisionId },
+          label: materialArtifact.title, kind: materialArtifact.kind as LibraryVideo["materials"][number]["kind"],
+          provenance: materialContent.format === "media" ? materialContent.sources ?? [] : [] });
+      }
+    }
+    // §11.7 来源3：多工程合成的定稿沿来源链展开全部封存工程的文件清单，每行 project 指明所属
+    // 工程，同名 relativePath 不会指到另一个工程；最终主工程（projectRevision）分组在前，
+    // 纯拼接合成没有主工程时 project 为 null 而清单非空。读取只沿既有记录去重，不补当前 head。
+    const projectFiles: LibraryVideo["projectFiles"] = [];
+    if (modernBinding) {
+      const seenProjects = new Set<string>();
+      for (const projectRef of [modernBinding.projectRevision, ...(modernBinding.projectRevisions ?? [])]) {
+        if (!projectRef || seenProjects.has(projectRef.revisionId)) continue;
+        seenProjects.add(projectRef.revisionId);
+        const projectRevision = getRevisionRow(db, projectRef.artifactId, projectRef.revisionId);
+        const content = projectRevision ? JSON.parse(projectRevision.content_json) as { format?: string; files?: { relativePath: string; blobId: string }[] } : null;
+        if (content?.format !== "project") continue;
+        for (const file of content.files ?? []) {
+          const blob = db.prepare("SELECT mime_type FROM production_blobs WHERE id=? AND owner_id=?")
+            .get(file.blobId, ownerId) as { mime_type: string } | undefined;
+          if (blob) projectFiles.push({ project: { artifactId: projectRef.artifactId, revisionId: projectRef.revisionId },
+            relativePath: file.relativePath, mimeType: blob.mime_type });
+        }
+      }
+    }
     return {
       video: { artifactId: subject.artifactId, revisionId: subject.revisionId },
       workId: row.work_id, conversationId: row.conversation_id, title: artifact.title,
       finalizedAt: row.created_at, plan, content, originMessageId, narrationText, ...(audioSummary ? { audioSummary } : {}),
+      project: modernBinding?.projectRevision ?? null,
+      projectFiles,
+      materials,
+      reviewSources: modernBinding?.reviewInputs ?? [],
+      provenanceStatus: modernBinding ? "recorded" : "not_recorded",
     };
   }
 
@@ -446,7 +514,7 @@ export class AgentService {
     const rows = fetched.slice(0, pageSize);
     const watermark = cursor === undefined ? maxEventSeq(this.options.db, conversationId) : decodeListCursor(cursor, conversationId, "proposals").w;
     return {
-      items: rows.map(row => rowToProposal(row, this.options.db)),
+      items: rows.map(row => rowToProposal(row, this.options.db, this.options.catalog())),
       nextCursor: pageCursor(fetched, pageSize, { v: 1, c: conversationId, k: "proposals", w: watermark }),
       watermark: encodeEventCursor(conversationId, watermark),
     };
@@ -477,8 +545,17 @@ export class AgentService {
       }, input))();
     if (replay.kind === "replay") return { status: 202, receipt: { ...replay.receipt, replayed: true } };
 
-    // 结构化阶段认可来自按钮的真实动作，先于普通发送；纯认可不需要文本模型，也不受技能刷新影响。
-    if (input.stageConfirmation) return this.sendStageConfirmation(ownerId, conversationId, input);
+    // 消息明确指向的组审阅上下文（C2/F05）：与确认/提案/目标的互斥已由 MessageInput 契约
+    // 在上方校验一次；这里只核对指向真实存在，避免双作品会话里继续到错误对象。
+    if (input.reviewContext) {
+      const work = requireWork(this.options.db, ownerId, conversationId, input.reviewContext.workId);
+      if (!parseCreationState(work).groups.some(group => group.id === input.reviewContext!.groupId)) {
+        throw new AgentError("INVALID_INPUT", "消息指向的审阅组不存在。");
+      }
+    }
+
+    // 组审阅认可来自按钮的真实动作，先于普通发送；纯认可不需要文本模型，也不受技能刷新影响。
+    if (input.reviewConfirmation) return this.sendReviewConfirmation(ownerId, conversationId, input);
 
     if (this.options.skillPackages?.mutation || this.options.skillPackages?.refreshing) throw new AgentError("RUN_BUSY", "正在管理或读取 Skill，请完成后再发送；输入内容已保留。", { retryAction: "wait" });
 
@@ -497,22 +574,16 @@ export class AgentService {
     return this.sendNew(ownerId, conversationId, input);
   }
 
-  // 结构化阶段认可（按钮）：纯认可在接收事务里直接完成，不进 Pi；“内容认可并继续”与
-  // “方案认可并准备制作”在同一事务写入认可并排入一次现有队列请求；后者的请求 target
-  // 指向这份准确方案修订。内容“继续”若已有准确以本次内容为来源的方案草稿，只补记认可
-  // 并展示它，不依赖文本模型或新请求。失败整体回滚，不留半份认可或队列。
-  private sendStageConfirmation(ownerId: string, conversationId: string, input: MessageInput): { status: 202; receipt: RequestReceipt } {
-    const confirmation = input.stageConfirmation!;
-    const prepares = confirmation.action === "approve_plan" && confirmation.next === "prepare_production";
-    // 决策在事务外读取：方案草稿只前进不回退，不存在核对与记录间的半写状态。
-    const continuesWithoutRequest = confirmation.action === "approve_content_continue"
-      && hasPlanDraftForContent(this.options.db, { ownerId, conversationId }, confirmation.workId, confirmation.subject);
-    const queues = (confirmation.action === "approve_content_continue" && !continuesWithoutRequest) || prepares;
+  // 组审阅认可（按钮）：认可在接收事务里直接记录，不进 Pi；只有“认可并继续”排一次现有队列请求，
+  // 让助手基于认可后的事实继续后续组工作。失败整体回滚，不留半份认可或队列。
+  private sendReviewConfirmation(ownerId: string, conversationId: string, input: MessageInput): { status: 202; receipt: RequestReceipt } {
+    const confirmation = input.reviewConfirmation!;
+    const queues = confirmation.action === "approve_and_continue";
     if (queues) this.options.skillPackages?.resources();
     const receipt = this.options.db.transaction(() => {
-      // 文本模型只在需要排 Pi 请求时需要；纯认可即使没有可用文本模型也能完成。
+      // 文本模型只在排 Pi 请求时需要；纯认可即使没有可用文本模型也能完成。
       const binding = queues ? this.options.defaultTextBinding() : null;
-      if (queues && !binding) throw new AgentError("CAPABILITY_UNAVAILABLE", confirmation.action === "approve_content_continue" ? "尚未配置可用的文本模型，暂不能继续画面阶段；认可未写入。" : "尚未配置可用的文本模型，暂不能准备制作；认可未写入。");
+      if (queues && !binding) throw new AgentError("CAPABILITY_UNAVAILABLE", "尚未配置可用的文本模型，暂不能继续后续工作；认可未写入。");
       if (queues && pendingRequestCount(this.options.db, conversationId) >= QUEUE_LIMIT) {
         throw new AgentError("QUEUE_FULL", "本会话待处理消息已达上限，请等待当前回合完成。");
       }
@@ -520,33 +591,29 @@ export class AgentService {
         throw new AgentError("INVALID_INPUT", "未安装这个技能。");
       }
       const now = this.options.clock(), requestId = newAgentId("req"), messageId = newAgentId("msg");
-      const subject = confirmation.subject;
-      // 准备制作的请求 target 就是这份准确方案修订；其合法性由下方 recordStageConfirmation 在同事务复核。
-      const requestTarget: Target | null = prepares && subject.kind === "artifact_revision"
-        ? { artifactId: subject.artifactId, revisionId: subject.revisionId, workId: confirmation.workId }
-        : null;
       const references: MessageReferences = {
         ...emptyReferences(),
-        artifacts: subject.kind === "artifact_revision"
-          ? [{ artifactId: subject.artifactId, revisionId: subject.revisionId }] : [],
+        artifacts: confirmation.items.flatMap(item => item.source.kind === "artifact_revision"
+          ? [{ artifactId: item.source.artifactId, revisionId: item.source.revisionId }] : []),
       };
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId, role: "user", kind: "chat",
         state: queues ? "queued" : "completed", text: input.text,
-        target: prepares ? requestTarget : null,
+        target: null,
         createdSeq: nextSeq(this.options.db, "messages", conversationId), references,
       });
       insertQueuedRequest(this.options.db, now, {
         id: requestId, conversationId, ownerId, commandId: input.commandId, text: input.text,
-        target: requestTarget, skillId: queues ? input.skillId : null, modelId: binding?.modelId ?? null,
+        target: null, skillId: queues ? input.skillId : null, modelId: binding?.modelId ?? null,
         queueSeq: nextQueueSeq(this.options.db, conversationId), messageId,
       });
       if (binding) this.options.db.prepare("UPDATE requests SET model_binding_json=? WHERE id=?").run(JSON.stringify(binding), requestId);
       else this.options.db.prepare("UPDATE requests SET state='completed', delivery_closed=1 WHERE id=?").run(requestId);
-      recordStageConfirmation(this.options.db, now, { ownerId, conversationId }, {
-        workId: confirmation.workId, action: confirmation.action, subject,
-        sourceKind: "user_message", sourceId: messageId,
-      });
+      recordReviewConfirmation(this.options.db, now, { ownerId, conversationId }, {
+        workId: confirmation.workId, groupId: confirmation.groupId,
+        items: confirmation.items.map(item => ({ itemId: item.itemId, source: item.source })),
+        action: confirmation.action,
+      }, { kind: "user_message", messageId });
       const row = getRequestRow(this.options.db, ownerId, requestId)!;
       const result = requestReceipt(row, false);
       storeCommandReceipt(this.options.db, now, {
@@ -561,6 +628,8 @@ export class AgentService {
   }
 
   private sendNew(ownerId: string, conversationId: string, input: MessageInput): { status: 202; receipt: RequestReceipt } {    this.options.skillPackages?.resources();
+    // G4-2：作品库选材的入口验证在事务外完成（对冻结工程修订与 blob 行的读取，publishProject 同模式）。
+    const libraryPlan = input.librarySelections?.length ? this.planLibrarySelections(ownerId, input.librarySelections) : null;
     const receipt = this.options.db.transaction(() => {
       // 接收事务内冻结默认条目的完整绑定：执行配置/Key 的后续编辑不影响已接收请求。
       const binding = this.options.defaultTextBinding();
@@ -578,10 +647,14 @@ export class AgentService {
       const now = this.options.clock();
       const requestId = newAgentId("req");
       const messageId = newAgentId("msg");
+      // 物化只读原修订/工程清单建立当前会话新副本，不写原会话 artifact head（§6）。
+      if (libraryPlan) references.artifacts.push(...this.materializeLibrarySelections(ownerId, conversationId, now, requestId, libraryPlan));
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId,
         role: "user", kind: "chat", state: "queued", text: input.text, target: input.target,
         createdSeq: nextSeq(this.options.db, "messages", conversationId), references,
+        ...(input.librarySelections?.length ? { librarySelections: input.librarySelections } : {}),
+        reviewContext: input.reviewContext ?? null,
       });
       insertQueuedRequest(this.options.db, now, {
         id: requestId, conversationId, ownerId, commandId: input.commandId, text: input.text,
@@ -603,6 +676,89 @@ export class AgentService {
     this.options.hub.notifyCommitted(conversationId);
     this.options.registry.kick(conversationId);
     return { status: 202, receipt };
+  }
+
+  // G4-2 入口验证：所选视频必须是本 owner 名下真实 finalize_video 认可的准确修订，
+  // 所选素材/工程文件必须落在该定稿当时冻结的留存清单（modernBinding）里。
+  // 只授权本次明确引用进入当前对话；同 owner 其他会话不因此默认可读。
+  private planLibrarySelections(ownerId: string, selections: readonly LibrarySelection[]): { kind: string; title: string; content: ArtifactRevision["content"] }[] {
+    const db = this.options.db;
+    const items: { kind: string; title: string; content: ArtifactRevision["content"] }[] = [];
+    for (const selection of selections) {
+      const confirmed = db.prepare(`
+        SELECT 1 AS ok FROM (
+          SELECT subject_json FROM work_review_confirmations WHERE owner_id=? AND action='finalize_video'
+          UNION ALL
+          SELECT subject_json FROM work_stage_confirmations WHERE owner_id=? AND action='finalize_video'
+        ) WHERE json_extract(subject_json,'$.revisionId')=? AND json_extract(subject_json,'$.artifactId')=?`)
+        .get(ownerId, ownerId, selection.sourceVideo.revisionId, selection.sourceVideo.artifactId);
+      if (!confirmed) throw new AgentError("INVALID_INPUT", "所选视频还没有定稿入库，不能作为作品库来源。");
+      const videoArtifact = getArtifactRow(db, ownerId, selection.sourceVideo.artifactId);
+      const videoRevision = getRevisionRow(db, selection.sourceVideo.artifactId, selection.sourceVideo.revisionId);
+      if (!videoArtifact || !videoRevision || videoArtifact.kind !== "video") {
+        throw new AgentError("INVALID_INPUT", "作品库来源不是有效的视频修订。");
+      }
+      const parsedBinding = videoRevision.creation_binding_json ? JSON.parse(videoRevision.creation_binding_json) as CreationBinding : null;
+      const modernBinding = parsedBinding && Array.isArray(parsedBinding.inputSources) ? parsedBinding : null;
+      if (!modernBinding) throw new AgentError("INVALID_INPUT", "这条定稿没有记录留存清单，不能引用其中的素材。");
+      const picked = selection.source;
+      if (picked.kind === "artifact_revision") {
+        const source = modernBinding.inputSources.find(item => item.kind === "artifact_revision"
+          && item.artifactId === picked.artifactId && item.revisionId === picked.revisionId);
+        if (!source || source.kind !== "artifact_revision") throw new AgentError("INVALID_INPUT", "所选素材不在定稿当时的留存清单里。");
+        const artifact = getArtifactRow(db, ownerId, source.artifactId);
+        const revision = getRevisionRow(db, source.artifactId, source.revisionId);
+        if (!artifact || !revision) throw new AgentError("INVALID_INPUT", "所选素材修订已不存在。");
+        items.push({ kind: artifact.kind, title: `${artifact.title}（作品库引用）`, content: JSON.parse(revision.content_json) });
+      } else {
+        // §11.7 来源3：多工程合成的定稿允许引用来源链上任一封存工程；同名 relativePath 按所选工程区分。
+        const involved = [modernBinding.projectRevision, ...(modernBinding.projectRevisions ?? [])].filter(ref => ref != null);
+        const project = involved.find(ref => ref.artifactId === picked.project.artifactId && ref.revisionId === picked.project.revisionId);
+        if (!project) {
+          throw new AgentError("INVALID_INPUT", "所选文件不在定稿封存工程里。");
+        }
+        const revision = getRevisionRow(db, project.artifactId, project.revisionId);
+        const content = revision ? JSON.parse(revision.content_json) as { format?: string; files?: { relativePath: string; blobId: string }[] } : null;
+        const file = content?.format === "project" ? content.files?.find(item => item.relativePath === picked.relativePath) : undefined;
+        if (!file) throw new AgentError("INVALID_INPUT", "所选文件不在定稿封存工程清单里。");
+        const blob = db.prepare("SELECT digest, mime_type, duration_ms FROM production_blobs WHERE id=? AND owner_id=?")
+          .get(file.blobId, ownerId) as { digest: string; mime_type: string; duration_ms: number | null } | undefined;
+        if (!blob) throw new AgentError("INVALID_INPUT", "所选工程文件已不存在。");
+        if (blob.mime_type === "video/mp4" || blob.mime_type === "video/webm" || blob.mime_type === "image/png"
+          || blob.mime_type === "image/jpeg" || blob.mime_type === "audio/mpeg" || blob.mime_type === "audio/wav") {
+          // 媒体工程文件只共享 blob、不复制字节；物化修订自动登记 revision_blob_links。
+          items.push({ kind: blob.mime_type.split("/")[0]!, title: `${picked.relativePath}（作品库引用）`,
+            content: { format: "media", blobId: file.blobId, mimeType: blob.mime_type, durationMs: blob.duration_ms } });
+        } else {
+          // §11.7 来源5：其余工程文件一律保留原字节共享 blob、原相对路径与登记 MIME 的文件卡，
+          // 不再默认 utf8 转文稿；字体、模型、压缩包等二进制由 read_artifact/客户端如实呈现或下载。
+          items.push({ kind: "file", title: `${picked.relativePath}（作品库引用）`,
+            content: { format: "file", blobId: file.blobId, mimeType: blob.mime_type, path: picked.relativePath } });
+        }
+      }
+    }
+    return items;
+  }
+
+  // G4-2 物化：把已验证的选材在当前会话建立新 artifact 修订（原素材只读引用或新副本派生），
+  // 返回填入消息 references 的准确修订引用；不修改原会话任何 artifact head。
+  private materializeLibrarySelections(
+    ownerId: string, conversationId: string, now: string, requestId: string,
+    plan: readonly { kind: string; title: string; content: ArtifactRevision["content"] }[],
+  ): MessageReferences["artifacts"] {
+    const refs: MessageReferences["artifacts"] = [];
+    for (const item of plan) {
+      const artifactId = newAgentId("art");
+      this.options.db.prepare(
+        `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, ?, ?, ?)`,
+      ).run(artifactId, conversationId, ownerId, item.title, item.kind,
+        nextSeq(this.options.db, "artifacts", conversationId), now, now);
+      const revision = insertRevision(this.options.db, now, getArtifactRow(this.options.db, ownerId, artifactId)!, null,
+        { title: item.title, kind: item.kind, content: item.content }, requestId);
+      refs.push({ artifactId, revisionId: revision.id });
+    }
+    return refs;
   }
 
   private async sendSteer(ownerId: string, conversationId: string, input: MessageInput): Promise<{ status: 202; receipt: RequestReceipt }> {
@@ -628,6 +784,7 @@ export class AgentService {
           id: messageId, conversationId, ownerId, requestId,
           role: "user", kind: "chat", state: "running", text: input.text, target: input.target,
           createdSeq: nextSeq(this.options.db, "messages", conversationId), references: emptyReferences(),
+          reviewContext: input.reviewContext ?? null,
         });
         const result = { ...requestReceipt(request, false), messageId };
         storeCommandReceipt(this.options.db, now, {
@@ -723,7 +880,11 @@ export class AgentService {
       this.requireTarget(ownerId, conversationId, input.target);
       const now = this.options.clock();
       const messageId = newAgentId("msg");
-      const note = hasProductionLock(this.options.db, input.target.artifactId) ? feedbackNote("next_version") : feedbackNote();
+      // 制作在途时对该事项的意见都属于下一版（与 record_work_feedback 同一判定）；受理依据不拦改稿，
+      // 只影响意见归属；无事项关联的散件再看输入锁。
+      const note = input.target.workId !== null && workInFlight(this.options.db, input.target.workId)
+        || hasProductionLock(this.options.db, input.target.artifactId)
+        ? feedbackNote("next_version") : feedbackNote();
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId: null,
         role: "user", kind: "feedback", state: "completed", text: input.text, target: input.target,
@@ -764,11 +925,28 @@ export class AgentService {
     const result = this.options.db.transaction(() => {
       const replay = checkCommandReceipt<Proposal>(this.options.db, key, input);
       if (replay.kind === "replay") return { proposal: replay.receipt, replayed: true };
-      const { proposal } = applyPrepareProposal(this.options.db, this.options.clock(), {
+      // HTTP 没有在途 Pi 请求：按纯命令记法预生成一对真实闭合的请求与系统通知作为
+      // requestSource 事实（requests.message_id 非空，与 Pi 路径同形），不排队、不进文本模型。
+      const now = this.options.clock(), requestId = newAgentId("req"), messageId = newAgentId("msg");
+      const { proposal } = applyPrepareProposal(this.options.db, now, {
         ownerId, conversationId,
-      }, input.spec, this.options.catalog(), probes, input.planSource, input.replacesProposal);
-      const payload = rowToProposal(proposal, this.options.db);
-      storeCommandReceipt(this.options.db, this.options.clock(), key, input, payload);
+      }, input.spec, this.options.catalog(), { requestId, messageId }, probes, input.replacesProposal);
+      insertMessage(this.options.db, now, {
+        id: messageId, conversationId, ownerId, requestId,
+        role: "system_notice", kind: "notice", state: "completed",
+        text: `已通过接口准备提案“${input.spec.title}”。`,
+        target: null, createdSeq: nextSeq(this.options.db, "messages", conversationId),
+        references: { ...emptyReferences(), proposalIds: [proposal.id] },
+      });
+      insertQueuedRequest(this.options.db, now, {
+        id: requestId, conversationId, ownerId, commandId: input.commandId, text: "",
+        target: null, skillId: null, modelId: null,
+        queueSeq: nextQueueSeq(this.options.db, conversationId), messageId,
+      });
+      this.options.db.prepare("UPDATE requests SET state='completed', delivery_closed=1 WHERE id=?").run(requestId);
+      const payload = rowToProposal(proposal, this.options.db, this.options.catalog());
+      storeCommandReceipt(this.options.db, now, key, input, payload);
+      touchConversation(this.options.db, now, conversationId);
       return { proposal: payload, replayed: false };
     })();
     this.options.hub.notifyCommitted(conversationId);
@@ -778,7 +956,7 @@ export class AgentService {
   readProposal(ownerId: string, proposalId: string): Proposal {
     const row = getProposalRow(this.options.db, ownerId, proposalId);
     if (!row) throw new AgentError("NOT_FOUND", "没有找到这个提案。");
-    return rowToProposal(row, this.options.db);
+    return rowToProposal(row, this.options.db, this.options.catalog());
   }
 
   acceptProposal(ownerId: string, proposalId: string, input: AcceptProposal) {
@@ -870,7 +1048,7 @@ export class AgentService {
     const row = getProposalRow(this.options.db, ownerId, ref.proposalId);
     if (!row) throw new AgentError("NOT_FOUND", "没有找到这个提案。");
     if (row.digest !== ref.digest) throw new AgentError("INVALID_INPUT", "提案摘要不一致，请重新读取提案。");
-    return rowToProposal(row, this.options.db);
+    return rowToProposal(row, this.options.db, this.options.catalog());
   }
 
   private requireTarget(ownerId: string, conversationId: string, target: Target): void {
@@ -911,6 +1089,7 @@ function pageCursor(
 
 // 作品库投影行：确认表按 rowid（首次定稿位置）倒序去重后的最小行。
 interface LibraryConfirmationRow {
+  src: number;
   pos: number;
   conversation_id: string;
   work_id: string;

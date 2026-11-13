@@ -22,6 +22,7 @@ import {
 } from "./agent/additional-media-settings.js";
 import { ImageGenerationPort } from "./agent/image-generation.js";
 import { OpenAISpeechPort } from "./agent/openai-speech.js";
+import { CreativeRunner } from "./agent/creative-runner.js";
 import { validatorFor } from "./agent/validate.js";
 import type { ImportedSettings } from "../shared/agent/generated/contracts.js";
 import { systemClock } from "./agent/util.js";
@@ -29,6 +30,13 @@ import type { AgentDatabase } from "./agent/db.js";
 import type { ProductionBlobs } from "./agent/production-blobs.js";
 import { readStudioAuthEnvironment } from "./auth.js";
 import { MaintenanceGate } from "./maintenance-gate.js";
+import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
+
+// Pi 的网络依赖会替换 Node 启动时的 dispatcher，因此在全部导入后应用环境代理。
+// 未配置 HTTP(S) 代理时保持直连，由宿主 VPN/路由分流；NO_PROXY 交给 Undici。
+if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.https_proxy) {
+  setGlobalDispatcher(new EnvHttpProxyAgent());
+}
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 const development = process.env.STUDIO_DEV === "1";
@@ -50,13 +58,17 @@ if (!validatorFor("ImportedSettings")(imported).ok) throw new Error("导入配�
 const legacyConfigFile = process.env.AGENT_MEDIA_CONFIG_FILE?.trim() || undefined;
 const legacyAuthorized = process.env.AGENT_MEDIA_CREDENTIALS_AUTHORIZED === "1";
 const render = await localRenderAvailability();
-console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}`);
 const workRoot = path.join(agentDataDir, "media-work");
+// 隔离创作环境（原生创作工具与 code_project 执行）经宿主 UDS 入口装配；未提供时相关工具如实不可用。
+const creativeSocket = process.env.AGENT_CREATIVE_RUNNER_SOCKET?.trim();
+const creativeRunner = creativeSocket ? new CreativeRunner({ socketPath: creativeSocket }) : undefined;
+console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}；隔离创作环境${creativeSocket ? `已接入（${creativeSocket}）` : "未装配（code_project 与原生创作工具不可用）"}`);
 const runtime = await maintenanceGate.withAdmission("agent-startup", () => createAgentRuntime({
   dataDir: agentDataDir,
   providerConnections: true,
   importedSettings: imported as ImportedSettings,
   skillsRoot: path.join(repositoryRoot, "apps/studio/skills"),
+  ...(creativeRunner ? { creative: { runner: creativeRunner } } : {}),
   host: {}, models: [], defaultModelId: "unconfigured",
   text: {
     // 初始化先于 host 与队列恢复；执行版本由统一连接保存投影生成，启动不再读取旧文本配置文件。
@@ -83,7 +95,7 @@ const runtime = await maintenanceGate.withAdmission("agent-startup", () => creat
       const wanVideoPort = new WanVideoPort(db, blobs, systemClock, { resolve: binding => resolveWanVideoBinding(db, binding), workRoot });
       return {
         port: new RealMediaGateway(
-          new LocalRenderPort(db, blobs, systemClock, { workRoot }),
+          new LocalRenderPort(db, blobs, systemClock, { workRoot }, creativeRunner),
           {
             resolveProviderPort: binding => {
               if (resolveImageBinding(db, binding)) return imagePort;

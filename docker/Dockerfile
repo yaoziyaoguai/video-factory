@@ -13,8 +13,11 @@ RUN npm run studio:build && npm prune --omit=dev --no-audit --no-fund && mkdir -
 
 FROM node:22-bookworm-slim
 ENV NODE_ENV=production STUDIO_HOST=0.0.0.0 STUDIO_PORT=4317 VIDEO_FACTORY_WORKSPACE=/data/factory HOME=/data/factory
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk ca-certificates git && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk ca-certificates git python3 python3-venv && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 frame && useradd -u 1001 -g frame -d /data/factory frame && install -d -o frame -g frame /data/factory
+COPY docker/edge-tts-requirements.txt /opt/frame/edge-tts-requirements.txt
+RUN python3 -m venv /opt/frame-tts && /opt/frame-tts/bin/python3 -m pip install --no-cache-dir -r /opt/frame/edge-tts-requirements.txt
+ENV PATH="/opt/frame-tts/bin:${PATH}"
 WORKDIR /app
 COPY --from=build --chown=frame:frame /app/node_modules ./node_modules
 COPY --from=build --chown=frame:frame /app/apps/studio/node_modules apps/studio/node_modules

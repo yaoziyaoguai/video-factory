@@ -120,7 +120,11 @@
     "name": "exact narration cannot be an empty marker",
     "schema": "MarkdownContent",
     "valid": false,
-    "value": { "format": "markdown", "text": "方案", "narrationText": "" }
+    "value": {
+      "format": "markdown",
+      "text": "方案",
+      "narrationText": ""
+    }
   },
   {
     "name": "create conversation",
@@ -258,7 +262,8 @@
           },
           "kind": "chat",
           "feedback": null,
-          "createdSequence": 1
+          "createdSequence": 1,
+          "librarySelections": []
         }
       ],
       "nextCursor": null,
@@ -398,7 +403,7 @@
   },
   {
     "name": "prepare intent no client quote",
-    "schema": "PrepareProposal",
+    "schema": "LegacyPrepareProposal",
     "valid": true,
     "value": {
       "commandId": "cmd_prepare",
@@ -513,7 +518,8 @@
       "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
       "expiresAt": "2026-10-25T08:15:00Z",
       "acceptedRunId": null,
-      "revision": 1
+      "revision": 1,
+      "acceptanceBlocker": null
     }
   },
   {
@@ -579,7 +585,8 @@
       "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
       "expiresAt": "2026-10-25T08:15:00Z",
       "acceptedRunId": "run_1",
-      "revision": 1
+      "revision": 1,
+      "acceptanceBlocker": null
     }
   },
   {
@@ -603,7 +610,6 @@
         "conversationId": "conversation_1",
         "workId": "work_1",
         "snapshotId": "snapshot_1",
-        "proposalId": "proposal_1",
         "revision": 1,
         "state": "queued",
         "finance": {
@@ -633,7 +639,11 @@
             "media": null
           }
         ],
-        "segments": []
+        "segments": [],
+        "origin": {
+          "kind": "proposal",
+          "proposalId": "proposal_1"
+        }
       }
     }
   },
@@ -658,7 +668,6 @@
         "conversationId": "conversation_1",
         "workId": "work_1",
         "snapshotId": "snapshot_1",
-        "proposalId": "proposal_1",
         "revision": 2,
         "state": "cancel_requested",
         "finance": {
@@ -693,7 +702,11 @@
             }
           }
         ],
-        "segments": []
+        "segments": [],
+        "origin": {
+          "kind": "proposal",
+          "proposalId": "proposal_1"
+        }
       },
       "cancellation": "requested"
     }
@@ -707,7 +720,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 3,
       "state": "cancelled",
       "finance": {
@@ -767,7 +779,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -779,7 +795,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "queued",
       "finance": {
@@ -815,7 +830,11 @@
           "media": null
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -827,7 +846,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "running",
       "finance": {
@@ -884,7 +902,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -896,7 +918,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "unknown",
       "finance": {
@@ -956,7 +977,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -968,7 +993,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "cancel_requested",
       "finance": {
@@ -1025,7 +1049,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -1037,7 +1065,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "succeeded",
       "finance": {
@@ -1142,7 +1169,11 @@
           "startMs": null,
           "durationMs": null
         }
-      ]
+      ],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -1154,7 +1185,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "failed",
       "finance": {
@@ -1211,7 +1241,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -1223,7 +1257,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "cancelled",
       "finance": {
@@ -1280,7 +1313,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -1314,7 +1351,8 @@
             },
             "kind": "chat",
             "feedback": null,
-            "createdSequence": 1
+            "createdSequence": 1,
+            "librarySelections": []
           }
         ],
         "nextCursor": null,
@@ -1342,7 +1380,6 @@
             "conversationId": "conversation_1",
             "workId": "work_1",
             "snapshotId": "snapshot_1",
-            "proposalId": "proposal_1",
             "revision": 1,
             "state": "queued",
             "finance": {
@@ -1372,7 +1409,11 @@
                 "media": null
               }
             ],
-            "segments": []
+            "segments": [],
+            "origin": {
+              "kind": "proposal",
+              "proposalId": "proposal_1"
+            }
           }
         ],
         "nextCursor": null,
@@ -1492,12 +1533,13 @@
           "revisionId": "revision_1"
         }
       ],
-      "deliveryClosed": true
+      "deliveryClosed": true,
+      "reviewTargets": []
     }
   },
   {
     "name": "tool prepares no authorization",
-    "schema": "ToolPrepareProposal",
+    "schema": "LegacyToolPrepareProposal",
     "valid": true,
     "value": {
       "spec": {
@@ -1838,7 +1880,7 @@
   },
   {
     "name": "model self approval",
-    "schema": "ToolPrepareProposal",
+    "schema": "LegacyToolPrepareProposal",
     "valid": false,
     "value": {
       "spec": {
@@ -1891,7 +1933,7 @@
   },
   {
     "name": "client forged price",
-    "schema": "PrepareProposal",
+    "schema": "LegacyPrepareProposal",
     "valid": false,
     "value": {
       "commandId": "cmd_fake",
@@ -2304,7 +2346,8 @@
       "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
       "expiresAt": "2026-10-25T08:15:00Z",
       "acceptedRunId": null,
-      "revision": 1
+      "revision": 1,
+      "acceptanceBlocker": null
     }
   },
   {
@@ -2370,7 +2413,8 @@
       "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
       "expiresAt": "2026-10-25T08:15:00Z",
       "acceptedRunId": "run_1",
-      "revision": 1
+      "revision": 1,
+      "acceptanceBlocker": null
     }
   },
   {
@@ -2382,7 +2426,6 @@
       "conversationId": "conversation_1",
       "workId": "work_1",
       "snapshotId": "snapshot_1",
-      "proposalId": "proposal_1",
       "revision": 1,
       "state": "done",
       "finance": {
@@ -2417,7 +2460,11 @@
           }
         }
       ],
-      "segments": []
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
     }
   },
   {
@@ -2661,7 +2708,8 @@
       },
       "kind": "chat",
       "feedback": null,
-      "createdSequence": 1
+      "createdSequence": 1,
+      "librarySelections": []
     }
   },
   {
@@ -2694,7 +2742,8 @@
         "workId": null,
         "contentSource": null
       },
-      "createdSequence": 1
+      "createdSequence": 1,
+      "librarySelections": []
     }
   },
   {
@@ -2858,7 +2907,8 @@
       "state": "ready",
       "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
       "expiresAt": "2026-10-25T08:15:00Z",
-      "acceptedRunId": null
+      "acceptedRunId": null,
+      "acceptanceBlocker": null
     }
   },
   {
@@ -2891,7 +2941,8 @@
         "workId": null,
         "contentSource": null
       },
-      "createdSequence": 1
+      "createdSequence": 1,
+      "librarySelections": []
     }
   },
   {
@@ -3232,7 +3283,8 @@
           "revision": 1,
           "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "expiresAt": "2026-10-26T08:30:00Z",
-          "acceptedRunId": null
+          "acceptedRunId": null,
+          "acceptanceBlocker": null
         }
       ],
       "nextCursor": null,
@@ -3251,9 +3303,12 @@
           "title": "旅行开场配音",
           "state": "unknown",
           "revision": 1,
-          "proposalId": "prop_1",
           "createdAt": "2026-10-26T08:00:00Z",
-          "updatedAt": "2026-10-26T08:05:00Z"
+          "updatedAt": "2026-10-26T08:05:00Z",
+          "origin": {
+            "kind": "proposal",
+            "proposalId": "prop_1"
+          }
         }
       ],
       "nextCursor": "cnVucy0xMA",
@@ -3395,9 +3450,12 @@
           "title": "旅行开场配音",
           "state": "unknown",
           "revision": 1,
-          "proposalId": "prop_1",
           "createdAt": "2026-10-26T08:00:00Z",
-          "updatedAt": "2026-10-26T08:05:00Z"
+          "updatedAt": "2026-10-26T08:05:00Z",
+          "origin": {
+            "kind": "proposal",
+            "proposalId": "prop_1"
+          }
         }
       ],
       "nextCursor": "cnVucy0xMA",
@@ -3461,7 +3519,8 @@
         "materialBatchIds": []
       },
       "kind": "chat",
-      "feedback": null
+      "feedback": null,
+      "librarySelections": []
     }
   },
   {
@@ -3485,7 +3544,8 @@
       },
       "kind": "chat",
       "feedback": null,
-      "createdSequence": 0
+      "createdSequence": 0,
+      "librarySelections": []
     }
   },
   {
@@ -4452,7 +4512,7 @@
   },
   {
     "name": "prepare from ordinary chat text without artifact",
-    "schema": "PrepareProposal",
+    "schema": "LegacyPrepareProposal",
     "valid": true,
     "value": {
       "commandId": "cmd_prepare",
@@ -4529,7 +4589,9 @@
         "travel"
       ],
       "status": "ready",
-      "diagnostics": []
+      "diagnostics": [],
+      "runtimeStatus": "unchecked",
+      "runtimeMissing": []
     }
   },
   {
@@ -4547,7 +4609,9 @@
             "travel"
           ],
           "status": "ready",
-          "diagnostics": []
+          "diagnostics": [],
+          "runtimeStatus": "unchecked",
+          "runtimeMissing": []
         },
         {
           "id": "package_local",
@@ -4559,7 +4623,9 @@
             "revise"
           ],
           "status": "ready",
-          "diagnostics": []
+          "diagnostics": [],
+          "runtimeStatus": "unchecked",
+          "runtimeMissing": []
         },
         {
           "id": "package_empty",
@@ -4570,7 +4636,9 @@
           "status": "no_skills",
           "diagnostics": [
             "包中未发现 Skill。"
-          ]
+          ],
+          "runtimeStatus": "unchecked",
+          "runtimeMissing": []
         },
         {
           "id": "package_invalid",
@@ -4581,7 +4649,9 @@
           "status": "invalid",
           "diagnostics": [
             "已配置来源不可用；刷新不会自动重新安装。"
-          ]
+          ],
+          "runtimeStatus": "unchecked",
+          "runtimeMissing": []
         }
       ],
       "skills": [
@@ -4794,7 +4864,9 @@
       "origin": "installed",
       "skillIds": [],
       "status": "available",
-      "diagnostics": []
+      "diagnostics": [],
+      "runtimeStatus": "unchecked",
+      "runtimeMissing": []
     }
   },
   {
@@ -4810,7 +4882,7 @@
   },
   {
     "name": "work with confirmed content and ready plan draft",
-    "schema": "Work",
+    "schema": "LegacyWork",
     "valid": true,
     "value": {
       "id": "work_1",
@@ -4873,7 +4945,7 @@
   },
   {
     "name": "work adopting exact chat text",
-    "schema": "Work",
+    "schema": "LegacyWork",
     "valid": true,
     "value": {
       "id": "work_2",
@@ -4982,7 +5054,7 @@
   },
   {
     "name": "message approving content and continuing",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": true,
     "value": {
       "commandId": "command_1",
@@ -5006,7 +5078,7 @@
   },
   {
     "name": "stage confirmation cannot carry a target",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": false,
     "value": {
       "commandId": "command_1",
@@ -5034,7 +5106,7 @@
   },
   {
     "name": "plan approval queues one prepare request",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": true,
     "value": {
       "commandId": "command_plan_next",
@@ -5059,7 +5131,7 @@
   },
   {
     "name": "prepare next only pairs with plan approval",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": false,
     "value": {
       "commandId": "command_plan_next_bad",
@@ -5084,7 +5156,7 @@
   },
   {
     "name": "plan approval requires an artifact subject",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": false,
     "value": {
       "commandId": "command_1",
@@ -5107,7 +5179,7 @@
   },
   {
     "name": "content approval only allows skill when continuing",
-    "schema": "MessageInput",
+    "schema": "LegacyMessageInput",
     "valid": false,
     "value": {
       "commandId": "command_1",
@@ -5130,7 +5202,7 @@
   },
   {
     "name": "delivery binds a plan draft to its proposal",
-    "schema": "ToolDelivery",
+    "schema": "LegacyToolDelivery",
     "valid": true,
     "value": {
       "items": [
@@ -5174,7 +5246,7 @@
   },
   {
     "name": "delivery stage drafts cannot be empty",
-    "schema": "ToolDelivery",
+    "schema": "LegacyToolDelivery",
     "valid": false,
     "value": {
       "items": [
@@ -5367,7 +5439,7 @@
   },
   {
     "name": "stage view exposes latest confirmation action",
-    "schema": "Work",
+    "schema": "LegacyWork",
     "valid": true,
     "value": {
       "id": "work_9",
@@ -5458,7 +5530,8 @@
         "workId": null,
         "contentSource": null
       },
-      "createdSequence": 1
+      "createdSequence": 1,
+      "librarySelections": []
     }
   },
   {
@@ -5491,7 +5564,8 @@
         "workId": null,
         "contentSource": null
       },
-      "createdSequence": 1
+      "createdSequence": 1,
+      "librarySelections": []
     }
   },
   {
@@ -5581,7 +5655,7 @@
   },
   {
     "name": "PrepareProposal references delivered plan without a new revision",
-    "schema": "PrepareProposal",
+    "schema": "LegacyPrepareProposal",
     "valid": true,
     "value": {
       "commandId": "cmd_prepare",
@@ -5643,7 +5717,7 @@
   },
   {
     "name": "ToolPrepareProposal references delivered plan without a new revision",
-    "schema": "ToolPrepareProposal",
+    "schema": "LegacyToolPrepareProposal",
     "valid": true,
     "value": {
       "spec": {
@@ -6070,7 +6144,12 @@
         "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       },
       "originMessageId": "msg_7",
-      "narrationText": "清晨，山路从云雾中醒来。"
+      "narrationText": "清晨，山路从云雾中醒来。",
+      "project": null,
+      "materials": [],
+      "reviewSources": [],
+      "provenanceStatus": "not_recorded",
+      "projectFiles": []
     }
   },
   {
@@ -6089,7 +6168,12 @@
       "plan": null,
       "content": null,
       "originMessageId": null,
-      "narrationText": null
+      "narrationText": null,
+      "project": null,
+      "materials": [],
+      "reviewSources": [],
+      "provenanceStatus": "not_recorded",
+      "projectFiles": []
     }
   },
   {
@@ -6118,7 +6202,12 @@
             "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           },
           "originMessageId": "msg_7",
-          "narrationText": "清晨，山路从云雾中醒来。"
+          "narrationText": "清晨，山路从云雾中醒来。",
+          "project": null,
+          "materials": [],
+          "reviewSources": [],
+          "provenanceStatus": "not_recorded",
+          "projectFiles": []
         },
         {
           "video": {
@@ -6132,7 +6221,12 @@
           "plan": null,
           "content": null,
           "originMessageId": null,
-          "narrationText": null
+          "narrationText": null,
+          "project": null,
+          "materials": [],
+          "reviewSources": [],
+          "provenanceStatus": "not_recorded",
+          "projectFiles": []
         }
       ],
       "nextCursor": null
@@ -6229,6 +6323,3605 @@
       "revision": 1,
       "enabled": true,
       "writeUnavailableReason": null
+    }
+  },
+  {
+    "name": "review work keeps one approved item and another draft",
+    "schema": "Work",
+    "valid": true,
+    "value": {
+      "id": "work_creation",
+      "title": "林间散步",
+      "revision": 2,
+      "reviewGroups": [
+        {
+          "id": "visual_1",
+          "title": "视觉方向",
+          "revision": 2,
+          "nextIntent": "人物和背景认可后试做片段",
+          "items": [
+            {
+              "id": "character_item",
+              "label": "人物",
+              "role": "character",
+              "required": true,
+              "draft": {
+                "kind": "artifact_revision",
+                "artifactId": "character_1",
+                "revisionId": "character_v1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "approved": {
+                "kind": "artifact_revision",
+                "artifactId": "character_1",
+                "revisionId": "character_v1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "confirmationId": "confirmation_1",
+              "approvedAt": "2026-11-07T08:00:00.000Z",
+              "finalizedSource": null
+            },
+            {
+              "id": "scene_item",
+              "label": "背景",
+              "role": "scene",
+              "required": true,
+              "draft": {
+                "kind": "artifact_revision",
+                "artifactId": "scene_1",
+                "revisionId": "scene_v2",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "approved": null,
+              "confirmationId": null,
+              "approvedAt": null,
+              "finalizedSource": null
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-11-07T08:00:00.000Z",
+      "updatedAt": "2026-11-07T08:00:00.000Z"
+    }
+  },
+  {
+    "name": "new work does not double write fixed stages",
+    "schema": "Work",
+    "valid": false,
+    "value": {
+      "id": "work_creation",
+      "title": "林间散步",
+      "revision": 2,
+      "reviewGroups": [
+        {
+          "id": "visual_1",
+          "title": "视觉方向",
+          "revision": 2,
+          "nextIntent": "人物和背景认可后试做片段",
+          "items": [
+            {
+              "id": "character_item",
+              "label": "人物",
+              "role": "character",
+              "required": true,
+              "draft": {
+                "kind": "artifact_revision",
+                "artifactId": "character_1",
+                "revisionId": "character_v1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "approved": {
+                "kind": "artifact_revision",
+                "artifactId": "character_1",
+                "revisionId": "character_v1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "confirmationId": "confirmation_1",
+              "approvedAt": "2026-11-07T08:00:00.000Z",
+              "finalizedSource": null
+            },
+            {
+              "id": "scene_item",
+              "label": "背景",
+              "role": "scene",
+              "required": true,
+              "draft": {
+                "kind": "artifact_revision",
+                "artifactId": "scene_1",
+                "revisionId": "scene_v2",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "approved": null,
+              "confirmationId": null,
+              "approvedAt": null,
+              "finalizedSource": null
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-11-07T08:00:00.000Z",
+      "updatedAt": "2026-11-07T08:00:00.000Z",
+      "stage": "content",
+      "stages": {}
+    }
+  },
+  {
+    "name": "accepted target may be pending without fictional media",
+    "schema": "ReviewItem",
+    "valid": true,
+    "value": {
+      "id": "scene_item",
+      "label": "背景",
+      "role": "scene",
+      "required": true,
+      "draft": null,
+      "approved": null,
+      "confirmationId": null,
+      "approvedAt": null,
+      "finalizedSource": null
+    }
+  },
+  {
+    "name": "video item approved and finalized shows its recorded source",
+    "schema": "ReviewItem",
+    "valid": true,
+    "value": {
+      "id": "final_item",
+      "label": "成片",
+      "role": "video",
+      "required": true,
+      "draft": {
+        "kind": "artifact_revision",
+        "artifactId": "video_1",
+        "revisionId": "video_v1",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "approved": {
+        "kind": "artifact_revision",
+        "artifactId": "video_1",
+        "revisionId": "video_v1",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "finalizedSource": {
+        "kind": "artifact_revision",
+        "artifactId": "video_1",
+        "revisionId": "video_v1",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "confirmationId": "confirmation_video_1",
+      "approvedAt": "2026-11-07T08:00:00.000Z"
+    }
+  },
+  {
+    "name": "single item confirmation binds its exact source",
+    "schema": "ReviewConfirmation",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "approve"
+    }
+  },
+  {
+    "name": "group confirmation lists exact unchanged items without group lock",
+    "schema": "ReviewConfirmation",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "itemId": "scene_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "scene_1",
+            "revisionId": "scene_v2",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "approve_and_continue"
+    }
+  },
+  {
+    "name": "confirmation cannot be an empty continue command",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [],
+      "action": "approve"
+    }
+  },
+  {
+    "name": "confirmation cannot claim source user message",
+    "schema": "ToolConfirmReview",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "approve",
+      "sourceMessageId": "message_forged"
+    }
+  },
+  {
+    "name": "confirm review only records the current request fact",
+    "schema": "ToolConfirmReview",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "approve"
+    }
+  },
+  {
+    "name": "finalize targets one exact final video",
+    "schema": "ReviewConfirmation",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "video_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "video_1",
+            "revisionId": "video_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "finalize cannot target several items",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "itemId": "scene_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "finalize cannot target message text",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "items": [
+        {
+          "itemId": "video_item",
+          "source": {
+            "kind": "message_text",
+            "messageId": "message_1",
+            "text": "认可"
+          }
+        }
+      ],
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "binding separates actual inputs from necessary approved inputs",
+    "schema": "CreationBinding",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "character_item",
+      "inputSources": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "reviewInputs": [
+        {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "confirmationId": "confirmation_1"
+        }
+      ],
+      "purpose": "production",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "runId": "run_local",
+      "projectRevisions": [
+        {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        {
+          "artifactId": "project_2",
+          "revisionId": "project_v2"
+        }
+      ]
+    }
+  },
+  {
+    "name": "preview may retain exact draft input without fake confirmation",
+    "schema": "CreationBinding",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "character_item",
+      "inputSources": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "reviewInputs": [],
+      "purpose": "preview",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "runId": "run_local"
+    }
+  },
+  {
+    "name": "new binding does not retain stage source compatibility columns",
+    "schema": "CreationBinding",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "character_item",
+      "inputSources": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "reviewInputs": [
+        {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "confirmationId": "confirmation_1"
+        }
+      ],
+      "purpose": "production",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "runId": "run_local",
+      "stage": "plan",
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "review input must identify its exact real confirmation",
+    "schema": "ReviewInput",
+    "valid": false,
+    "value": {
+      "groupId": "visual_1",
+      "itemId": "character_item",
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "project content freezes actual files before execution",
+    "schema": "CreativeProjectContent",
+    "valid": true,
+    "value": {
+      "format": "project",
+      "files": [
+        {
+          "relativePath": "src/walk.py",
+          "blobId": "blob_code",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "purpose": "生成步行动画"
+        },
+        {
+          "relativePath": "timeline.json",
+          "blobId": "blob_timeline",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "purpose": "动作时间线"
+        },
+        {
+          "relativePath": "requirements.lock",
+          "blobId": "blob_lock",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "purpose": "依赖锁文件"
+        }
+      ],
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "runtimeImage": "frame-creative@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dependencyLocks": [
+        "requirements.lock"
+      ],
+      "timelineFiles": [
+        "timeline.json"
+      ],
+      "sourceRevisions": [
+        {
+          "artifactId": "character_1",
+          "revisionId": "character_v1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "project file cannot expose an absolute host path",
+    "schema": "ProjectFile",
+    "valid": false,
+    "value": {
+      "relativePath": "/Users/example/private.py",
+      "blobId": "blob_code",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "purpose": "生成步行动画"
+    }
+  },
+  {
+    "name": "project rejects unconfined path ../escape.py",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "../escape.py"
+  },
+  {
+    "name": "project rejects unconfined path src/../../escape.py",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "src/../../escape.py"
+  },
+  {
+    "name": "project rejects unconfined path ./src/main.py",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "./src/main.py"
+  },
+  {
+    "name": "project rejects unconfined path C:\\host.py",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "C:\\host.py"
+  },
+  {
+    "name": "project rejects unconfined path src//main.py",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "src//main.py"
+  },
+  {
+    "name": "project revision is a first class artifact",
+    "schema": "ArtifactRevision",
+    "valid": true,
+    "value": {
+      "artifactId": "project_1",
+      "revisionId": "project_v1",
+      "revisionNumber": 1,
+      "baseRevisionId": null,
+      "requestId": "request_creation",
+      "runId": null,
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "content": {
+        "format": "project",
+        "files": [
+          {
+            "relativePath": "src/walk.py",
+            "blobId": "blob_code",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "purpose": "生成步行动画"
+          },
+          {
+            "relativePath": "timeline.json",
+            "blobId": "blob_timeline",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "purpose": "动作时间线"
+          },
+          {
+            "relativePath": "requirements.lock",
+            "blobId": "blob_lock",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "purpose": "依赖锁文件"
+          }
+        ],
+        "entrypoint": {
+          "argv": [
+            "python",
+            "src/walk.py"
+          ]
+        },
+        "runtimeImage": "frame-creative@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dependencyLocks": [
+          "requirements.lock"
+        ],
+        "timelineFiles": [
+          "timeline.json"
+        ],
+        "sourceRevisions": [
+          {
+            "artifactId": "character_1",
+            "revisionId": "character_v1"
+          }
+        ]
+      },
+      "createdAt": "2026-11-07T08:00:00.000Z"
+    }
+  },
+  {
+    "name": "library binary file revision",
+    "schema": "ArtifactRevision",
+    "valid": true,
+    "value": {
+      "artifactId": "artifact_file",
+      "revisionId": "revision_file",
+      "revisionNumber": 1,
+      "baseRevisionId": null,
+      "requestId": "request_library",
+      "runId": null,
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content": {
+        "format": "file",
+        "blobId": "blob_font",
+        "mimeType": "application/octet-stream",
+        "path": "assets/logo-font.bin"
+      },
+      "createdAt": "2026-11-08T08:00:00Z"
+    }
+  },
+  {
+    "name": "project artifact head exposes project kind",
+    "schema": "ArtifactHead",
+    "valid": true,
+    "value": {
+      "id": "project_1",
+      "title": "步行动画工程",
+      "kind": "project",
+      "revisionId": "project_v1",
+      "revisionNumber": 1,
+      "workId": "work_creation",
+      "updatedAt": "2026-11-07T08:00:00.000Z"
+    }
+  },
+  {
+    "name": "publish project is only a persistent freeze",
+    "schema": "ToolPublishProject",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "title": "步行动画工程",
+      "files": [
+        "src/walk.py",
+        "timeline.json",
+        "requirements.lock"
+      ],
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "dependencyLocks": [
+        "requirements.lock"
+      ],
+      "timelineFiles": [
+        "timeline.json"
+      ],
+      "sourceRevisions": [
+        {
+          "artifactId": "character_1",
+          "revisionId": "character_v1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "project revision requires both artifact and exact base",
+    "schema": "ToolPublishProject",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "title": "步行动画工程",
+      "files": [
+        "src/walk.py",
+        "timeline.json",
+        "requirements.lock"
+      ],
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "dependencyLocks": [
+        "requirements.lock"
+      ],
+      "timelineFiles": [
+        "timeline.json"
+      ],
+      "sourceRevisions": [
+        {
+          "artifactId": "character_1",
+          "revisionId": "character_v1"
+        }
+      ],
+      "artifactId": "project_1"
+    }
+  },
+  {
+    "name": "publish cannot select a host path",
+    "schema": "ToolPublishProject",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "title": "步行动画工程",
+      "files": [
+        "/private/main.py"
+      ],
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "dependencyLocks": [
+        "requirements.lock"
+      ],
+      "timelineFiles": [
+        "timeline.json"
+      ],
+      "sourceRevisions": [
+        {
+          "artifactId": "character_1",
+          "revisionId": "character_v1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "code project declares actual image parameters",
+    "schema": "CodeProjectParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.png",
+      "expectedMediaKind": "image",
+      "format": "png",
+      "width": 640,
+      "height": 360
+    }
+  },
+  {
+    "name": "existing render supports code project image",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.png",
+      "expectedMediaKind": "image",
+      "format": "png",
+      "width": 640,
+      "height": 360
+    }
+  },
+  {
+    "name": "code project declares actual audio parameters",
+    "schema": "CodeProjectParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/theme.wav",
+      "expectedMediaKind": "audio",
+      "format": "wav",
+      "sampleRate": 48000,
+      "channels": 2
+    }
+  },
+  {
+    "name": "existing render supports code project audio",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/theme.wav",
+      "expectedMediaKind": "audio",
+      "format": "wav",
+      "sampleRate": 48000,
+      "channels": 2
+    }
+  },
+  {
+    "name": "code project declares actual video parameters",
+    "schema": "CodeProjectParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.mp4",
+      "expectedMediaKind": "video",
+      "format": "mp4",
+      "width": 640,
+      "height": 360,
+      "fps": 24
+    }
+  },
+  {
+    "name": "existing render supports code project video",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.mp4",
+      "expectedMediaKind": "video",
+      "format": "mp4",
+      "width": 640,
+      "height": 360,
+      "fps": 24
+    }
+  },
+  {
+    "name": "code project images never inherit fps",
+    "schema": "CodeProjectParameters",
+    "valid": false,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.png",
+      "expectedMediaKind": "image",
+      "format": "png",
+      "width": 640,
+      "height": 360,
+      "fps": 24
+    }
+  },
+  {
+    "name": "code project audio never inherits video dimensions",
+    "schema": "CodeProjectParameters",
+    "valid": false,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/theme.wav",
+      "expectedMediaKind": "audio",
+      "format": "wav",
+      "sampleRate": 48000,
+      "channels": 2,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  {
+    "name": "code project video requires fps",
+    "schema": "CodeProjectParameters",
+    "valid": false,
+    "value": {
+      "assembly": "code_project",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "entrypoint": {
+        "argv": [
+          "python",
+          "src/walk.py"
+        ]
+      },
+      "outputPath": "outputs/walk.mp4",
+      "expectedMediaKind": "video",
+      "format": "mp4",
+      "width": 640,
+      "height": 360
+    }
+  },
+  {
+    "name": "local creation has typed snapshot and no financial fiction",
+    "schema": "LocalCreationSpec",
+    "valid": true,
+    "value": {
+      "type": "local_creation",
+      "workId": "work_creation",
+      "title": "人物初始样张",
+      "requestSource": {
+        "requestId": "request_creation",
+        "messageId": "message_creation"
+      },
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "kind": "render",
+          "model": null,
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "baseRevisionId": null
+          }
+        }
+      ],
+      "finalOutput": {
+        "operationId": "render_character",
+        "outputSlot": "portrait"
+      }
+    }
+  },
+  {
+    "name": "local snapshot cannot carry a zero budget",
+    "schema": "LocalCreationSpec",
+    "valid": false,
+    "value": {
+      "type": "local_creation",
+      "workId": "work_creation",
+      "title": "人物初始样张",
+      "requestSource": {
+        "requestId": "request_creation",
+        "messageId": "message_creation"
+      },
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "kind": "render",
+          "model": null,
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "baseRevisionId": null
+          }
+        }
+      ],
+      "finalOutput": {
+        "operationId": "render_character",
+        "outputSlot": "portrait"
+      },
+      "maxSpend": {
+        "currency": "CNY",
+        "amountMinor": 0
+      }
+    }
+  },
+  {
+    "name": "local operation cannot carry a zero quote",
+    "schema": "LocalRenderOperation",
+    "valid": false,
+    "value": {
+      "operationId": "render_character",
+      "outputSlot": "portrait",
+      "inputs": [],
+      "kind": "render",
+      "model": null,
+      "parameters": {
+        "assembly": "code_project",
+        "projectRevision": {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        "entrypoint": {
+          "argv": [
+            "python",
+            "src/walk.py"
+          ]
+        },
+        "outputPath": "outputs/walk.png",
+        "expectedMediaKind": "image",
+        "format": "png",
+        "width": 640,
+        "height": 360
+      },
+      "target": {
+        "groupId": "visual_1",
+        "itemId": "character_item",
+        "baseRevisionId": null
+      },
+      "quotePerAttempt": {
+        "currency": "CNY",
+        "amountMinor": 0
+      }
+    }
+  },
+  {
+    "name": "local operation cannot submit a paid provider",
+    "schema": "LocalRenderOperation",
+    "valid": false,
+    "value": {
+      "operationId": "render_character",
+      "outputSlot": "portrait",
+      "inputs": [],
+      "kind": "image",
+      "model": {
+        "providerId": "provider_1"
+      },
+      "parameters": {
+        "assembly": "code_project",
+        "projectRevision": {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        "entrypoint": {
+          "argv": [
+            "python",
+            "src/walk.py"
+          ]
+        },
+        "outputPath": "outputs/walk.png",
+        "expectedMediaKind": "image",
+        "format": "png",
+        "width": 640,
+        "height": 360
+      },
+      "target": {
+        "groupId": "visual_1",
+        "itemId": "character_item",
+        "baseRevisionId": null
+      }
+    }
+  },
+  {
+    "name": "new execution snapshot is explicitly local",
+    "schema": "ExecutionSnapshotSpec",
+    "valid": true,
+    "value": {
+      "type": "local_creation",
+      "workId": "work_creation",
+      "title": "人物初始样张",
+      "requestSource": {
+        "requestId": "request_creation",
+        "messageId": "message_creation"
+      },
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "kind": "render",
+          "model": null,
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "baseRevisionId": null
+          }
+        }
+      ],
+      "finalOutput": {
+        "operationId": "render_character",
+        "outputSlot": "portrait"
+      }
+    }
+  },
+  {
+    "name": "paid snapshot retains real financial fields and type",
+    "schema": "ProductionSpec",
+    "valid": true,
+    "value": {
+      "workId": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_1",
+          "outputSlot": "video",
+          "kind": "video",
+          "model": {
+            "providerId": "provider_demo",
+            "modelId": "model_demo",
+            "connectionId": "connection_demo",
+            "configurationRevisionId": "config_1"
+          },
+          "inputs": [
+            {
+              "kind": "artifact_revision",
+              "artifactId": "artifact_1",
+              "revisionId": "revision_1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ],
+          "parameters": {
+            "durationSeconds": 8,
+            "aspectRatio": "16:9",
+            "resolution": "720p",
+            "audioMode": "none"
+          },
+          "maxCreateAttempts": 1,
+          "quotePerAttempt": {
+            "currency": "CNY",
+            "amountMinor": 500
+          },
+          "priceKind": "estimate"
+        }
+      ],
+      "finalOutput": {
+        "operationId": "op_1",
+        "outputSlot": "video"
+      },
+      "maxSpend": {
+        "currency": "CNY",
+        "amountMinor": 500
+      },
+      "type": "paid_production",
+      "requestSource": {
+        "requestId": "request_creation",
+        "messageId": "message_creation"
+      },
+      "scope": "制作认可的完整视频",
+      "purpose": "production",
+      "inputSources": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "reviewInputs": [
+        {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "confirmationId": "confirmation_1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "new paid snapshot requires explicit type",
+    "schema": "ProductionSpec",
+    "valid": false,
+    "value": {
+      "workId": null,
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_1",
+          "outputSlot": "video",
+          "kind": "video",
+          "model": {
+            "providerId": "provider_demo",
+            "modelId": "model_demo",
+            "connectionId": "connection_demo",
+            "configurationRevisionId": "config_1"
+          },
+          "inputs": [
+            {
+              "kind": "artifact_revision",
+              "artifactId": "artifact_1",
+              "revisionId": "revision_1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ],
+          "parameters": {
+            "durationSeconds": 8,
+            "aspectRatio": "16:9",
+            "resolution": "720p",
+            "audioMode": "none"
+          },
+          "maxCreateAttempts": 1,
+          "quotePerAttempt": {
+            "currency": "CNY",
+            "amountMinor": 500
+          },
+          "priceKind": "estimate"
+        }
+      ],
+      "finalOutput": {
+        "operationId": "op_1",
+        "outputSlot": "video"
+      },
+      "maxSpend": {
+        "currency": "CNY",
+        "amountMinor": 500
+      },
+      "requestSource": {
+        "requestId": "request_creation",
+        "messageId": "message_creation"
+      },
+      "scope": "制作认可的完整视频",
+      "purpose": "production",
+      "inputSources": [
+        {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "reviewInputs": [
+        {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "confirmationId": "confirmation_1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "old untyped snapshot is still readable without rewriting",
+    "schema": "LegacyProductionSpec",
+    "valid": true,
+    "value": {
+      "workId": null,
+      "title": "旅行片段",
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "operations": [
+        {
+          "operationId": "op_1",
+          "outputSlot": "video",
+          "kind": "video",
+          "model": {
+            "providerId": "provider_demo",
+            "modelId": "model_demo",
+            "connectionId": "connection_demo",
+            "configurationRevisionId": "config_1"
+          },
+          "inputs": [
+            {
+              "kind": "artifact_revision",
+              "artifactId": "artifact_1",
+              "revisionId": "revision_1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ],
+          "parameters": {
+            "durationSeconds": 8,
+            "aspectRatio": "16:9",
+            "resolution": "720p",
+            "audioMode": "none"
+          },
+          "maxCreateAttempts": 1,
+          "quotePerAttempt": {
+            "currency": "CNY",
+            "amountMinor": 500
+          },
+          "priceKind": "estimate"
+        }
+      ],
+      "finalOutput": {
+        "operationId": "op_1",
+        "outputSlot": "video"
+      },
+      "maxSpend": {
+        "currency": "CNY",
+        "amountMinor": 500
+      }
+    }
+  },
+  {
+    "name": "new HTTP preparation uses exact inputs and approval evidence",
+    "schema": "PrepareProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_prepare_new",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "scope": "制作认可的完整视频",
+        "purpose": "production",
+        "inputSources": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "reviewInputs": [
+          {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "confirmationId": "confirmation_1"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "new preparation tool shares the exact boundary fields",
+    "schema": "ToolPrepareProposal",
+    "valid": true,
+    "value": {
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "scope": "制作认可的完整视频",
+        "purpose": "production",
+        "inputSources": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "reviewInputs": [
+          {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "confirmationId": "confirmation_1"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "new preparation rejects old plan source side channel",
+    "schema": "ToolPrepareProposal",
+    "valid": false,
+    "value": {
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            }
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "scope": "制作认可的完整视频",
+        "purpose": "production",
+        "inputSources": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "reviewInputs": [
+          {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "confirmationId": "confirmation_1"
+          }
+        ]
+      },
+      "planSource": {
+        "artifactId": "character_1",
+        "revisionId": "character_v1"
+      }
+    }
+  },
+  {
+    "name": "render declares new group and item in the same admission",
+    "schema": "ToolRenderProject",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "title": "人物样张",
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "group": {
+              "mode": "create",
+              "key": "visual",
+              "title": "视觉方向",
+              "nextIntent": "人物和场景就绪后试做走路"
+            },
+            "item": {
+              "mode": "create",
+              "key": "character",
+              "label": "人物",
+              "role": "character",
+              "required": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "render existing target freezes a precise media base",
+    "schema": "ToolRenderProject",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "title": "人物样张",
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "group": {
+              "mode": "existing",
+              "groupId": "visual_1"
+            },
+            "item": {
+              "mode": "existing",
+              "itemId": "character_item"
+            }
+          },
+          "baseRevisionId": "character_v1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "render cannot self report the permission message",
+    "schema": "ToolRenderProject",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "title": "人物样张",
+      "scope": "只制作人物样张",
+      "purpose": "draft",
+      "inputSources": [],
+      "reviewInputs": [],
+      "operations": [
+        {
+          "operationId": "render_character",
+          "outputSlot": "portrait",
+          "inputs": [],
+          "parameters": {
+            "assembly": "code_project",
+            "projectRevision": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "entrypoint": {
+              "argv": [
+                "python",
+                "src/walk.py"
+              ]
+            },
+            "outputPath": "outputs/walk.png",
+            "expectedMediaKind": "image",
+            "format": "png",
+            "width": 640,
+            "height": 360
+          },
+          "target": {
+            "group": {
+              "mode": "create",
+              "key": "visual",
+              "title": "视觉方向",
+              "nextIntent": "人物和场景就绪后试做走路"
+            },
+            "item": {
+              "mode": "create",
+              "key": "character",
+              "label": "人物",
+              "role": "character",
+              "required": true
+            }
+          }
+        }
+      ],
+      "sourceMessageId": "forged_message"
+    }
+  },
+  {
+    "name": "new group cannot borrow an existing item identity",
+    "schema": "ReviewTarget",
+    "valid": false,
+    "value": {
+      "group": {
+        "mode": "create",
+        "key": "visual",
+        "title": "视觉方向",
+        "nextIntent": "人物和场景就绪后试做走路"
+      },
+      "item": {
+        "mode": "existing",
+        "itemId": "character_item"
+      }
+    }
+  },
+  {
+    "name": "local run exposes real request origin and null finance",
+    "schema": "Run",
+    "valid": true,
+    "value": {
+      "id": "run_local",
+      "conversationId": "conversation_1",
+      "workId": "work_creation",
+      "snapshotId": "snapshot_1",
+      "revision": 3,
+      "state": "cancelled",
+      "finance": null,
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "CANCEL_UNSUPPORTED",
+        "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+      },
+      "title": "人物样张",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": [],
+      "origin": {
+        "kind": "local_request",
+        "requestId": "request_creation"
+      }
+    }
+  },
+  {
+    "name": "local run cannot fabricate financial reservation",
+    "schema": "Run",
+    "valid": false,
+    "value": {
+      "id": "run_local",
+      "conversationId": "conversation_1",
+      "workId": "work_creation",
+      "snapshotId": "snapshot_1",
+      "revision": 3,
+      "state": "cancelled",
+      "finance": {
+        "state": "pending_reconciliation",
+        "currency": "CNY",
+        "reservedMinor": 0,
+        "pendingUnknownMinor": 48,
+        "settledMinor": 0,
+        "priceKind": "estimate"
+      },
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "CANCEL_UNSUPPORTED",
+        "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+      },
+      "title": "人物样张",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": [],
+      "origin": {
+        "kind": "local_request",
+        "requestId": "request_creation"
+      }
+    }
+  },
+  {
+    "name": "paid run requires actual financial projection",
+    "schema": "Run",
+    "valid": false,
+    "value": {
+      "id": "run_1",
+      "conversationId": "conversation_1",
+      "workId": "work_1",
+      "snapshotId": "snapshot_1",
+      "revision": 3,
+      "state": "cancelled",
+      "finance": null,
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "CANCEL_UNSUPPORTED",
+        "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+      },
+      "title": "旅行片段",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": [],
+      "origin": {
+        "kind": "proposal",
+        "proposalId": "proposal_1"
+      }
+    }
+  },
+  {
+    "name": "run cannot double write top level proposal id",
+    "schema": "Run",
+    "valid": false,
+    "value": {
+      "id": "run_local",
+      "conversationId": "conversation_1",
+      "workId": "work_creation",
+      "snapshotId": "snapshot_1",
+      "revision": 3,
+      "state": "cancelled",
+      "finance": null,
+      "inputRevisions": [
+        {
+          "artifactId": "artifact_1",
+          "revisionId": "revision_1"
+        }
+      ],
+      "outputRevisions": [],
+      "createdAt": "2026-10-25T08:00:00Z",
+      "updatedAt": "2026-10-25T08:00:00Z",
+      "issue": {
+        "code": "CANCEL_UNSUPPORTED",
+        "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+      },
+      "title": "人物样张",
+      "operations": [
+        {
+          "operationId": "op_video_1",
+          "kind": "video",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_video_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        },
+        {
+          "operationId": "op_speech_1",
+          "kind": "speech",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_speech_1",
+            "mimeType": "audio/mpeg",
+            "durationMs": 4200
+          }
+        },
+        {
+          "operationId": "op_render_1",
+          "kind": "render",
+          "state": "succeeded",
+          "media": {
+            "format": "media",
+            "blobId": "blob_render_1",
+            "mimeType": "video/mp4",
+            "durationMs": 15100
+          }
+        }
+      ],
+      "segments": [],
+      "origin": {
+        "kind": "local_request",
+        "requestId": "request_creation"
+      },
+      "proposalId": "fake_proposal"
+    }
+  },
+  {
+    "name": "run origin cannot mix proposal and request identities",
+    "schema": "RunOrigin",
+    "valid": false,
+    "value": {
+      "kind": "local_request",
+      "requestId": "request_1",
+      "proposalId": "proposal_1"
+    }
+  },
+  {
+    "name": "local creation returns the stable allocated targets",
+    "schema": "LocalCreationReceipt",
+    "valid": true,
+    "value": {
+      "run": {
+        "id": "run_local",
+        "conversationId": "conversation_1",
+        "workId": "work_creation",
+        "snapshotId": "snapshot_1",
+        "revision": 3,
+        "state": "cancelled",
+        "finance": null,
+        "inputRevisions": [
+          {
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1"
+          }
+        ],
+        "outputRevisions": [],
+        "createdAt": "2026-10-25T08:00:00Z",
+        "updatedAt": "2026-10-25T08:00:00Z",
+        "issue": {
+          "code": "CANCEL_UNSUPPORTED",
+          "message": "尚未确认取消，已停止后续步骤，继续核对已提交任务。"
+        },
+        "title": "人物样张",
+        "operations": [
+          {
+            "operationId": "op_video_1",
+            "kind": "video",
+            "state": "succeeded",
+            "media": {
+              "format": "media",
+              "blobId": "blob_video_1",
+              "mimeType": "video/mp4",
+              "durationMs": 15100
+            }
+          },
+          {
+            "operationId": "op_speech_1",
+            "kind": "speech",
+            "state": "succeeded",
+            "media": {
+              "format": "media",
+              "blobId": "blob_speech_1",
+              "mimeType": "audio/mpeg",
+              "durationMs": 4200
+            }
+          },
+          {
+            "operationId": "op_render_1",
+            "kind": "render",
+            "state": "succeeded",
+            "media": {
+              "format": "media",
+              "blobId": "blob_render_1",
+              "mimeType": "video/mp4",
+              "durationMs": 15100
+            }
+          }
+        ],
+        "segments": [],
+        "origin": {
+          "kind": "local_request",
+          "requestId": "request_creation"
+        }
+      },
+      "reviewTargets": [
+        {
+          "operationId": "render_character",
+          "groupId": "visual_1",
+          "itemId": "character_item"
+        }
+      ]
+    }
+  },
+  {
+    "name": "code execution carries the verified frozen project file set",
+    "schema": "ExecutionInput",
+    "valid": true,
+    "value": {
+      "runId": "run_local",
+      "snapshotId": "snapshot_1",
+      "operationId": "render_character",
+      "attemptId": "attempt_local",
+      "requestIdentity": "identity_local",
+      "operation": {
+        "operationId": "render_character",
+        "outputSlot": "portrait",
+        "inputs": [],
+        "kind": "render",
+        "model": null,
+        "parameters": {
+          "assembly": "code_project",
+          "projectRevision": {
+            "artifactId": "project_1",
+            "revisionId": "project_v1"
+          },
+          "entrypoint": {
+            "argv": [
+              "python",
+              "src/walk.py"
+            ]
+          },
+          "outputPath": "outputs/walk.png",
+          "expectedMediaKind": "image",
+          "format": "png",
+          "width": 640,
+          "height": 360
+        },
+        "target": {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "baseRevisionId": null
+        }
+      },
+      "resolvedInputs": [],
+      "resolvedProject": {
+        "revision": {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "content": {
+          "format": "project",
+          "files": [
+            {
+              "relativePath": "src/walk.py",
+              "blobId": "blob_code",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "生成步行动画"
+            },
+            {
+              "relativePath": "timeline.json",
+              "blobId": "blob_timeline",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "动作时间线"
+            },
+            {
+              "relativePath": "requirements.lock",
+              "blobId": "blob_lock",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "依赖锁文件"
+            }
+          ],
+          "entrypoint": {
+            "argv": [
+              "python",
+              "src/walk.py"
+            ]
+          },
+          "runtimeImage": "frame-creative@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dependencyLocks": [
+            "requirements.lock"
+          ],
+          "timelineFiles": [
+            "timeline.json"
+          ],
+          "sourceRevisions": [
+            {
+              "artifactId": "character_1",
+              "revisionId": "character_v1"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "code execution cannot infer a mutable workspace project",
+    "schema": "ExecutionInput",
+    "valid": false,
+    "value": {
+      "runId": "run_local",
+      "snapshotId": "snapshot_1",
+      "operationId": "render_character",
+      "attemptId": "attempt_local",
+      "requestIdentity": "identity_local",
+      "operation": {
+        "operationId": "render_character",
+        "outputSlot": "portrait",
+        "inputs": [],
+        "kind": "render",
+        "model": null,
+        "parameters": {
+          "assembly": "code_project",
+          "projectRevision": {
+            "artifactId": "project_1",
+            "revisionId": "project_v1"
+          },
+          "entrypoint": {
+            "argv": [
+              "python",
+              "src/walk.py"
+            ]
+          },
+          "outputPath": "outputs/walk.png",
+          "expectedMediaKind": "image",
+          "format": "png",
+          "width": 640,
+          "height": 360
+        },
+        "target": {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "baseRevisionId": null
+        }
+      },
+      "resolvedInputs": []
+    }
+  },
+  {
+    "name": "code execution cannot carry an arbitrary script path",
+    "schema": "ExecutionInput",
+    "valid": false,
+    "value": {
+      "runId": "run_local",
+      "snapshotId": "snapshot_1",
+      "operationId": "render_character",
+      "attemptId": "attempt_local",
+      "requestIdentity": "identity_local",
+      "operation": {
+        "operationId": "render_character",
+        "outputSlot": "portrait",
+        "inputs": [],
+        "kind": "render",
+        "model": null,
+        "parameters": {
+          "assembly": "code_project",
+          "projectRevision": {
+            "artifactId": "project_1",
+            "revisionId": "project_v1"
+          },
+          "entrypoint": {
+            "argv": [
+              "python",
+              "src/walk.py"
+            ]
+          },
+          "outputPath": "outputs/walk.png",
+          "expectedMediaKind": "image",
+          "format": "png",
+          "width": 640,
+          "height": 360
+        },
+        "target": {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "baseRevisionId": null
+        }
+      },
+      "resolvedInputs": [],
+      "resolvedProject": {
+        "revision": {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "content": {
+          "format": "project",
+          "files": [
+            {
+              "relativePath": "src/walk.py",
+              "blobId": "blob_code",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "生成步行动画"
+            },
+            {
+              "relativePath": "timeline.json",
+              "blobId": "blob_timeline",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "动作时间线"
+            },
+            {
+              "relativePath": "requirements.lock",
+              "blobId": "blob_lock",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "purpose": "依赖锁文件"
+            }
+          ],
+          "entrypoint": {
+            "argv": [
+              "python",
+              "src/walk.py"
+            ]
+          },
+          "runtimeImage": "frame-creative@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "dependencyLocks": [
+            "requirements.lock"
+          ],
+          "timelineFiles": [
+            "timeline.json"
+          ],
+          "sourceRevisions": [
+            {
+              "artifactId": "character_1",
+              "revisionId": "character_v1"
+            }
+          ]
+        }
+      },
+      "projectPath": "/tmp/main.py"
+    }
+  },
+  {
+    "name": "local output references only a registered run slot",
+    "schema": "LocalOutputInput",
+    "valid": true,
+    "value": {
+      "format": "local_output",
+      "source": {
+        "kind": "run_output",
+        "runId": "run_local",
+        "operationId": "render_character",
+        "outputSlot": "portrait"
+      }
+    }
+  },
+  {
+    "name": "trusted free tool result can reference exact output revision",
+    "schema": "LocalOutputInput",
+    "valid": true,
+    "value": {
+      "format": "local_output",
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1"
+      }
+    }
+  },
+  {
+    "name": "local output cannot be a bare mutable sandbox path",
+    "schema": "LocalOutputInput",
+    "valid": false,
+    "value": {
+      "format": "local_output",
+      "path": "outputs/walk.png"
+    }
+  },
+  {
+    "name": "local media revision needs its exact base",
+    "schema": "DeliveryItem",
+    "valid": true,
+    "value": {
+      "mode": "revise",
+      "artifactId": "character_1",
+      "baseRevisionId": "character_v1",
+      "title": "人物新版",
+      "kind": "image",
+      "content": {
+        "format": "local_output",
+        "source": {
+          "kind": "run_output",
+          "runId": "run_local",
+          "operationId": "render_character",
+          "outputSlot": "portrait"
+        }
+      }
+    }
+  },
+  {
+    "name": "new review delivery assigns stable group item identities atomically",
+    "schema": "ToolDelivery",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "人物样张",
+          "kind": "image",
+          "content": {
+            "format": "local_output",
+            "source": {
+              "kind": "run_output",
+              "runId": "run_local",
+              "operationId": "render_character",
+              "outputSlot": "portrait"
+            }
+          }
+        }
+      ],
+      "reviewGroups": [
+        {
+          "workId": "work_creation",
+          "group": {
+            "mode": "create",
+            "key": "visual",
+            "title": "视觉方向",
+            "nextIntent": "人物和场景就绪后试做走路"
+          },
+          "items": [
+            {
+              "item": {
+                "mode": "create",
+                "key": "character",
+                "label": "人物",
+                "role": "character",
+                "required": true
+              },
+              "itemIndex": 0,
+              "inputSources": [],
+              "reviewInputs": [],
+              "purpose": "draft",
+              "projectRevision": {
+                "artifactId": "project_1",
+                "revisionId": "project_v1"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "new delivery rejects the old fixed stage branch",
+    "schema": "ToolDelivery",
+    "valid": false,
+    "value": {
+      "items": [
+        {
+          "mode": "create",
+          "title": "雨后出发",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "雨后出发"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "留在山风里",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "留在山风里"
+          }
+        },
+        {
+          "mode": "create",
+          "title": "傍晚归途",
+          "kind": "prompt",
+          "content": {
+            "format": "markdown",
+            "text": "傍晚归途"
+          }
+        }
+      ],
+      "stageDrafts": []
+    }
+  },
+  {
+    "name": "library reference pins source video and artifact revision",
+    "schema": "LibrarySelection",
+    "valid": true,
+    "value": {
+      "sourceVideo": {
+        "artifactId": "video_1",
+        "revisionId": "video_v1"
+      },
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1"
+      }
+    }
+  },
+  {
+    "name": "project file reference pins project revision and manifest relative path",
+    "schema": "LibrarySelection",
+    "valid": true,
+    "value": {
+      "sourceVideo": {
+        "artifactId": "video_1",
+        "revisionId": "video_v1"
+      },
+      "source": {
+        "kind": "project_file",
+        "project": {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        },
+        "relativePath": "src/walk.py"
+      }
+    }
+  },
+  {
+    "name": "library reference cannot replace structured source with opaque id",
+    "schema": "LibrarySelection",
+    "valid": false,
+    "value": {
+      "sourceVideo": {
+        "artifactId": "video_1",
+        "revisionId": "video_v1"
+      },
+      "sourceId": "character_1"
+    }
+  },
+  {
+    "name": "review confirmation message only records approval",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_review",
+      "text": "人物可以，背景再改",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "workId": "work_creation",
+        "groupId": "visual_1",
+        "items": [
+          {
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "action": "approve"
+      },
+      "librarySelections": []
+    }
+  },
+  {
+    "name": "approve and continue is a single explicit message intent",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_review",
+      "text": "人物可以，背景再改",
+      "target": null,
+      "skillId": "skill_animation",
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "workId": "work_creation",
+        "groupId": "visual_1",
+        "items": [
+          {
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "action": "approve_and_continue"
+      },
+      "librarySelections": []
+    }
+  },
+  {
+    "name": "confirmation command cannot attach library selections",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_review",
+      "text": "人物可以，背景再改",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "workId": "work_creation",
+        "groupId": "visual_1",
+        "items": [
+          {
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "action": "approve"
+      },
+      "librarySelections": [
+        {
+          "sourceVideo": {
+            "artifactId": "video_1",
+            "revisionId": "video_v1"
+          },
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "ordinary continue after full approval has no empty confirmation",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_review",
+      "text": "继续",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": null,
+      "librarySelections": []
+    }
+  },
+  {
+    "name": "library selection enters ordinary conversation without starting work",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_review",
+      "text": "用这个人物再做一个散步片段",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": null,
+      "librarySelections": [
+        {
+          "sourceVideo": {
+            "artifactId": "video_1",
+            "revisionId": "video_v1"
+          },
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1"
+          }
+        },
+        {
+          "sourceVideo": {
+            "artifactId": "video_1",
+            "revisionId": "video_v1"
+          },
+          "source": {
+            "kind": "project_file",
+            "project": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "relativePath": "src/walk.py"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "new message rejects retired stage confirmation fields",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "command_review",
+      "text": "人物可以，背景再改",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "workId": "work_creation",
+        "groupId": "visual_1",
+        "items": [
+          {
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "action": "approve"
+      },
+      "librarySelections": [],
+      "stageConfirmation": {
+        "workId": "work_creation",
+        "action": "approve_plan",
+        "subject": {
+          "kind": "artifact_revision",
+          "artifactId": "character_1",
+          "revisionId": "character_v1",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    }
+  },
+  {
+    "name": "persisted message keeps full reusable library references",
+    "schema": "Message",
+    "valid": true,
+    "value": {
+      "id": "message_1",
+      "requestId": "request_1",
+      "role": "user",
+      "text": "先给三条 Prompt，别生成视频。",
+      "state": "completed",
+      "revision": 1,
+      "target": null,
+      "createdAt": "2026-10-25T08:00:00Z",
+      "references": {
+        "artifacts": [],
+        "proposalIds": [],
+        "runIds": [],
+        "materialBatchIds": []
+      },
+      "kind": "chat",
+      "feedback": null,
+      "createdSequence": 1,
+      "librarySelections": [
+        {
+          "sourceVideo": {
+            "artifactId": "video_1",
+            "revisionId": "video_v1"
+          },
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1"
+          }
+        },
+        {
+          "sourceVideo": {
+            "artifactId": "video_1",
+            "revisionId": "video_v1"
+          },
+          "source": {
+            "kind": "project_file",
+            "project": {
+              "artifactId": "project_1",
+              "revisionId": "project_v1"
+            },
+            "relativePath": "src/walk.py"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "library entry retains materials project and actual review sources",
+    "schema": "LibraryVideo",
+    "valid": true,
+    "value": {
+      "video": {
+        "artifactId": "art_2",
+        "revisionId": "rev_9"
+      },
+      "workId": "work_1",
+      "conversationId": "cnv_1",
+      "title": "山路短片 · 分段成片",
+      "finalizedAt": "2026-11-04T08:00:00Z",
+      "plan": {
+        "artifactId": "art_1",
+        "revisionId": "rev_5"
+      },
+      "content": {
+        "kind": "artifact_revision",
+        "artifactId": "art_0",
+        "revisionId": "rev_2",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "originMessageId": "msg_7",
+      "narrationText": "清晨，山路从云雾中醒来。",
+      "project": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "materials": [
+        {
+          "source": {
+            "artifactId": "character_1",
+            "revisionId": "character_v1"
+          },
+          "label": "采用的人物",
+          "kind": "image",
+          "provenance": []
+        }
+      ],
+      "reviewSources": [
+        {
+          "groupId": "visual_1",
+          "itemId": "character_item",
+          "source": {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "confirmationId": "confirmation_1"
+        }
+      ],
+      "provenanceStatus": "recorded",
+      "projectFiles": [
+        {
+          "relativePath": "main.cjs",
+          "mimeType": "text/javascript",
+          "project": {
+            "artifactId": "project_1",
+            "revisionId": "project_v1"
+          }
+        },
+        {
+          "relativePath": "out.mp4",
+          "mimeType": "video/mp4",
+          "project": {
+            "artifactId": "project_1",
+            "revisionId": "project_v1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "legacy library entry explicitly reports provenance not recorded",
+    "schema": "LibraryVideo",
+    "valid": true,
+    "value": {
+      "video": {
+        "artifactId": "art_2",
+        "revisionId": "rev_9"
+      },
+      "workId": "work_1",
+      "conversationId": "cnv_1",
+      "title": "山路短片 · 分段成片",
+      "finalizedAt": "2026-11-04T08:00:00Z",
+      "plan": {
+        "artifactId": "art_1",
+        "revisionId": "rev_5"
+      },
+      "content": {
+        "kind": "artifact_revision",
+        "artifactId": "art_0",
+        "revisionId": "rev_2",
+        "digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "originMessageId": "msg_7",
+      "narrationText": "清晨，山路从云雾中醒来。",
+      "project": null,
+      "materials": [],
+      "reviewSources": [],
+      "provenanceStatus": "not_recorded",
+      "projectFiles": []
+    }
+  },
+  {
+    "name": "library material must identify a precise revision",
+    "schema": "LibraryMaterial",
+    "valid": false,
+    "value": {
+      "source": {
+        "artifactId": "character_1"
+      },
+      "label": "人物",
+      "kind": "image",
+      "provenance": []
+    }
+  },
+  {
+    "name": "unknown skill dependencies remain unchecked",
+    "schema": "SkillPackage",
+    "valid": true,
+    "value": {
+      "id": "builtin_skills",
+      "source": "builtin",
+      "name": "内置 Skill",
+      "origin": "builtin",
+      "skillIds": [
+        "travel"
+      ],
+      "status": "ready",
+      "diagnostics": [],
+      "runtimeStatus": "unchecked",
+      "runtimeMissing": []
+    }
+  },
+  {
+    "name": "available discovered skill can have unavailable runtime",
+    "schema": "SkillPackage",
+    "valid": true,
+    "value": {
+      "id": "builtin_skills",
+      "source": "builtin",
+      "name": "内置 Skill",
+      "origin": "builtin",
+      "skillIds": [
+        "travel"
+      ],
+      "status": "ready",
+      "diagnostics": [],
+      "runtimeStatus": "unavailable",
+      "runtimeMissing": [
+        "当前环境不能渲染网页动画"
+      ]
+    }
+  },
+  {
+    "name": "runtime ready cannot retain missing requirements",
+    "schema": "SkillPackage",
+    "valid": false,
+    "value": {
+      "id": "builtin_skills",
+      "source": "builtin",
+      "name": "内置 Skill",
+      "origin": "builtin",
+      "skillIds": [
+        "travel"
+      ],
+      "status": "ready",
+      "diagnostics": [],
+      "runtimeStatus": "ready",
+      "runtimeMissing": [
+        "ffmpeg"
+      ]
+    }
+  },
+  {
+    "name": "runtime unavailable identifies an actionable missing capability",
+    "schema": "SkillPackage",
+    "valid": false,
+    "value": {
+      "id": "builtin_skills",
+      "source": "builtin",
+      "name": "内置 Skill",
+      "origin": "builtin",
+      "skillIds": [
+        "travel"
+      ],
+      "status": "ready",
+      "diagnostics": [],
+      "runtimeStatus": "unavailable",
+      "runtimeMissing": []
+    }
+  },
+  {
+    "name": "actionable acceptance blocker INPUT_APPROVAL_REQUIRED",
+    "schema": "AcceptanceBlocker",
+    "valid": true,
+    "value": {
+      "code": "INPUT_APPROVAL_REQUIRED",
+      "message": "背景当前稿还未认可",
+      "action": "review_inputs"
+    }
+  },
+  {
+    "name": "actionable acceptance blocker INPUT_CHANGED",
+    "schema": "AcceptanceBlocker",
+    "valid": true,
+    "value": {
+      "code": "INPUT_CHANGED",
+      "message": "制作范围已改变，请重新准备费用",
+      "action": "prepare_again"
+    }
+  },
+  {
+    "name": "actionable acceptance blocker CAPABILITY_UNAVAILABLE",
+    "schema": "AcceptanceBlocker",
+    "valid": true,
+    "value": {
+      "code": "CAPABILITY_UNAVAILABLE",
+      "message": "当前环境不能渲染网页动画",
+      "action": "configure_capability"
+    }
+  },
+  {
+    "name": "blocker cannot recommend confirmation before input approval",
+    "schema": "AcceptanceBlocker",
+    "valid": false,
+    "value": {
+      "code": "INPUT_APPROVAL_REQUIRED",
+      "message": "背景未认可",
+      "action": "confirm_production"
+    }
+  },
+  {
+    "name": "ready proposal may explain why admission is blocked",
+    "schema": "Proposal",
+    "valid": true,
+    "value": {
+      "id": "proposal_1",
+      "conversationId": "conversation_1",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spec": {
+        "workId": null,
+        "title": "旅行片段",
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1,
+            "quotePerAttempt": {
+              "currency": "CNY",
+              "amountMinor": 500
+            },
+            "priceKind": "estimate"
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 500
+        },
+        "type": "paid_production",
+        "requestSource": {
+          "requestId": "request_creation",
+          "messageId": "message_creation"
+        },
+        "scope": "制作认可的完整视频",
+        "purpose": "production",
+        "inputSources": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "character_1",
+            "revisionId": "character_v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "reviewInputs": [
+          {
+            "groupId": "visual_1",
+            "itemId": "character_item",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "character_1",
+              "revisionId": "character_v1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "confirmationId": "confirmation_1"
+          }
+        ]
+      },
+      "state": "ready",
+      "priceDisclosure": "示例估价 5 元，不是供应商账单封顶。",
+      "expiresAt": "2026-10-25T08:15:00Z",
+      "acceptedRunId": null,
+      "revision": 1,
+      "acceptanceBlocker": {
+        "code": "INPUT_APPROVAL_REQUIRED",
+        "message": "背景当前稿还未认可",
+        "action": "review_inputs"
+      }
+    }
+  },
+  {
+    "name": "video read targets actual feedback frames in milliseconds",
+    "schema": "ToolReadArtifact",
+    "valid": true,
+    "value": {
+      "artifactId": "video_1",
+      "revisionId": "video_v1",
+      "frameTimesMs": [
+        0,
+        1250,
+        2500
+      ]
+    }
+  },
+  {
+    "name": "video frame inspection does not accept negative times",
+    "schema": "ToolReadArtifact",
+    "valid": false,
+    "value": {
+      "artifactId": "video_1",
+      "revisionId": "video_v1",
+      "frameTimesMs": [
+        -1
+      ]
+    }
+  },
+  {
+    "name": "approved item requires exact confirmation identity",
+    "schema": "ReviewItem",
+    "valid": false,
+    "value": {
+      "id": "character_item",
+      "label": "人物",
+      "role": "character",
+      "required": true,
+      "draft": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "approved": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "confirmationId": null,
+      "approvedAt": "2026-11-07T08:00:00.000Z",
+      "finalizedSource": null
+    }
+  },
+  {
+    "name": "draft alone does not carry a fictional confirmation",
+    "schema": "ReviewItem",
+    "valid": false,
+    "value": {
+      "id": "character_item",
+      "label": "人物",
+      "role": "character",
+      "required": true,
+      "draft": {
+        "kind": "artifact_revision",
+        "artifactId": "character_1",
+        "revisionId": "character_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "approved": null,
+      "confirmationId": "confirmation_1",
+      "approvedAt": "2026-11-07T08:00:00.000Z",
+      "finalizedSource": null
+    }
+  },
+  {
+    "name": "existing target can publish a visible required metadata revision",
+    "schema": "ReviewTarget",
+    "valid": true,
+    "value": {
+      "group": {
+        "mode": "existing",
+        "groupId": "visual_1",
+        "title": "视觉方向新版",
+        "nextIntent": null
+      },
+      "item": {
+        "mode": "existing",
+        "itemId": "character_item",
+        "label": "人物走路预览",
+        "role": "clip",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "project file path cannot name a directory",
+    "schema": "RelativeProjectPath",
+    "valid": false,
+    "value": "src/"
+  },
+  {
+    "name": "mixed music from local registered audio without candidate",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "width": 1280,
+      "height": 720,
+      "fps": 24,
+      "assembly": "mixed_concat",
+      "segments": [
+        {
+          "kind": "video",
+          "inputSlot": 0,
+          "startMs": 0,
+          "durationMs": 3000,
+          "originalGain": 0.4
+        },
+        {
+          "kind": "image",
+          "inputSlot": 1,
+          "durationMs": 3000
+        }
+      ],
+      "segmentIds": [
+        "rain",
+        "cup"
+      ],
+      "music": {
+        "inputSlot": 2,
+        "sourceStartMs": 1000,
+        "sourceDurationMs": 6000,
+        "timelineStartMs": 0,
+        "playDurationMs": 6000,
+        "repeat": false,
+        "gain": 0.2,
+        "fadeInMs": 200,
+        "fadeOutMs": 400,
+        "duckUnderNarration": true
+      },
+      "narration": {
+        "inputSlot": 3,
+        "timelineStartMs": 0,
+        "gain": 1
+      }
+    }
+  },
+  {
+    "name": "edge tts settings disabled default",
+    "schema": "EdgeTtsSettings",
+    "valid": true,
+    "value": {
+      "serviceId": "edge-tts",
+      "revision": 0,
+      "enabled": false,
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "pythonCommand": "python3"
+    }
+  },
+  {
+    "name": "edge tts settings voice must be a real locale voice id",
+    "schema": "EdgeTtsSettings",
+    "valid": false,
+    "value": {
+      "serviceId": "edge-tts",
+      "revision": 1,
+      "enabled": true,
+      "voice": "随便一个声音",
+      "pythonCommand": "python3"
+    }
+  },
+  {
+    "name": "save edge tts settings enabled with voice",
+    "schema": "SaveEdgeTtsSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_edge_1",
+      "expectedRevision": 0,
+      "enabled": true,
+      "voice": "zh-CN-YunxiNeural",
+      "pythonCommand": "/opt/venv/bin/python3"
+    }
+  },
+  {
+    "name": "tool dub free with explicit voice and rate",
+    "schema": "ToolDubFree",
+    "valid": true,
+    "value": {
+      "text": "欢迎来看这一期的工厂日记。",
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "rate": "+8%"
+    }
+  },
+  {
+    "name": "tool dub free rejects percent without sign",
+    "schema": "ToolDubFree",
+    "valid": false,
+    "value": {
+      "text": "台词",
+      "rate": "10%"
+    }
+  },
+  {
+    "name": "tool dub free rejects rate suffix",
+    "schema": "ToolDubFree",
+    "valid": false,
+    "value": {
+      "text": "台词",
+      "rate": "+10%extra"
+    }
+  },
+  {
+    "name": "tool dub free accepts negative rate",
+    "schema": "ToolDubFree",
+    "valid": true,
+    "value": {
+      "text": "台词",
+      "rate": "-10%"
+    }
+  },
+  {
+    "name": "tool dub free accepts zero rate",
+    "schema": "ToolDubFree",
+    "valid": true,
+    "value": {
+      "text": "台词",
+      "rate": "+0%"
+    }
+  },
+  {
+    "name": "dub free result with word boundaries",
+    "schema": "DubFreeResult",
+    "valid": true,
+    "value": {
+      "artifactId": "art_7dub",
+      "revisionId": "rev_7dub",
+      "durationMs": 4896,
+      "granularity": "word",
+      "boundaryCount": 13,
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "rate": "+0%"
+    }
+  },
+  {
+    "name": "media content carries dubbed speech meta",
+    "schema": "MediaContent",
+    "valid": true,
+    "value": {
+      "format": "media",
+      "blobId": "blob_dub1",
+      "mimeType": "audio/mpeg",
+      "durationMs": 4896,
+      "dub": {
+        "text": "欢迎来看这一期的工厂日记。",
+        "voice": "zh-CN-XiaoxiaoNeural",
+        "rate": "+0%",
+        "granularity": "word",
+        "boundaries": [
+          {
+            "text": "欢迎",
+            "offsetMs": 100,
+            "durationMs": 300
+          },
+          {
+            "text": "来看",
+            "offsetMs": 400,
+            "durationMs": 320
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "panel continue carries explicit review group context",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_continue_b",
+      "text": "继续这一组",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewContext": {
+        "workId": "work_b",
+        "groupId": "grp_visual_b"
+      }
+    }
+  },
+  {
+    "name": "review context is mutually exclusive with review confirmation",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_mix",
+      "text": "认可并继续",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "workId": "work_b",
+        "groupId": "grp_visual_b",
+        "items": [
+          {
+            "itemId": "item_1",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "artifact_1",
+              "revisionId": "revision_1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "action": "approve"
+      },
+      "librarySelections": [],
+      "reviewContext": {
+        "workId": "work_b",
+        "groupId": "grp_visual_b"
+      }
+    }
+  },
+  {
+    "name": "review context cannot also carry an artifact target",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "cmd_mix_target",
+      "text": "继续这一组",
+      "target": {
+        "artifactId": "artifact_1",
+        "revisionId": "revision_1",
+        "workId": null
+      },
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewContext": {
+        "workId": "work_b",
+        "groupId": "grp_visual_b"
+      }
+    }
+  },
+  {
+    "name": "paid preparation declares exact output target",
+    "schema": "PrepareProposal",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_prepare_target",
+      "spec": {
+        "workId": "work_b",
+        "title": "重做视频A",
+        "operations": [
+          {
+            "operationId": "op_1",
+            "outputSlot": "video",
+            "kind": "video",
+            "model": {
+              "providerId": "provider_demo",
+              "modelId": "model_demo",
+              "connectionId": "connection_demo",
+              "configurationRevisionId": "config_1"
+            },
+            "inputs": [
+              {
+                "kind": "artifact_revision",
+                "artifactId": "artifact_1",
+                "revisionId": "revision_1",
+                "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "parameters": {
+              "durationSeconds": 8,
+              "aspectRatio": "16:9",
+              "resolution": "720p",
+              "audioMode": "none"
+            },
+            "maxCreateAttempts": 1
+          }
+        ],
+        "finalOutput": {
+          "operationId": "op_1",
+          "outputSlot": "video"
+        },
+        "maxSpend": {
+          "currency": "CNY",
+          "amountMinor": 1200
+        },
+        "inputSources": [
+          {
+            "kind": "artifact_revision",
+            "artifactId": "artifact_1",
+            "revisionId": "revision_1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "reviewInputs": [
+          {
+            "groupId": "grp_visual_b",
+            "itemId": "item_1",
+            "source": {
+              "kind": "artifact_revision",
+              "artifactId": "artifact_1",
+              "revisionId": "revision_1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "confirmationId": "confirm_1"
+          }
+        ],
+        "outputTarget": {
+          "group": {
+            "mode": "existing",
+            "groupId": "grp_visual_b"
+          },
+          "item": {
+            "mode": "existing",
+            "itemId": "item_video_a"
+          }
+        },
+        "purpose": "production",
+        "scope": "重做视频A整片"
+      }
     }
   }
 ]

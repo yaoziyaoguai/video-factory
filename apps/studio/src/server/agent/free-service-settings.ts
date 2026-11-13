@@ -1,6 +1,6 @@
 import type {
-  KeyedMaterialSettings, KeylessMaterialSettings, MaterialProvider, NewsNowSettings, PexelsSettings,
-  SaveFreeServiceSettingsReceipt, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings,
+  EdgeTtsSettings, KeyedMaterialSettings, KeylessMaterialSettings, MaterialProvider, NewsNowSettings, PexelsSettings,
+  SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
@@ -13,7 +13,7 @@ import { canonicalJson, type AgentClock } from "./util.js";
 
 export type KeyedServiceId = "pexels" | "pixabay" | "unsplash" | "coverr";
 export type KeylessServiceId = KeylessMaterialSettings["serviceId"];
-export type FreeServiceId = KeyedServiceId | KeylessServiceId | "newsnow";
+export type FreeServiceId = KeyedServiceId | KeylessServiceId | "newsnow" | "edge-tts";
 
 const KEYED_SERVICES: readonly KeyedServiceId[] = ["pexels", "pixabay", "unsplash", "coverr"];
 const KEYLESS_STOCK: readonly Extract<KeylessServiceId, MaterialProvider>[] = ["wikimedia", "nasa", "met", "cleveland", "archive", "freetouse", "incompetech"];
@@ -23,10 +23,14 @@ export const FREE_SERVICE_LABELS: Readonly<Record<FreeServiceId, string>> = {
   pexels: "Pexels", pixabay: "Pixabay", unsplash: "Unsplash", coverr: "Coverr",
   wikimedia: "Wikimedia Commons", nasa: "NASA", met: "The Met", cleveland: "Cleveland",
   archive: "Internet Archive", freetouse: "FreeToUse", incompetech: "Incompetech", newsnow: "NewsNow",
-  "douyin-music": "抖音热歌榜", "tiktok-sounds": "TikTok 热门原声",
+  "douyin-music": "抖音热歌榜", "tiktok-sounds": "TikTok 热门原声", "edge-tts": "Edge 免费配音",
 };
 
 export const PEXELS_API_ENDPOINT = "https://api.pexels.com/v1";
+
+/** 未配置时的免费配音缺省：中文女声与系统 python；保存时永远写入用户显式选择。 */
+export const DEFAULT_EDGE_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
+export const DEFAULT_EDGE_TTS_PYTHON = "python3";
 
 /** 工具调用开始时捕获的单个素材来源配置；enabled 且（Key 服务）已配 Key 才可用。 */
 export interface CapturedStockConfig {
@@ -50,7 +54,7 @@ interface ServiceRow {
 }
 
 export function freeServiceIdOf(serviceId: string): FreeServiceId {
-  if (serviceId === "newsnow" || isKeyedService(serviceId as FreeServiceId) || isKeylessService(serviceId as FreeServiceId)) {
+  if (serviceId === "newsnow" || serviceId === "edge-tts" || isKeyedService(serviceId as FreeServiceId) || isKeylessService(serviceId as FreeServiceId)) {
     return serviceId as FreeServiceId;
   }
   throw new AgentError("NOT_FOUND", "没有这个免费服务。");
@@ -70,7 +74,7 @@ function readRow(db: AgentDatabase, serviceId: FreeServiceId): ServiceRow | unde
 
 export function readFreeServiceSettings(
   db: AgentDatabase, serviceId: FreeServiceId, includeApiKey = true,
-): PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings {
+): PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings | EdgeTtsSettings {
   const row = readRow(db, serviceId);
   const revision = row?.revision ?? 0;
   if (serviceId === "newsnow") {
@@ -80,6 +84,14 @@ export function readFreeServiceSettings(
     return {
       serviceId: "newsnow", revision, enabled: config.enabled,
       endpoint: config.endpoint, sourceIds: config.sourceIds, topics: config.topics,
+    };
+  }
+  if (serviceId === "edge-tts") {
+    const config = row ? JSON.parse(row.config_json) as { enabled: boolean; voice?: string; pythonCommand?: string } : { enabled: false };
+    return {
+      serviceId: "edge-tts", revision, enabled: config.enabled,
+      voice: config.voice || DEFAULT_EDGE_TTS_VOICE,
+      pythonCommand: config.pythonCommand || DEFAULT_EDGE_TTS_PYTHON,
     };
   }
   const config = row ? JSON.parse(row.config_json) as { enabled: boolean } : { enabled: false };
@@ -120,6 +132,21 @@ export function captureNewsNowConfig(db: AgentDatabase): CapturedNewsNowConfig |
   const config = JSON.parse(row.config_json) as CapturedNewsNowConfig;
   if (!config.enabled || !config.endpoint || config.sourceIds.length === 0) return null;
   return config;
+}
+
+export interface CapturedEdgeTtsConfig {
+  enabled: boolean;
+  voice: string;
+  pythonCommand: string;
+}
+
+/** 工具调用开始时捕获的免费配音配置；null 表示未启用（语音形状由保存契约保证非空）。 */
+export function captureEdgeTtsConfig(db: AgentDatabase): CapturedEdgeTtsConfig | null {
+  const row = readRow(db, "edge-tts");
+  if (!row) return null;
+  const config = JSON.parse(row.config_json) as { enabled: boolean; voice?: string; pythonCommand?: string };
+  if (!config.enabled || !config.voice) return null;
+  return { enabled: true, voice: config.voice, pythonCommand: config.pythonCommand || DEFAULT_EDGE_TTS_PYTHON };
 }
 
 // —— 保存 ——
@@ -246,6 +273,32 @@ export function saveNewsNowServiceSettings(db: AgentDatabase, clock: AgentClock,
     const changed = !row || canonicalJson(JSON.parse(row.config_json)) !== configJson;
     if (changed) upsertConfig(db, "newsnow", row?.revision ?? 0, configJson, null, now);
     const payload: SaveFreeServiceSettingsReceipt = { settings: readFreeServiceSettings(db, "newsnow"), replayed: false };
+    storeCommandReceipt(db, now, key, { ...input, ...normalized }, payload);
+    return payload;
+  })();
+}
+
+// 免费配音（edge-tts）：启用/语音/Python 命令三件事；voice 形状由契约 Schema 在边界校验，
+// 启用即必须有合法语音。这里只做命令的空白/控制字符清理。
+export function saveEdgeTtsServiceSettings(db: AgentDatabase, clock: AgentClock, ownerId: string, input: SaveEdgeTtsSettings): SaveFreeServiceSettingsReceipt {
+  const verdict = validatorFor("SaveEdgeTtsSettings")(input);
+  if (!verdict.ok) throw new AgentError("INVALID_INPUT", verdict.message);
+  const pythonCommand = input.pythonCommand.trim();
+  if (!pythonCommand || /[\x00-\x1f\x7f]/.test(pythonCommand)) {
+    throw new AgentError("INVALID_INPUT", "Edge 免费配音的 Python 命令不能为空或含控制字符。");
+  }
+  const normalized = { enabled: input.enabled, voice: input.voice, pythonCommand };
+  const key = { ownerId, operation: "saveFreeServiceSettings", targetId: "edge-tts", commandId: input.commandId };
+  return db.transaction(() => {
+    const replay = checkCommandReceipt<SaveFreeServiceSettingsReceipt>(db, key, { ...input, ...normalized });
+    if (replay.kind === "replay") return { ...replay.receipt, replayed: true };
+    const row = readRow(db, "edge-tts");
+    requireRevision(row?.revision ?? 0, input.expectedRevision);
+    const now = clock();
+    const configJson = canonicalJson(normalized);
+    const changed = !row || canonicalJson(JSON.parse(row.config_json)) !== configJson;
+    if (changed) upsertConfig(db, "edge-tts", row?.revision ?? 0, configJson, null, now);
+    const payload: SaveFreeServiceSettingsReceipt = { settings: readFreeServiceSettings(db, "edge-tts"), replayed: false };
     storeCommandReceipt(db, now, key, { ...input, ...normalized }, payload);
     return payload;
   })();

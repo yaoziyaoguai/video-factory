@@ -15,7 +15,7 @@ import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { realRenderValidator } from "../src/server/agent/media-config.js";
 import { saveKeyedServiceSettings, saveKeylessServiceSettings, saveNewsNowServiceSettings, savePexelsServiceSettings } from "../src/server/agent/free-service-settings.js";
 import { systemClock } from "../src/server/agent/util.js";
-import { seedPlanStageWork, bindPreparedPlan } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { toolIntentOf } from "./helpers/tool-args.js";
 import type { ArtifactRevision, MaterialBatch, MaterialImportResult, MaterialSearchResult, ProductionIntent, TrendReadResult } from "../src/shared/agent/generated/contracts.js";
 
@@ -543,10 +543,12 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
   // 再走明确入口 prepare_production 复用同 owner/conversation 的已有 blob 与已交付修订 → ready 且零制作。
   let deliveryError = "";
   let prepared!: { proposalId: string; state: string };
-  const planWork = seedPlanStageWork(a.database, systemClock(), { ownerId: "local-owner", conversationId }, "片段成片");
+  // 组审阅模型：正式成片提案引用真实认可事实（reviewInputs）；夹具为此多交付 1 条脚本产物与 1 条交付事务。
+  const confirmed = seedConfirmedWork(a.database, systemClock(), { ownerId: "local-owner", conversationId }, "片段成片");
   const spec: ProductionIntent = {
-    workId: planWork.workId, title: "片段成片",
-    inputRevisions: [{ artifactId: delivered.id, revisionId: delivered.revisionId }],
+    workId: confirmed.workId, title: "片段成片",
+    inputSources: [{ kind: "artifact_revision", artifactId: delivered.id, revisionId: delivered.revisionId, digest: deliveredRevision.digest }],
+    reviewInputs: [confirmed.reviewInput], purpose: "production", scope: "把已交付片段拼成正式成片",
     operations: [{ operationId: "render", outputSlot: "final", kind: "render", model: null,
       inputs: [
         { kind: "artifact_revision", artifactId: delivered.id, revisionId: delivered.revisionId, digest: deliveredRevision.digest },
@@ -555,6 +557,7 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
       maxCreateAttempts: 1,
       parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 } }],
     finalOutput: { operationId: "render", outputSlot: "final" },
+    outputTarget: finalVideoTarget(),
     maxSpend: { currency: "CNY", amountMinor: 0 },
   };
   a.faux!.setResponses([
@@ -575,8 +578,8 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
   await done(a, conversationId);
 
   assert.match(deliveryError, /不能作为产物交付/, "模型看到整批拒绝的真实原因");
-  assert.equal(count(a.database, "artifacts"), 2, "整批回滚，无部分交付");
-  assert.equal(count(a.database, "request_deliveries"), 1, "只有请求 1 的合法交付");
+  assert.equal(count(a.database, "artifacts", "kind!='script'"), 2, "整批回滚，无部分交付");
+  assert.equal(count(a.database, "request_deliveries"), 2, "只有请求 1 与认可夹具的合法交付");
   assert.equal(prepared.state, "ready", "明确提案可复用同会话已有 blob 与已交付修订");
   assert.equal(a.service.readProposal("local-owner", prepared.proposalId).state, "ready");
   assert.equal(count(a.database, "production_runs"), 0, "确认前零制作");
@@ -639,18 +642,19 @@ test("T3-15 Pi 链+真实 FFmpeg：正式交付后明确请求 ordered_concat A/
   assert.deepEqual((clipARevision.content as { sources?: Array<{ assetId: string }> }).sources?.map(source => source.assetId), ["101"]);
 
   // 请求 2：明确准备 ordered_concat A/B/A，等待用户确认。
-  const planWork = seedPlanStageWork(runtime.database, clock(), { ownerId: "local-owner", conversationId }, "A/B/A 成片");
+  const confirmed = seedConfirmedWork(runtime.database, clock(), { ownerId: "local-owner", conversationId }, "A/B/A 成片");
   const renderSpec = (order: Array<{ artifactId: string; revisionId: string; digest: string }>): ProductionIntent => {
-    const revisions = order.map(ref => ({ artifactId: ref.artifactId, revisionId: ref.revisionId }));
+    const sources = order.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }));
     const inputs = order.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }));
     return {
-      workId: planWork.workId, title: "A/B/A 成片",
-      inputRevisions: revisions as ProductionIntent["inputRevisions"],
+      workId: confirmed.workId, title: "A/B/A 成片",
+      inputSources: sources, reviewInputs: [confirmed.reviewInput], purpose: "production", scope: "按认可顺序把两段素材拼成正式成片",
       operations: [{ operationId: "render", outputSlot: "final", kind: "render", model: null,
         inputs: inputs as ProductionIntent["operations"][number]["inputs"],
         maxCreateAttempts: 1,
         parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 } }],
       finalOutput: { operationId: "render", outputSlot: "final" },
+      outputTarget: finalVideoTarget(),
       maxSpend: { currency: "CNY", amountMinor: 0 },
     };
   };
@@ -669,7 +673,6 @@ test("T3-15 Pi 链+真实 FFmpeg：正式交付后明确请求 ordered_concat A/
 
   // 一次确认 → 唯一 run → 真实 FFmpeg 渲染。
   const proposal = runtime.service.readProposal("local-owner", prepared.proposalId);
-  bindPreparedPlan(runtime.database, clock(), { ownerId: "local-owner", conversationId }, proposal, planWork);
   const accepted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
   assert.equal(count(runtime.database, "production_runs"), 1);
   let finished = runtime.service.getRun("local-owner", accepted.run.id);

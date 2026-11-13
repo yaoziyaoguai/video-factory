@@ -28,7 +28,7 @@ import { RealMediaGateway } from "../src/server/agent/ark-media.js";
 import { MiniMaxVideoPort } from "../src/server/agent/minimax-video.js";
 import { WanVideoPort } from "../src/server/agent/wan-video.js";
 import { MiniMaxSpeechPort } from "../src/server/agent/minimax-speech.js";
-import { bindPreparedPlan, ensurePlanStageWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import type {
   ExecutionInput, ModelBinding, OperationSpec, ProductionIntent, RecoveryQuery,
@@ -873,16 +873,17 @@ it("F09：有效 A 受理后先切 B 再首次 submit，三条新通道仍按 A 
       save(modelA, baseA, "fake-frozen-key-A");
       const bindingA = JSON.parse(readAdditionalMediaCurrent(db, channel)!.version.binding_json) as ModelBinding;
       const conversation = runtime.service.createConversation("local-owner", { commandId: "create-frozen", title: channel }).conversation;
-      const spec: ProductionIntent = { workId: null, title: channel, inputRevisions: [],
+      const spec: ProductionIntent = { workId: null, title: channel, inputSources: [], reviewInputs: [], purpose: "production", scope: `${channel}冻结路由整片`,
         operations: [speech
           ? { operationId: "media", outputSlot: "media", kind: "speech", model: bindingA, inputs: [{ kind: "text", text: "冻结 A 的旁白。" }], maxCreateAttempts: 1, parameters: { voiceId: MINIMAX_SPEECH_VOICE, format: "mp3" } }
           : { operationId: "media", outputSlot: "media", kind: "video", model: bindingA, inputs: [{ kind: "text", text: "冻结 A 的黄昏山谷。" }], maxCreateAttempts: 1,
             parameters: { durationSeconds: 6, resolution: wan ? "720P" : "768P", aspectRatio: "16:9", audioMode: "native" } }],
         finalOutput: { operationId: "media", outputSlot: "media" }, maxSpend: { currency: "CNY", amountMinor: 5000 } };
-      const work = ensurePlanStageWork(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, channel);
-      spec.workId = work.workId;
+      const work = seedConfirmedWork(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, channel);
+      spec.workId = work.workId; spec.reviewInputs = [work.reviewInput];
+      // 语音通道最终输出非视频不带目标；视频通道按 F02 声明交付目标。
+      if (!speech) spec.outputTarget = finalVideoTarget();
       const prepared = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: "prepare-A", spec });
-      bindPreparedPlan(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, prepared.proposal, work);
       const admitted = runtime.service.acceptProposal("local-owner", prepared.proposal.id, { commandId: "accept-A", proposalDigest: prepared.proposal.digest });
       assert.equal(wire.length, 0, "受理不等于已submit");
       save(modelB, baseB, "fake-frozen-key-B");
@@ -964,8 +965,8 @@ describe("duration bound (M2 §11.3)", () => {
 
     const scope = { ownerId: "local-owner", conversationId: conversation.id };
     const intent = (durationSeconds: number): ProductionIntent => ({
-      workId: null, title: "十秒镜头取后半段",
-      inputRevisions: [{ artifactId, revisionId }],
+      workId: null, title: "十秒镜头取后半段", purpose: "production", scope: "十秒镜头取后半段整片", reviewInputs: [],
+      inputSources: [{ kind: "artifact_revision" as const, artifactId, revisionId, digest: digestOf(content) }],
       operations: [
         { operationId: "shot", outputSlot: "shot", kind: "video" as const, model: wanBinding,
           inputs: [{ kind: "text" as const, text: "山路全景，缓慢推进。" }], maxCreateAttempts: 1 as const,
@@ -981,17 +982,16 @@ describe("duration bound (M2 §11.3)", () => {
       maxSpend: { currency: "CNY" as const, amountMinor: 600 },
     });
 
-    const work = ensurePlanStageWork(db, staticClock(), scope, "十秒镜头");
+    const work = seedConfirmedWork(db, staticClock(), scope, "十秒镜头");
     const acceptedSpec = intent(10);
-    acceptedSpec.workId = work.workId;
+    acceptedSpec.workId = work.workId; acceptedSpec.reviewInputs = [work.reviewInput]; acceptedSpec.outputTarget = finalVideoTarget();
     const prepared = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: "m2-dur-2", spec: acceptedSpec });
-    bindPreparedPlan(db, staticClock(), scope, prepared.proposal, work);
     const videoOp = prepared.proposal.spec.operations[0] as { quotePerAttempt: { amountMinor: number } };
     assert.equal(videoOp.quotePerAttempt.amountMinor, 600, "报价按 10 秒 × ¥0.60/秒");
 
     // 对照组：同一后半段窗口对 8 秒视频超出冻结时长，prepare 在付费前拒绝。
     const rejectedSpec = intent(8);
-    rejectedSpec.workId = work.workId;
+    rejectedSpec.workId = work.workId; rejectedSpec.reviewInputs = [work.reviewInput];
     await assert.rejects(
       runtime.service.prepareProposal("local-owner", conversation.id, { commandId: "m2-dur-3", spec: rejectedSpec }),
       (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && /超出该视频可用时长 8\.0s/.test(error.message ?? ""));

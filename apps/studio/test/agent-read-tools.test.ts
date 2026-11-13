@@ -43,7 +43,9 @@ interface Fixture {
 async function setup(media?: Parameters<typeof assembleOfflineAgent>[0]["media"], compaction = false): Promise<Fixture> {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-t2-"));
   // 本场景由供应商显式 overflow 触发恢复，窗口需容纳当前工具声明，避免先被 threshold 压缩抢占响应。
-  const app = await assembleOfflineAgent({ dataDir: directory, uiOrigin: origin, ...(media ? { media } : {}), ...(compaction ? { fauxContextWindow: 16000, compaction: { reserveTokens: 3000, keepRecentTokens: 200 } } : {}) });
+  // 与 closeout S1-06 同一校准：窗口放大到不被首轮工具清单（toolsAdded 携带全部 schema）撑破
+  // threshold——本测验证的是显式超窗错误的恢复语义，不是容量逼近。
+  const app = await assembleOfflineAgent({ dataDir: directory, uiOrigin: origin, ...(media ? { media } : {}), ...(compaction ? { fauxContextWindow: 40_000, compaction: { reserveTokens: 3000, keepRecentTokens: 200 } } : {}) });
   const conversation = app.service.createConversation("local-owner", { commandId: cmd(), title: "只读工具" }).conversation;
   app.faux!.setResponses([deliverStep, fauxAssistantMessage("已交付。")]);
   await app.service.sendMessage("local-owner", conversation.id, input("给我 prompt"));
@@ -57,7 +59,9 @@ async function setup(media?: Parameters<typeof assembleOfflineAgent>[0]["media"]
 
 function speechSpec(artifact: ArtifactHead, revision: ArtifactRevision, title: string): ProductionIntent {
   return {
-    workId: null, title, inputRevisions: [{ artifactId: artifact.id, revisionId: artifact.revisionId }],
+    workId: null, title,
+    inputSources: [{ kind: "artifact_revision" as const, artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],
+    reviewInputs: [], purpose: "production", scope: "独立配音提案",
     operations: [{ operationId: "voice", outputSlot: "voice", kind: "speech", model: OFFLINE_QUOTE_CATALOG["speech:faux-speech"].binding,
       inputs: [{ kind: "artifact_revision" as const, artifactId: artifact.id, revisionId: artifact.revisionId, digest: revision.digest }],
       maxCreateAttempts: 1, parameters: { voiceId: "narrator-main", format: "mp3" } }],

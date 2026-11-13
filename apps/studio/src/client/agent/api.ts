@@ -7,8 +7,8 @@ import type {
   LibraryVideo, LibraryVideoPage,
   Work, MaterialBatch,
   UserProfile, SaveUserProfile, SaveUserProfileReceipt,
-  PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings,
-  SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveFreeServiceSettingsReceipt,
+  PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings,
+  SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt,
   SkillPackagesView, InstallSkillPackage, RemoveSkillPackage,
 } from "../../shared/agent/generated/contracts.js";
 
@@ -19,8 +19,8 @@ export type AgentErrorPayload = ContractError & { status: number };
 
 // 免费服务标识与读写形状：合同层没有单一枚举，按各 settings 的 serviceId 判别。
 export type FreeServiceId = FreeServiceSettings["serviceId"];
-export type FreeServiceSettings = PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings;
-export type SaveFreeServiceSettingsInput = SavePexelsSettings | SaveKeylessServiceSettings | SaveNewsNowSettings;
+export type FreeServiceSettings = PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings | EdgeTtsSettings;
+export type SaveFreeServiceSettingsInput = SavePexelsSettings | SaveKeylessServiceSettings | SaveNewsNowSettings | SaveEdgeTtsSettings;
 
 export class AgentApiError extends Error {
   constructor(readonly payload: AgentErrorPayload) {
@@ -176,4 +176,4 @@ export function subscribeEvents(
   return { close: () => source.close() };
 }
 
-export type { ArtifactHead, ArtifactRevision, Bootstrap, Conversation, Message, Proposal, Snapshot, Target, UserProfile, SaveUserProfile, PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveFreeServiceSettingsReceipt, Work, MaterialBatch, LibraryVideo };
+export type { ArtifactHead, ArtifactRevision, Bootstrap, Conversation, Message, Proposal, Snapshot, Target, UserProfile, SaveUserProfile, PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings, SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt, Work, MaterialBatch, LibraryVideo };

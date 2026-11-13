@@ -1,0 +1,11 @@
+services:
+  app:
+    environment:
+      AGENT_CREATIVE_RUNNER_SOCKET: /run/frame-creative/runner.sock
+    volumes:
+      - type: bind
+        source: ${FRAME_CREATIVE_SOCKET_DIRECTORY:?set the existing private host socket directory}
+        target: /run/frame-creative
+        read_only: true
+        bind:
+          create_host_path: false
