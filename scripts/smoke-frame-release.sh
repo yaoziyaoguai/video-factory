@@ -413,7 +413,12 @@ for ((i=0;i<30;i++)); do
 done
 [[ "$probe_ok" == 1 && "$(docker inspect --format '{{.Id}}' "$container")" == "$current2" ]]
 docker inspect --format '{{json .Mounts}}' "$container" > "$evidence/s2-app-mounts-after-restart.json"
-cmp "$evidence/s2-app-mounts-before-restart.json" "$evidence/s2-app-mounts-after-restart.json"
+python3 -I - "$evidence/s2-app-mounts-before-restart.json" "$evidence/s2-app-mounts-after-restart.json" <<'PY'
+import json,sys
+before=json.load(open(sys.argv[1])); after=json.load(open(sys.argv[2]))
+# Docker不保证Mounts数组顺序；按目标比较完整挂载对象，Source、RW等字段仍须逐项相同。
+assert sorted(before,key=lambda m:m['Destination'])==sorted(after,key=lambda m:m['Destination'])
+PY
 report status=passed "containerId=$current2" "runnerImageId=$creative_id" unchangedAppMounts=true
 
 stage=s3-existing-runner-distinct-alias-rollback
