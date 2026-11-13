@@ -875,7 +875,9 @@ rollback_broker
     assert.match(deployJob, /appleboy\/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345/);
     assert.match(deployJob, /git -C "\$PROJECT_PATH" fetch "\$bundle_path" HEAD/);
     assert.match(deployJob, /test "\$\(git -C "\$PROJECT_PATH" rev-parse FETCH_HEAD\)" = "\$RELEASE_SHA"/);
-    assert.match(deployJob, /trap 'rm -f "\$bundle_path" "\$image"' EXIT/);
+    assert.match(workflow, /docker save "video-factory:release-\$GITHUB_SHA" "frame-creative:release-\$GITHUB_SHA"/);
+    assert.match(deployJob, /export RELEASE_MANIFEST="\/tmp\/frame-release-\$\{DEPLOY_RUN\}\.json"/);
+    assert.match(deployJob, /trap 'rm -f "\$bundle_path" "\$image" "\$RELEASE_MANIFEST"' EXIT/);
     assert.doesNotMatch(deployJob, /git fetch origin/);
   });
 
