@@ -102,6 +102,16 @@ compose=(docker compose --project-name "frame-${RELEASE_SHA:0:12}-${DEPLOY_RUN}"
 check_health() {
   curl --noproxy '*' -fsS --max-time 10 "$1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert (r.get("status"),r.get("product"),r.get("release"))==("ok",sys.argv[1],sys.argv[2])' "$2" "$3"
 }
+# reload只投递HUP，不能据其退出码认定新worker已接管；入口开关以实际HTTP响应为准。
+wait_entry_status() {
+  local expected=$1 attempt
+  for ((attempt=0;attempt<30;attempt++)); do
+    if [[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$AGENT_UI_ORIGIN/api/auth/login")" == "$expected" ]]; then return 0; fi
+    sleep 1
+  done
+  printf 'Frame entry did not reach HTTP %s after nginx reload.\n' "$expected" >&2
+  return 1
+}
 runner_image() {
   docker run --rm --read-only --network none --tmpfs /tmp:rw,mode=1777 \
     --mount "type=bind,src=$socket_directory,dst=/run/frame-creative,readonly" \
@@ -115,6 +125,7 @@ old_container="$(docker inspect --format '{{.Id}}' "$container")"
 old_image="$(docker inspect --format '{{.Image}}' "$container")"
 old_product="$(curl --noproxy '*' -fsS --max-time 10 "$health" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="ok"; print(r["product"])')"
 old_release="$(curl --noproxy '*' -fsS --max-time 10 "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"])')"
+old_write_status="$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$AGENT_UI_ORIGIN/api/auth/login")"
 [[ "$old_product" == frame ]]
 old_alias="$(docker image inspect --format '{{.Id}}' "$alias" 2>/dev/null || true)"
 old_runner=''
@@ -129,13 +140,14 @@ cp -a "$site" "$backup/nginx-site"
 [[ ! -e "$host_script" ]] || cp -a "$host_script" "$backup/runner-script"
 [[ ! -e "$PROJECT_PATH/.last-successful-release" ]] || cp -a "$PROJECT_PATH/.last-successful-release" "$backup/success-marker"
 docker volume ls --format '{{.Name}}' --filter "name=$namespace-" | sort > "$backup/original-creative-volumes.txt"
-printf '%s\n' "old_container=$old_container" "old_image=$old_image" "old_release=$old_release" "old_runner=$old_runner" "old_alias=$old_alias" "old_active=$old_active" "old_enabled=$old_enabled" "workspace_root=$workspace_root" "namespace=$namespace" > "$backup/original-state.txt"
+printf '%s\n' "old_container=$old_container" "old_image=$old_image" "old_release=$old_release" "old_runner=$old_runner" "old_alias=$old_alias" "old_active=$old_active" "old_enabled=$old_enabled" "old_write_status=$old_write_status" "workspace_root=$workspace_root" "namespace=$namespace" > "$backup/original-state.txt"
 entry_changed=0; stopped=0; renamed=0; backed_up=0; runner_stopped=0; runner_changed=0; candidate_started=0; committed=0
 restore_entry() {
   cp -a "$backup/nginx-site" "$site"
   if [[ -e "$backup/nginx-maintenance" ]]; then cp -a "$backup/nginx-maintenance" "$maintenance"; else rm -f "$maintenance"; fi
   nginx -t
   systemctl reload nginx
+  wait_entry_status "$old_write_status"
 }
 record_probe_volumes() {
   [[ -e "$backup/before-probe-volumes.txt" ]] || return 0
@@ -214,7 +226,7 @@ if include not in text:
 PY
 nginx -t
 systemctl reload nginx
-[[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$AGENT_UI_ORIGIN/api/auth/login")" == 503 ]]
+wait_entry_status 503
 docker exec "$container" node -e "$queue_check"
 stopped=1
 docker stop --time 45 "$container" >/dev/null
