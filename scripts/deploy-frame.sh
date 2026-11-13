@@ -120,7 +120,7 @@ runner_image() {
       const r=new CreativeRunner({socketPath:process.env.AGENT_CREATIVE_RUNNER_SOCKET});
       console.log(await r.imageId({conversationId:"release-ready",workId:"release-ready",executionId:"project"}));'
 }
-queue_check='const D=require("better-sqlite3"),d=new D("/data/factory/agent/agent.db",{readonly:true});if(d.prepare("SELECT 1 FROM requests WHERE state IN (\x27queued\x27,\x27running\x27) LIMIT 1").get()||d.prepare("SELECT 1 FROM production_runs WHERE state IN (\x27queued\x27,\x27running\x27,\x27cancel_requested\x27) LIMIT 1").get()){console.error("Active Frame work; deploy after it finishes.");process.exit(1)}'
+queue_check='const D=require("better-sqlite3"),d=new D(process.argv[1] ?? "/data/factory/agent/agent.db",{readonly:true});if(d.prepare("SELECT 1 FROM requests WHERE state IN (\x27queued\x27,\x27running\x27) LIMIT 1").get()||d.prepare("SELECT 1 FROM production_runs WHERE state IN (\x27queued\x27,\x27running\x27,\x27cancel_requested\x27) LIMIT 1").get()){console.error("Active Frame work; deploy after it finishes.");process.exit(1)}'
 old_container="$(docker inspect --format '{{.Id}}' "$container")"
 old_image="$(docker inspect --format '{{.Image}}' "$container")"
 old_product="$(curl --noproxy '*' -fsS --max-time 10 "$health" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="ok"; print(r["product"])')"
@@ -231,7 +231,15 @@ docker exec "$container" node -e "$queue_check"
 stopped=1
 docker stop --time 45 "$container" >/dev/null
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$container")" == 0 ]]
-docker run --rm --read-only --network none --mount "type=volume,src=$volume,dst=/data/factory,readonly" --entrypoint node "$old_image" -e "$queue_check"
+# 只读WAL库在辅助文件已删除时也需重建索引；停机后复制db与可能的WAL到私有tmpfs，原卷仍只读。
+docker run --rm --read-only --network none --tmpfs /tmp:rw,mode=1777 --mount "type=volume,src=$volume,dst=/data/factory,readonly" --entrypoint node "$old_image" -e '
+  const fs=require("node:fs"),path=require("node:path"),scratch=fs.mkdtempSync("/tmp/frame-queue-");
+  for (const name of ["agent.db","agent.db-wal"]) {
+    const source=path.join("/data/factory/agent",name);
+    if (name==="agent.db" || fs.existsSync(source)) fs.copyFileSync(source,path.join(scratch,name));
+  }
+  process.argv[1]=path.join(scratch,"agent.db");
+'"$queue_check"
 docker rename "$container" "$previous"; renamed=1
 if [[ "$old_active" == active ]]; then runner_stopped=1; systemctl stop frame-creative.service; fi
 [[ ! -d "$mount/agent" ]] || touch "$backup/had-agent"

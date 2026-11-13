@@ -16,7 +16,7 @@ GitHub 的 `production` 环境使用既有 `SERVER_HOST`、`SERVER_USER`、`SSH_
 
 [发布脚本](../../scripts/deploy-frame.sh)在既有远端 release lock 内核对清单的 SHA、架构、双 image ID 和标签，检查宿主与 Compose 配置。每次部署使用包含 `DEPLOY_RUN` 的独立 Compose 项目名；即使 SHA 相同，也不会由旧项目标签接管被保留的原容器。
 
-切换前只在本应用 Nginx `location /` 中临时加载[维护 include](../../docker/frame-maintenance.nginx.conf)，拒绝外部修改请求，保留真实健康和只读访问。脚本核实 POST 被隔离、没有 queued/running 请求与制作，再正常停止旧应用，并用只读挂载原卷的短进程复核。活动任务不会被部署脚本取消。无写入后才备份持久卷、保存原 runner 配置、实际运行 image ID、固定别名和成功标记；创作卷记录完整清单，本轮仅新探针工程会写入，不复制无关历史工程。
+切换前只在本应用 Nginx `location /` 中临时加载[维护 include](../../docker/frame-maintenance.nginx.conf)，拒绝外部修改请求，保留真实健康和只读访问。脚本核实 POST 被隔离、没有 queued/running 请求与制作，再正常停止旧应用，并用只读挂载原卷的短进程复核：将停机后的 `agent.db` 与现存 WAL 复制到该容器的私有 tmpfs，再读取队列。SQLite 可以在副本旁重建 WAL 辅助文件，原卷始终只读，尚在 WAL 中的排队记录仍参与检查。活动任务不会被部署脚本取消。无写入后才备份持久卷、保存原 runner 配置、实际运行 image ID、固定别名和成功标记；创作卷记录完整清单，本轮仅新探针工程会写入，不复制无关历史工程。
 
 随后安装同 SHA host runner/服务、受控切换创作别名、加载生产 Compose 与 creative overlay，启动候选并按现有迁移升级数据。恢复 trap 仍生效时，从**正在运行的正式 app**调用编译后的 `CreativeRunner` 和 Pi Operations，核实真实写读、PNG、两秒 MP4 解码及隔离；不启动第二个 main，不调用模型或媒体供应商，也不写正式对话库。只有正式 app 的镜像、UID、真实 socket 配置与只读挂载、runner image ID、schema22、本地/公开 health、匿名设置401和工作台静态入口全部通过，才提交成功标记并恢复外部写入。探针新卷按本次准确清单清理。登录后 UI、模型配置与实际供应商效果分别验证，不能用健康200代替。
 
