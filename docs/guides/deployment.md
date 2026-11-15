@@ -18,7 +18,7 @@ GitHub 的 `production` 环境使用既有 `SERVER_HOST`、`SERVER_USER`、`SSH_
 
 切换前只在本应用 Nginx `location /` 中临时加载[维护 include](../../docker/frame-maintenance.nginx.conf)，拒绝外部修改请求，保留真实健康和只读访问。脚本核实 POST 被隔离、没有 queued/running 请求与制作，再正常停止旧应用，并用只读挂载原卷的短进程复核：将停机后的 `agent.db` 与现存 WAL 复制到该容器的私有 tmpfs，再读取队列。SQLite 可以在副本旁重建 WAL 辅助文件，原卷始终只读，尚在 WAL 中的排队记录仍参与检查。活动任务不会被部署脚本取消。无写入后才备份持久卷、保存原 runner 配置、实际运行 image ID、固定别名和成功标记；创作卷记录完整清单，本轮仅新探针工程会写入，不复制无关历史工程。
 
-随后安装同 SHA host runner/服务、受控切换创作别名、加载生产 Compose 与 creative overlay，启动候选并按现有迁移升级数据。恢复 trap 仍生效时，从**正在运行的正式 app**调用编译后的 `CreativeRunner` 和 Pi Operations，核实真实写读、PNG、两秒 MP4 解码及隔离；不启动第二个 main，不调用模型或媒体供应商，也不写正式对话库。只有正式 app 的镜像、UID、真实 socket 配置与只读挂载、runner image ID、schema22、本地/公开 health、匿名设置401和工作台静态入口全部通过，才提交成功标记并恢复外部写入。探针新卷按本次准确清单清理。登录后 UI、模型配置与实际供应商效果分别验证，不能用健康200代替。
+随后安装同 SHA host runner/服务、受控切换创作别名、加载生产 Compose 与 creative overlay，启动候选并按现有迁移升级数据。恢复 trap 仍生效时，从**正在运行的正式 app**调用编译后的 `CreativeRunner` 和 Pi Operations，核实真实写读、PNG、两秒 MP4 解码及隔离；不启动第二个 main，不调用模型或媒体供应商，也不写正式对话库。只有正式 app 的镜像、UID、真实 socket 配置与只读挂载、runner image ID、数据库版本与候选镜像迁移定义一致（本版为24）、本地/公开 health、匿名设置401和工作台静态入口全部通过，才提交成功标记并恢复外部写入。探针新卷按本次准确清单清理。登录后 UI、模型配置与实际供应商效果分别验证，不能用健康200代替。
 
 ```sh
 curl -fsS https://video.example.com/api/health
@@ -27,7 +27,7 @@ docker ps --filter name=video_factory_prod
 
 发布失败会保留私有备份在 `/var/backups/video-factory/frame-<run>-<attempt>/`。恢复时先停候选，移走失败的 Agent 目录后从完整快照还原本次实际写入的 `agent` 范围；保留的旧容器以原 ID 和原 health 条件重开。runner 脚本、unit、active/enabled 和固定别名分别恢复：若原运行 ID 与原别名不同，先按原运行 ID 启动并核对回执，再还原别名；原本没有 runner 则撤销本次新增服务和别名。备份尚未完成不覆盖数据，恢复任一步失败保留入口隔离并明确报错。成功标记提交后的入口恢复故障只修入口，不再用旧快照覆盖新版数据。SSH 排查先核对 Actions 失败步骤和私有备份；不公开环境文件或用户内容。
 
-CI 在独占可销毁 Linux VM 中调用同一个发布脚本，经真实 HTTPS 转发验证成功切换和单次验收失败后的恢复。旧发布源码镜像真实建立 schema18，再迁移到22后恢复旧快照，证明对应旧源码的数据兼容性；这不代表重建镜像与原线上镜像逐字节相同。同 SHA 补线和已有 runner 恢复另有场景，不能用同一镜像改标签充当跨版本证明。
+CI 在独占可销毁 Linux VM 中调用同一个发布脚本，经真实 HTTPS 转发验证成功切换和单次验收失败后的恢复。旧发布源码镜像真实建立 schema18，再迁移到候选定义的最新版本后恢复旧快照，证明对应旧源码的数据兼容性；这不代表重建镜像与原线上镜像逐字节相同。同 SHA 补线和已有 runner 恢复另有场景，不能用同一镜像改标签充当跨版本证明。
 
 若在运行一段时间后决定手动回退，先停新写入并另作一次备份，再选择要恢复的版本与数据时间点；直接恢复旧数据库会丢掉上线后的新创作。仅重新启动旧代码不能撤销数据迁移。
 

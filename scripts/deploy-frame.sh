@@ -275,7 +275,15 @@ check_health "$health" frame "$RELEASE_SHA"
 [[ "$(docker exec "$container" id -u)" == 1001 ]]
 [[ "$(docker exec "$container" printenv AGENT_CREATIVE_RUNNER_SOCKET)" == /run/frame-creative/runner.sock ]]
 docker inspect --format '{{json .Mounts}}' "$container" | python3 -c 'import json,sys; m=[x for x in json.load(sys.stdin) if x["Destination"]=="/run/frame-creative"]; assert len(m)==1 and m[0]["Source"]==sys.argv[1] and not m[0]["RW"]' "$socket_directory"
-docker exec "$container" node -e 'const D=require("better-sqlite3"),d=new D("/data/factory/agent/agent.db",{readonly:true});const version=d.prepare("SELECT MAX(version) AS version FROM agent_schema_migrations").get().version;if(version!==22)process.exit(1);console.log(JSON.stringify({schema:version}));'
+# 迁移定义随候选镜像发布；不在部署脚本维护第二份版本号。
+schema="$(docker exec "$container" node --input-type=module -e '
+  import Database from "better-sqlite3";
+  import {MIGRATIONS} from "/app/apps/studio/dist/server/server/agent/db.js";
+  const db=new Database("/data/factory/agent/agent.db",{readonly:true});
+  const version=db.prepare("SELECT MAX(version) AS version FROM agent_schema_migrations").get().version;
+  db.close();
+  if(version!==MIGRATIONS.at(-1).version)throw new Error("Database migration does not match the release");
+  console.log(version);')"
 
 # 正式app的原socket配置，执行编译后的CreativeRunner；不启动第二个main、不写正式会话库。
 docker volume ls --format '{{.Name}}' --filter "name=$namespace-" | sort > "$backup/before-probe-volumes.txt"
@@ -292,4 +300,4 @@ mv "$PROJECT_PATH/.last-successful-release.partial" "$PROJECT_PATH/.last-success
 committed=1
 restore_entry
 trap - EXIT
-printf 'Frame %s verified with app=%s creative=%s; schema=22; backup=%s; previous=%s.\n' "$RELEASE_SHA" "$app_id" "$creative_id" "$backup" "$previous"
+printf 'Frame %s verified with app=%s creative=%s; schema=%s; backup=%s; previous=%s.\n' "$RELEASE_SHA" "$app_id" "$creative_id" "$schema" "$backup" "$previous"

@@ -118,6 +118,9 @@ PY
 mapfile -t candidate_ids <<< "$ids"
 [[ ${#candidate_ids[@]} == 2 ]]
 app_id="${candidate_ids[0]}"; creative_id="${candidate_ids[1]}"
+candidate_schema="$(docker run --rm --read-only --network none --entrypoint node "$app_id" --input-type=module -e '
+  import {MIGRATIONS} from "/app/apps/studio/dist/server/server/agent/db.js";
+  console.log(MIGRATIONS.at(-1).version);')"
 cp "$RELEASE_MANIFEST" "$evidence/release.json"
 work="$(mktemp -d /tmp/frame-release-ci.XXXXXX)"
 legacy_source="$(mktemp -d /tmp/frame-release-old-source.XXXXXX)"
@@ -173,9 +176,10 @@ if getent hosts frame-ci.example >/dev/null; then
 fi
 printf '\n127.0.0.1 frame-ci.example\n' >> /etc/hosts
 
-python3 -I -u - "$work" "$evidence" "$RELEASE_SHA" "$app_id" <<'PY' > "$evidence/https-proxy.jsonl" 2>&1 &
+python3 -I -u - "$work" "$evidence" "$RELEASE_SHA" "$app_id" "$candidate_schema" <<'PY' > "$evidence/https-proxy.jsonl" 2>&1 &
 import http.client,http.server,json,pathlib,subprocess,sys,threading,time,urllib.error,urllib.request
 work,evidence=map(pathlib.Path,sys.argv[1:3]); sha,app_id=sys.argv[3:5]
+candidate_schema=int(sys.argv[5])
 lock=threading.Lock()
 hop={'connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade'}
 metadata="const D=require('better-sqlite3'),d=new D('/data/factory/agent/agent.db',{readonly:true});console.log(d.prepare('SELECT MAX(version) AS version FROM agent_schema_migrations').get().version);d.close()"
@@ -199,7 +203,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                         info=json.loads(subprocess.check_output(['docker','inspect','video_factory_prod'],timeout=10))[0]
                         if info['Id']!=fault['oldContainerId'] and info['State']['Running'] and info['Image']==app_id and (health.get('status'),health.get('product'),health.get('release'))==('ok','frame',sha):
                             schema=int(subprocess.check_output(['docker','exec','video_factory_prod','node','-e',metadata],timeout=15))
-                            if schema==22:
+                            if schema==candidate_schema:
                                 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                                 request=urllib.request.Request('https://frame-ci.example/api/auth/login',data=b'{}',headers={'Content-Type':'application/json'},method='POST')
                                 try:
@@ -316,11 +320,11 @@ entry_restored() {
 }
 assert_failed_release() {
   local scenario=$1 run=$2 original_id=$3 expected_schema=$4 sentinel=$5 release=$6
-  python3 -I - "$evidence/$scenario-fault.json" "$original_id" "$app_id" <<'PY'
+  python3 -I - "$evidence/$scenario-fault.json" "$original_id" "$app_id" "$candidate_schema" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
 assert r['oldContainerId']==sys.argv[2] and r['candidateContainerId']!=sys.argv[2] and r['candidateImageId']==sys.argv[3]
-assert r['schema']==22 and r['injectedStatus']==503 and r['maintenanceLoginStatus']==503 and r['fixtureMutated'] is True
+assert r['schema']==int(sys.argv[4]) and r['injectedStatus']==503 and r['maintenanceLoginStatus']==503 and r['fixtureMutated'] is True
 PY
   [[ ! -e "$work/fault-armed.json" ]]
   [[ "$(docker inspect --format '{{.Id}}' "$container")" == "$original_id" ]]
@@ -332,12 +336,12 @@ PY
     return 1
   fi
   [[ "$(docker inspect --format '{{.State.Running}}' "video_factory_failed_${run//-/_}")" == false ]]
-  python3 -I - "$evidence/$scenario-fault.json" "$(docker inspect --format '{{.Id}}' "video_factory_failed_${run//-/_}")" "/var/backups/video-factory/frame-$run/failed-agent" <<'PY'
+  python3 -I - "$evidence/$scenario-fault.json" "$(docker inspect --format '{{.Id}}' "video_factory_failed_${run//-/_}")" "/var/backups/video-factory/frame-$run/failed-agent" "$candidate_schema" <<'PY'
 import json,pathlib,sqlite3,sys
 r=json.load(open(sys.argv[1])); assert r['candidateContainerId']==sys.argv[2]
 p=pathlib.Path(sys.argv[3]); assert p.is_dir()
 db=sqlite3.connect((p/'agent.db').as_uri()+'?mode=ro',uri=True)
-assert db.execute('SELECT MAX(version) FROM agent_schema_migrations').fetchone()[0]==22
+assert db.execute('SELECT MAX(version) FROM agent_schema_migrations').fetchone()[0]==int(sys.argv[4])
 db.close()
 assert (p/('frame-release-ci-candidate-only-'+r['run']+'.txt')).is_file()
 PY
@@ -345,7 +349,7 @@ PY
   check_health "$health" "$release"
   check_health "$PUBLIC_HEALTH_URL" "$release"
   entry_restored
-  report status=passed "scenario=$scenario" "restoredContainerId=$original_id" "restoredSchema=$expected_schema" candidateObservedSchema=22 failureInjectionCount=1 agentFixture=restored failedCandidate=preserved successMarker=restored
+  report status=passed "scenario=$scenario" "restoredContainerId=$original_id" "restoredSchema=$expected_schema" "candidateObservedSchema=$candidate_schema" failureInjectionCount=1 agentFixture=restored failedCandidate=preserved successMarker=restored
 }
 image_probe() {
   docker exec -i -e FRAME_CREATIVE_EXPECT_IMAGE="$creative_id" -e FRAME_CREATIVE_SMOKE_ID="$1" \
@@ -380,7 +384,7 @@ docker rename "$container" "frame_ci_schema18_restored_${token//-/_}"
 mv "$mount/agent" "$evidence/s1-restored-agent"
 stage=s2-same-sha-add-wiring
 baseline_project="frame-${RELEASE_SHA:0:12}-$token-baseline"
-start_fixture "$RELEASE_SHA" "$repo" "$baseline_project" 22 "$token-same-sha"
+start_fixture "$RELEASE_SHA" "$repo" "$baseline_project" "$candidate_schema" "$token-same-sha"
 original2="$(docker inspect --format '{{.Id}}' "$container")"
 [[ "$(docker inspect --format '{{.Image}}' "$container")" == "$app_id" ]]
 [[ "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container")" == "$baseline_project" ]]
@@ -392,7 +396,7 @@ current2="$(docker inspect --format '{{.Id}}' "$container")"
 [[ "$(docker inspect --format '{{.State.Running}}' "video_factory_before_${run2//-/_}")" == false ]]
 [[ "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "video_factory_before_${run2//-/_}")" == "$baseline_project" ]]
 [[ "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container")" == "frame-${RELEASE_SHA:0:12}-$run2" ]]
-[[ "$(schema)" == 22 && "$(<"$PROJECT_PATH/.last-successful-release")" == "$RELEASE_SHA" ]]
+[[ "$(schema)" == "$candidate_schema" && "$(<"$PROJECT_PATH/.last-successful-release")" == "$RELEASE_SHA" ]]
 [[ "$(docker exec "$container" printenv AGENT_CREATIVE_RUNNER_SOCKET)" == /run/frame-creative/runner.sock ]]
 docker inspect --format '{{json .Mounts}}' "$container" > "$evidence/s2-app-mounts-before-restart.json"
 python3 -I - "$evidence/s2-app-mounts-before-restart.json" "$FRAME_CREATIVE_SOCKET_DIRECTORY" <<'PY'
@@ -436,7 +440,7 @@ docker exec "$container" node -e 'require("node:fs").writeFileSync("/data/factor
 report status=ready "originalContainerId=$current2" "originalRunnerImageId=$creative_id" "originalAliasImageId=$old_image_id" "active=$runner_active" "enabled=$runner_enabled"
 arm_fault s3 "$run3" "$current2"
 run_deploy s3 "$run3" failure
-assert_failed_release s3 "$run3" "$current2" 22 "$token-existing-runner" "$RELEASE_SHA"
+assert_failed_release s3 "$run3" "$current2" "$candidate_schema" "$token-existing-runner" "$RELEASE_SHA"
 cmp "$evidence/s3-original-runner-unit" "$unit"
 cmp "$evidence/s3-original-runner-script" "$host_script"
 [[ "$(systemctl is-active frame-creative.service)" == "$runner_active" ]]
