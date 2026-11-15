@@ -1,6 +1,6 @@
 # Frame Agent v1 接口索引
 
-工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.42**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
+工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.43**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
 
 | 文件 | 用途 |
 | --- | --- |
@@ -27,6 +27,8 @@
 | 作品库引用 | `LibraryVideo`、`LibraryMaterial`、`LibrarySelection`、`LibrarySelectionSource`；Message 持久回传准确选材 |
 | 可操作状态 | `SkillPackage.runtimeStatus/runtimeMissing`、`Proposal.acceptanceBlocker` 与 `AcceptanceBlocker` |
 | 免费配音 | `ToolDubFree`、`DubFreeResult`、`DubbedSpeechMeta`、`SpeechBoundary`；准确音频修订保存原文、生成参数与源时间边界 |
+
+0.1.43 将确认动作区分为原作品项确认、独立文稿认可（`StandaloneArtifactConfirmation`）与预览采用定稿（`AdoptPreviewConfirmation`）。消息保留原始 `reviewConfirmation`，`start_work.adoptContent` 可采用已有文稿，`CreationBinding.adoptedFrom` 保留同字节采用的来源。纯本地制作沿 `render_project`，作品库可选择准确 `run_input` 原始素材；本地错误保留有界执行输出。具体语义见 [行为约定](agreement.md)。内部 migration23/24 保存确认事实及准确操作产出关联，不新增公共 HTTP 路由。
 
 0.1.42 付费制作意图与快照增加可选 nullable `outputTarget`（`ReviewTarget`）：新的最终视频提案必须显式声明交付到的组/事项，受理时冻结为 `frozen_target_json`；消息增加可选 nullable `reviewContext`（`ReviewContext { workId, groupId }`）表达本条消息指向的创作与审阅组，与 `reviewConfirmation`/`proposalRef`/artifact `target` 互斥。仅新增 `messages.review_context_json` 一列。
 
