@@ -1,5 +1,5 @@
 import type {
-  Target, ArtifactRevision, ToolDelivery, DeliveryReceipt,
+  Target, ArtifactHead, ArtifactRevision, ToolDelivery, DeliveryReceipt,
   ToolPrepareProposal, Proposal, AcceptProposal, AdmissionReceipt,
   ExecutionInput, RecoveryQuery, ExecutionObservation,
   ToolReadProposal, ToolReadRun, ToolListProduction, ProductionIndexPage, Run,
@@ -24,6 +24,12 @@ export interface WorkFeedbackView {
 }
 
 export type WorkWithFeedback = Work & { relatedFeedback: WorkFeedbackView[] };
+
+export type ReviewConfirmationResult = Work | {
+  kind: "standalone_artifact";
+  artifact: ArtifactHead;
+  confirmationId: string;
+};
 
 declare const requestContextBrand: unique symbol;
 declare const userContextBrand: unique symbol;
@@ -67,7 +73,7 @@ export interface PiBusinessTools {
   // 视频创作事项：只在用户正式开始一条视频后建立；确认只记录普通认可，不能受理制作。
   startWork(context: RequestContext, input: ToolStartWork): Promise<Work>;
   readWork(context: RequestContext, input: ToolReadWork): Promise<WorkWithFeedback>;
-  confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<Work>;
+  confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<ReviewConfirmationResult>;
   publishProject(context: RequestContext, input: ToolPublishProject): Promise<ArtifactRevision>;
   renderProject(context: RequestContext, input: ToolRenderProject): Promise<LocalCreationReceipt>;
   readMaterialBatch(context: RequestContext, input: ToolReadMaterialBatch): Promise<MaterialBatch>;

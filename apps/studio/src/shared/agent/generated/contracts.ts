@@ -73,6 +73,13 @@ export type ErrorCode =
   | "TEMPORARILY_UNAVAILABLE"
   | "TARGET_SCOPE_MISMATCH";
 /**
+ * 旧 work 认可形状不变；独立稿认可和预览采用由 kind 明确区分，三个分支互斥。来源消息/身份由宿主注入。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ReviewConfirmation".
+ */
+export type ReviewConfirmation = WorkReviewConfirmation | StandaloneArtifactConfirmation | AdoptPreviewConfirmation;
+/**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "ContentSourceInput".
  */
@@ -102,7 +109,8 @@ export type LibrarySelectionSource =
       kind: "project_file";
       project: RevisionRef;
       relativePath: RelativeProjectPath;
-    };
+    }
+  | LibraryRunInputSource;
 /**
  * 工程内规范相对路径；禁止绝对路径、盘符、反斜线、空目录段及 ./../ 段。宿主发布边界另核对真实文件与符号链接归属。
  *
@@ -817,6 +825,13 @@ export type StageDraft =
       proposalRef: ProposalRef | null;
     };
 /**
+ * confirm_review 只处理当前真实用户的准确认可或预览定稿，不额外排队；来源由当前请求注入。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ToolConfirmReview".
+ */
+export type ToolConfirmReview = WorkReviewConfirmation | StandaloneArtifactConfirmation | AdoptPreviewConfirmation;
+/**
  * 新快照明确标记真实付费/本地来源。旧 JSON 由历史读取边界一次规范化，不能为本地运行伪造提案或财务。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -993,6 +1008,9 @@ export interface ContractPayloads {
   ReviewInputInput: ReviewInputInput;
   ReviewItem: ReviewItem;
   ReviewGroup: ReviewGroup;
+  WorkReviewConfirmation: WorkReviewConfirmation;
+  StandaloneArtifactConfirmation: StandaloneArtifactConfirmation;
+  AdoptPreviewConfirmation: AdoptPreviewConfirmation;
   ReviewConfirmation: ReviewConfirmation;
   ToolConfirmReview: ToolConfirmReview;
   CreationBinding: CreationBinding;
@@ -1020,6 +1038,7 @@ export interface ContractPayloads {
   ToolRenderProject: ToolRenderProject;
   RunOrigin: RunOrigin;
   LocalCreationReceipt: LocalCreationReceipt;
+  LibraryRunInputSource: LibraryRunInputSource;
   LibrarySelectionSource: LibrarySelectionSource;
   LibrarySelection: LibrarySelection;
   LibraryMaterial: LibraryMaterial;
@@ -1419,9 +1438,9 @@ export interface MessageInput {
  * 单项或整组准确版本的真实用户认可。没有组版本锁；只认可不排请求，approve_and_continue 按钮仅排一次，finalize_video 只定稿准确最终视频。来源消息/身份由宿主注入。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "ReviewConfirmation".
+ * via the `definition` "WorkReviewConfirmation".
  */
-export interface ReviewConfirmation {
+export interface WorkReviewConfirmation {
   workId: Id;
   groupId: Id;
   /**
@@ -1441,7 +1460,33 @@ export interface ReviewConfirmation {
   action: "approve" | "approve_and_continue" | "finalize_video";
 }
 /**
- * 持久化准确来源视频和准确素材修订/工程文件；不是 sourceId、当前 head 或临时路径。发送时建立使用引用，选择本身不启动 work/制作。
+ * 仅认可已交付且不属于 work 的独立 script 准确修订；不创建 work、提案或运行。来源消息/身份由宿主注入。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StandaloneArtifactConfirmation".
+ */
+export interface StandaloneArtifactConfirmation {
+  kind: "standalone_artifact";
+  artifactId: Id;
+  revisionId: Id;
+  action: "approve";
+}
+/**
+ * 明确将当前已交付的准确预览同字节采用为本 work 成片并一次定稿；宿主在同一事务核对必要认可与来源，不重生成、不改原预览。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "AdoptPreviewConfirmation".
+ */
+export interface AdoptPreviewConfirmation {
+  kind: "adopt_preview";
+  workId: Id;
+  groupId: Id;
+  itemId: Id;
+  source: RevisionRef;
+  action: "finalize_video";
+}
+/**
+ * 持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "LibrarySelection".
@@ -1449,6 +1494,19 @@ export interface ReviewConfirmation {
 export interface LibrarySelection {
   sourceVideo: RevisionRef;
   source: LibrarySelectionSource;
+}
+/**
+ * 指向成片实际消费的准确冻结 operation.inputs 位置；inputIndex 为零起始索引，上限随现有每操作最多 24 个输入。blobId 必须匹配该位置；坐标不单独授予 blob 访问权。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "LibraryRunInputSource".
+ */
+export interface LibraryRunInputSource {
+  kind: "run_input";
+  runId: Id;
+  operationId: Id;
+  inputIndex: number;
+  blobId: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1540,6 +1598,14 @@ export interface ArtifactHead {
   revisionNumber: number;
   workId: Id | null;
   updatedAt: Time;
+  /**
+   * 仅独立 script 的真实认可投影；认可 revisionId 可早于当前 head，读取该版沿用 read_artifact。
+   */
+  standaloneApproval?: {
+    confirmationId: Id;
+    revisionId: Id;
+    approvedAt: Time;
+  };
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1712,6 +1778,7 @@ export interface CreationBinding {
    */
   projectRevisions?: RevisionRef[];
   runId?: Id;
+  adoptedFrom?: RevisionRef1;
 }
 /**
  * 本次必要且已获真实用户认可的准确版本；不把工程文件、选材或 preview 请求许可伪装成认可。
@@ -1724,6 +1791,13 @@ export interface ReviewInput {
   itemId: Id;
   source: ContentSource;
   confirmationId: Id;
+}
+/**
+ * 只读：同字节采用时由宿主保存的准确原预览修订；沿原 run 和冻结来源追溯，不创建运行或重采最新工程。
+ */
+export interface RevisionRef1 {
+  artifactId: Id;
+  revisionId: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2265,7 +2339,7 @@ export interface Finance {
 export interface RunSegment {
   segmentId: Id2;
   title: string;
-  plan: RevisionRef1;
+  plan: RevisionRef2;
   /**
    * 该段准确采用的内容来源；无对应内容段落的补画面段为 null。
    */
@@ -2301,7 +2375,7 @@ export interface RunSegment {
 /**
  * 本 run 冻结采用的方案修订。
  */
-export interface RevisionRef1 {
+export interface RevisionRef2 {
   artifactId: Id;
   revisionId: Id;
 }
@@ -2345,6 +2419,9 @@ export interface Run {
   updatedAt: Time;
   issue: {
     code: "PROVIDER_UNKNOWN" | "PROVIDER_FAILED" | "CANCEL_UNSUPPORTED" | "BUDGET_EXHAUSTED" | "INPUT_UNAVAILABLE";
+    /**
+     * 有界诊断；本地执行可保留约 8KiB 真实输出尾部及退出上下文，沿 read_run 返回。
+     */
     message: string;
   } | null;
   title: string;
@@ -2839,6 +2916,7 @@ export interface LocalRenderOperation {
   model: null;
   parameters: RenderParameters;
   target: FrozenReviewTarget;
+  musicSource?: MediaProvenance2;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2848,6 +2926,23 @@ export interface FrozenReviewTarget {
   groupId: Id;
   itemId: Id;
   baseRevisionId: Id | null;
+}
+/**
+ * 只读：服务端从实际音乐输入解析并在 digest 前冻结的来源事实，与 OperationSpec.musicSource 同义；工具及 ProjectRenderRequestOperation 不接受提交。
+ */
+export interface MediaProvenance2 {
+  provider: MaterialProvider;
+  assetId: string;
+  sourceUrl: string;
+  creatorName: string | null;
+  creatorUrl: string | null;
+  licenseUrl: string;
+  acquiredAt: Time;
+  title?: string;
+  licenseName?: string;
+  attributionText?: string;
+  usageScope?: string;
+  licenseVersion?: string | null;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2864,6 +2959,9 @@ export interface ExecutionObservation {
     mimeType: string;
   } | null;
   observedAt: Time;
+  /**
+   * 有界诊断；本地执行可保留约 8KiB 真实输出尾部及退出上下文，不扩展日志或事件协议。
+   */
   message: string | null;
   billing: BillingFact | null;
 }
@@ -3093,11 +3191,14 @@ export interface MaterialBatch {
   messageId: Id | null;
 }
 /**
+ * 明确开始视频作品；title-only 保持原行为。可选 adoptContent 引用用户明确采用的已存在准确文本修订或消息，宿主核对归属与文本来源，并以当前真实用户来源在同一事务创建作品、内容采用组/事项及该 work 的真实确认。只引用原文，不复制稿件，不复用独立稿 confirmationId 作为 work 审批，不自动制作；认可来源消息/身份由宿主注入。
+ *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "ToolStartWork".
  */
 export interface ToolStartWork {
   title: string;
+  adoptContent?: ContentSourceInput;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3192,7 +3293,7 @@ export interface LibraryVideo {
  * via the `definition` "LibraryProjectFile".
  */
 export interface LibraryProjectFile {
-  project: RevisionRef2;
+  project: RevisionRef3;
   relativePath: RelativeProjectPath;
   /**
    * 封存工程清单里该文件的登记 MIME；客户端据此区分媒体与文本文件。
@@ -3202,7 +3303,7 @@ export interface LibraryProjectFile {
 /**
  * 该文件所属的封存工程修订；多工程合成时同名 relativePath 以此区分来源，不能指向另一个工程。
  */
-export interface RevisionRef2 {
+export interface RevisionRef3 {
   artifactId: Id;
   revisionId: Id;
 }
@@ -3211,10 +3312,13 @@ export interface RevisionRef2 {
  * via the `definition` "LibraryMaterial".
  */
 export interface LibraryMaterial {
-  source: RevisionRef;
+  /**
+   * 旧素材保持无 kind 的 RevisionRef；原始媒体输入使用 run_input 准确坐标。选择时旧来源转 artifact_revision，新来源原样传入，sourceVideo 仍必填。
+   */
+  source: RevisionRef | LibraryRunInputSource;
   label: string;
   /**
-   * 留存清单里该素材修订的 artifact 类别；文本类素材没有媒体来源记录，provenance 为空。
+   * 留存清单里的素材类别；修订沿 artifact 类别，run_input 按实际媒体类型。文本类素材没有媒体来源记录，provenance 为空。
    */
   kind: "image" | "audio" | "video" | "script" | "prompt" | "analysis" | "project";
   /**
@@ -3331,13 +3435,13 @@ export interface LegacyToolProductionIntent {
 export interface LegacyPrepareProposal {
   commandId: Id;
   spec: LegacyProductionIntent;
-  planSource?: RevisionRef3;
+  planSource?: RevisionRef4;
   replacesProposal?: ProposalRef3;
 }
 /**
  * 准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。
  */
-export interface RevisionRef3 {
+export interface RevisionRef4 {
   artifactId: Id;
   revisionId: Id;
 }
@@ -3356,13 +3460,13 @@ export interface ProposalRef3 {
  */
 export interface LegacyToolPrepareProposal {
   spec: LegacyToolProductionIntent;
-  planSource?: RevisionRef4;
+  planSource?: RevisionRef5;
   replacesProposal?: ProposalRef4;
 }
 /**
  * 准备已交付方案的制作时，引用该作品当前方案的准确修订；无需复制方案或重新认可。不作为媒体输入。
  */
-export interface RevisionRef4 {
+export interface RevisionRef5 {
   artifactId: Id;
   revisionId: Id;
 }
@@ -3400,31 +3504,6 @@ export interface LegacyCreationBinding {
   stage: WorkStage;
   source: ContentSource | null;
   proposalRef: ProposalRef | null;
-}
-/**
- * confirm_review 只记录当前真实用户认可，不额外排队；来源由当前请求注入。
- *
- * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "ToolConfirmReview".
- */
-export interface ToolConfirmReview {
-  workId: Id;
-  groupId: Id;
-  /**
-   * @minItems 1
-   * @maxItems 64
-   */
-  items: [
-    {
-      itemId: Id;
-      source: ContentSourceInput;
-    },
-    ...{
-      itemId: Id;
-      source: ContentSourceInput;
-    }[]
-  ];
-  action: "approve" | "approve_and_continue" | "finalize_video";
 }
 /**
  * 封存当前任务工程选定文件，宿主注入固定 runtimeImage；只发布 project 修订，不认可、不执行、不默认逐文件交付。
@@ -3502,12 +3581,12 @@ export interface ProjectRenderRequestOperation {
    * @maxItems 24
    */
   inputs: InputRef[];
-  parameters: CodeProjectParameters;
+  parameters: RenderParameters;
   target: ReviewTarget;
   baseRevisionId?: Id;
 }
 /**
- * 当前明确制作请求的一次本地受理。宿主核对 work/scope 和必要认可、注入请求来源、分配新目标、冻结工程及操作，免费动作不准备费用卡。
+ * 当前明确制作请求的一次本地受理。接受现有 RenderParameters 的 code_project 及四种原生拼接；宿主核对 work/scope 和必要认可、注入请求来源、分配新目标、冻结实际输入/工程及操作，纯本地动作不准备费用卡。原生拼接输出 video，工程按声明输出 image/audio/video。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "ToolRenderProject".

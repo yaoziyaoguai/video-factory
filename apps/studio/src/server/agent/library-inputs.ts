@@ -40,6 +40,13 @@ export async function ensureLibraryInputs(
 // 输入位置。修订行不存在（历史数据被外部清理）就没有可准备的原字节，跳过该来源。
 function libraryInputItem(db: AgentDatabase, selection: LibrarySelection): { sourceKey: string; path: string; blobId: string } | null {
   const source = selection.source;
+  if (source.kind === "run_input") {
+    const blob = db.prepare("SELECT mime_type FROM production_blobs WHERE id=?").get(source.blobId) as { mime_type: MediaContent["mimeType"] } | undefined;
+    const extension = blob ? MEDIA_INPUT_EXTENSION[blob.mime_type] : undefined;
+    if (!extension) return null;
+    return { sourceKey: `run-input:${source.runId}:${source.operationId}:${source.inputIndex}:${source.blobId}`,
+      path: `inputs/library/${source.runId}/${source.operationId}/${source.inputIndex}${extension}`, blobId: source.blobId };
+  }
   if (source.kind === "project_file") {
     const revision = getRevisionRow(db, source.project.artifactId, source.project.revisionId);
     if (!revision) return null;

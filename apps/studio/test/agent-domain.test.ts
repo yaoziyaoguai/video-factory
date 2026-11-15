@@ -8,7 +8,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ToolCall } from "@earendil-works/pi-ai";
 import { BusinessTools } from "../src/server/agent/pi-tools.js";
 import type { DeliveryItem } from "../src/shared/agent/generated/contracts.js";
-import { openAgentDatabase } from "../src/server/agent/db.js";
+import Database from "better-sqlite3";
+import { MIGRATIONS, openAgentDatabase } from "../src/server/agent/db.js";
 import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
 import { systemClock } from "../src/server/agent/util.js";
 
@@ -625,6 +626,115 @@ describe("agent domain rules", () => {
     assert.equal(after.n, before.n, "重复迁移不毁数据");
     assert.deepEqual(reopened.prepare("SELECT version FROM agent_schema_migrations ORDER BY version").all(), applied, "重开不重复执行迁移");
     reopened.close();
+  });
+
+  it("DG-R1 migration23 保留原认可定稿逐行事实与顺序，独立确认仅允许空 work 的准确修订认可", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "frame-mig23-"));
+    try {
+      const now = systemClock();
+      const legacy = new Database(path.join(dir, "agent.db"));
+      legacy.exec("CREATE TABLE agent_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+      for (const migration of MIGRATIONS.filter(entry => entry.version <= 22)) {
+        legacy.transaction(() => {
+          for (const statement of migration.statements) legacy.exec(statement);
+          migration.data?.(legacy);
+          legacy.prepare("INSERT INTO agent_schema_migrations VALUES (?, ?)").run(migration.version, now);
+        })();
+      }
+      legacy.prepare(`INSERT INTO conversations(id,owner_id,title,created_seq,pi_session_id,created_at,updated_at)
+        VALUES ('conv-m23','local-owner','旧认可',1,'sess-m23',?,?)`).run(now, now);
+      legacy.prepare(`INSERT INTO messages(id,conversation_id,owner_id,role,kind,state,text,references_json,created_seq,created_at,updated_at)
+        VALUES ('msg-m23','conv-m23','local-owner','user','chat','completed','旧动作','{}',1,?,?)`).run(now, now);
+      legacy.prepare(`INSERT INTO works(id,owner_id,conversation_id,title,created_at,updated_at)
+        VALUES ('work-m23','local-owner','conv-m23','旧作品',?,?)`).run(now, now);
+      const subject = '{"kind":"artifact_revision","artifactId":"art-m23","revisionId":"rev-m23","digest":"unchanged"}';
+      for (const [id, action] of [["confirm-z", "approve"], ["confirm-a", "approve_and_continue"], ["confirm-m", "finalize_video"]]) {
+        legacy.prepare(`INSERT INTO work_review_confirmations(id,owner_id,conversation_id,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
+          VALUES (?,'local-owner','conv-m23','work-m23','group-m23','item-m23',?,?,'user_message','msg-m23',?)`).run(id, action, subject, now);
+      }
+      const before = legacy.prepare("SELECT * FROM work_review_confirmations ORDER BY rowid").all();
+      const indexes = legacy.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='work_review_confirmations' ORDER BY name").all();
+      legacy.close();
+
+      const upgraded = openAgentDatabase(dir);
+      assert.equal((upgraded.prepare("SELECT review_confirmation_json AS value FROM messages WHERE id='msg-m23'").get() as { value: unknown }).value, null);
+      const rows = upgraded.prepare("SELECT * FROM work_review_confirmations ORDER BY rowid").all() as Record<string, unknown>[];
+      assert.deepEqual(rows.map(({ subject_scope, ...row }) => row), before, "id/source/subject/action/归属/时间及原顺序保持");
+      assert.deepEqual(rows.map(row => row.subject_scope), ["work_item", "work_item", "work_item"]);
+      assert.deepEqual(upgraded.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='work_review_confirmations' ORDER BY name").all(), indexes);
+      const insert = upgraded.prepare(`INSERT INTO work_review_confirmations(id,owner_id,conversation_id,subject_scope,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
+        VALUES (?,'local-owner','conv-m23','standalone_artifact',?,NULL,NULL,?,?,'user_message','msg-m23',?)`);
+      assert.throws(() => insert.run("bad-work", "work-m23", "approve", subject, now), /CHECK/);
+      assert.throws(() => insert.run("bad-action", null, "finalize_video", subject, now), /CHECK/);
+      insert.run("standalone-m23", null, "approve", subject, now);
+      const after = upgraded.prepare("SELECT * FROM work_review_confirmations ORDER BY rowid").all();
+      upgraded.close();
+      const again = openAgentDatabase(dir);
+      assert.deepEqual(again.prepare("SELECT * FROM work_review_confirmations ORDER BY rowid").all(), after, "重开不修改历史和新增独立认可");
+      again.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("DG-R1.1 migration24 只补唯一可证产出，冻结目标分辨同字节，历史歧义留空且重开不重复", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "frame-mig24-"));
+    try {
+      const now = systemClock();
+      const legacy = new Database(path.join(dir, "agent.db"));
+      legacy.exec("CREATE TABLE agent_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+      for (const migration of MIGRATIONS.filter(entry => entry.version <= 23)) {
+        legacy.transaction(() => {
+          for (const statement of migration.statements) legacy.exec(statement);
+          migration.data?.(legacy);
+          legacy.prepare("INSERT INTO agent_schema_migrations VALUES (?, ?)").run(migration.version, now);
+        })();
+      }
+      legacy.prepare(`INSERT INTO conversations(id,owner_id,title,created_seq,pi_session_id,created_at,updated_at)
+        VALUES ('conv-m24','local-owner','旧产出',1,'sess-m24',?,?)`).run(now, now);
+      legacy.prepare(`INSERT INTO works(id,owner_id,conversation_id,title,created_at,updated_at)
+        VALUES ('work-m24','local-owner','conv-m24','旧作品',?,?)`).run(now, now);
+      let ordinal = 0;
+      for (const scenario of ["unique", "ambiguous", "local-target", "paid-target"] as const) {
+        ordinal++;
+        const runId = `run-${scenario}`, blobId = `blob-${scenario}`;
+        const target = { groupId: "group-m24", itemId: "item-m24" };
+        const spec = { finalOutput: { operationId: "output", outputSlot: "video" } };
+        legacy.prepare("INSERT INTO production_snapshots(id,spec_json,digest,created_at) VALUES (?,?,?,?)")
+          .run(`snap-${scenario}`, JSON.stringify(spec), `frozen-${scenario}`, now);
+        legacy.prepare(`INSERT INTO production_runs(id,owner_id,conversation_id,work_id,snapshot_id,proposal_id,title,state,created_seq,frozen_target_json,created_at,updated_at)
+          VALUES (?,'local-owner','conv-m24','work-m24',?,NULL,?,'succeeded',?,?,?,?)`)
+          .run(runId, `snap-${scenario}`, scenario, ordinal, scenario === "paid-target" ? JSON.stringify(target) : null, now, now);
+        legacy.prepare("INSERT INTO production_blobs(id,owner_id,conversation_id,digest,mime_type,size_bytes,created_at) VALUES (?,'local-owner','conv-m24',?,'video/mp4',12,?)")
+          .run(blobId, `bytes-${scenario}`, now);
+        legacy.prepare("INSERT INTO production_operations(run_id,id,spec_json,state,output_blob_id) VALUES (?,'output',?,'succeeded',?)")
+          .run(runId, JSON.stringify({ outputSlot: "video", ...(scenario === "local-target" ? { target } : {}) }), blobId);
+        for (let index = 0; index < (scenario === "unique" ? 1 : 2); index++) {
+          const artifactId = `art-${scenario}-${index}`, revisionId = `rev-${scenario}-${index}`;
+          const binding = { workId: "work-m24", ...target, itemId: index === 0 ? target.itemId : "other-item" };
+          legacy.prepare(`INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,head_revision_id,head_revision_number,created_seq,created_at,updated_at)
+            VALUES (?,'conv-m24','local-owner',?,'video',?,1,?,?,?)`).run(artifactId, scenario, revisionId, ordinal * 2 + index, now, now);
+          legacy.prepare(`INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at)
+            VALUES (?,?,1,?,?,?,?,?)`).run(revisionId, artifactId, runId, `json-${scenario}-${index}`,
+              JSON.stringify({ format: "media", blobId, mimeType: "video/mp4", durationMs: 1000 }), JSON.stringify(binding), now);
+          legacy.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES (?,?)").run(revisionId, blobId);
+        }
+      }
+      const original = Object.fromEntries(["artifacts", "artifact_revisions", "production_snapshots", "production_runs", "production_operations", "revision_blob_links", "work_review_confirmations"]
+        .map(table => [table, legacy.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+      legacy.close();
+      const upgraded = openAgentDatabase(dir);
+      const operations = upgraded.prepare("SELECT * FROM production_operations ORDER BY rowid").all() as Record<string, unknown>[];
+      assert.deepEqual(operations.map(row => row.output_revision_id), ["rev-unique-0", null, "rev-local-target-0", "rev-paid-target-0"]);
+      for (const [table, rows] of Object.entries(original)) {
+        assert.deepEqual(table === "production_operations" ? operations.map(({ output_revision_id, ...row }) => row)
+          : upgraded.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), rows, `${table} 旧业务事实及顺序不变`);
+      }
+      upgraded.close();
+      const again = openAgentDatabase(dir);
+      assert.deepEqual(again.prepare("SELECT * FROM production_operations ORDER BY rowid").all(), operations);
+      assert.equal((again.prepare("SELECT COUNT(*) AS n FROM agent_schema_migrations WHERE version=24").get() as { n: number }).n, 1);
+      assert.deepEqual(again.pragma("foreign_key_check"), []);
+      again.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
   it("v21→v22 迁移：messages 补 review_context_json，旧行读出 NULL，再次重开幂等", async () => {

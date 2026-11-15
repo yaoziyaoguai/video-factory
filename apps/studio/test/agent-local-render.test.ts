@@ -15,10 +15,15 @@ import { blobSources, recordBlobSources } from "../src/server/agent/material-sto
 import { attemptsFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import { finalVideoTarget, seedConfirmedWork, type ConfirmedReviewWork } from "./helpers/creative-work-fixture.js";
+import { admitLocalIntent, localRenderIntentOf } from "./helpers/tool-args.js";
+import { resolveContentSource } from "../src/server/agent/creative-work.js";
+import { verifyReviewInput } from "../src/server/agent/artifact-store.js";
+import { storeCommandReceipt } from "../src/server/agent/conversation-store.js";
+import { validatorFor } from "../src/server/agent/validate.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import type { AgentDatabase } from "../src/server/agent/db.js";
 import type { MediaExecutionPort } from "../src/shared/agent/ports.js";
-import type { MediaProvenance, ProductionIntent, RenderParameters } from "../src/shared/agent/generated/contracts.js";
+import type { MediaProvenance, OperationSpec, ProductionIntent, ProductionSpec, RenderParameters } from "../src/shared/agent/generated/contracts.js";
 
 const run = promisify(execFile);
 let sequence = 0;
@@ -85,7 +90,7 @@ function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Bu
 type OrderedRenderParameters = Extract<RenderParameters, { assembly: "ordered_concat" }>;
 
 // 视频 render 是正式制作（B04/T04）：用产品内核把创作推进到“脚本已认可”，
-// 提案引用真实认可事实（reviewInputs）；测试不手写 creation_binding，也不放宽认可规则。
+// 本地受理引用真实认可事实（reviewInputs）；测试不手写 creation_binding，也不放宽认可规则。
 function stageWork(runtime: AgentRuntime, conversationId: string, title = "拼接视频"): ConfirmedReviewWork {
   return seedConfirmedWork(runtime.database, staticClock(), { ownerId: "local-owner", conversationId }, title);
 }
@@ -102,19 +107,32 @@ function renderIntent(work: ConfirmedReviewWork, order: { artifactId: string; re
     finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
 
-async function prepareIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
-  return runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
+async function acceptRender(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
+  return (await admitLocalIntent(runtime, { ownerId: "local-owner", conversationId }, intent)).run.id;
 }
 
-async function acceptRender(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
-  const { proposal } = await prepareIntent(runtime, conversationId, intent);
-  const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
-  return admitted.run.id;
+// 明确模拟 DGR-03 之前已存在的 ¥0 行，验证历史读取/收窄/回放；当前入口不能再创建这种提案。
+function historicalLocalProposal(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
+  const scope = { ownerId: "local-owner", conversationId };
+  const requestSource = runtime.database.prepare("SELECT id AS requestId, message_id AS messageId FROM requests WHERE conversation_id=? ORDER BY rowid DESC LIMIT 1")
+    .get(conversationId) as { requestId: string; messageId: string };
+  const freeze = (operation: ProductionIntent["operations"][number]): OperationSpec => ({ ...operation,
+    quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" });
+  const [first, ...rest] = intent.operations;
+  const spec: ProductionSpec = { ...intent, type: "paid_production", requestSource,
+    inputSources: intent.inputSources.map(source => resolveContentSource(runtime.database, scope, source)),
+    reviewInputs: intent.reviewInputs.map(input => verifyReviewInput(runtime.database, scope, input)),
+    operations: [freeze(first), ...rest.map(freeze)] };
+  const id = newAgentId("prp"), now = staticClock();
+  const seq = (runtime.database.prepare("SELECT COALESCE(MAX(created_seq),0)+1 AS n FROM proposals WHERE conversation_id=?").get(conversationId) as { n: number }).n;
+  runtime.database.prepare("INSERT INTO proposals(id,conversation_id,owner_id,digest,spec_json,state,price_disclosure,expires_at,revision,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,'ready',?,?,1,?,?,?)")
+    .run(id, conversationId, scope.ownerId, digestOf(spec), canonicalJson(spec), "历史本地 ¥0 提案夹具", "2026-10-26T00:30:00.000Z", seq, now, now);
+  return runtime.service.readProposal(scope.ownerId, id);
 }
 
 const staticClock = () => "2026-10-26T00:00:00.000Z";
 
-it("T3 引用边界：明确提案可复用同会话未交付 blob，确认前不制作", async () => {
+it("T3 引用边界：本地受理复用同会话未交付 blob，无提案授权，worker 领取前不制作", async () => {
   const assets = await prepareAssets();
   let submits = 0;
   const runtime = await buildRuntime(assets.directory, staticClock, (blobs, db) => {
@@ -130,11 +148,13 @@ it("T3 引用边界：明确提案可复用同会话未交付 blob，确认前�
     const work = stageWork(runtime, conversation.id, "复用素材视频");
     const intent = renderIntent(work, [revision]);
     intent.operations[0]!.inputs.push({ kind: "blob", blobId: blob.id, digest: blob.digest });
-    const prepared = await prepareIntent(runtime, conversation.id, intent);
-    assert.equal(prepared.proposal.state, "ready");
-    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
+    const accepted = await admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, intent);
+    assert.equal(accepted.run.state, "queued");
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 1);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM authorizations").get() as { n: number }).n, 0);
+    assert.equal(accepted.run.finance, null);
     assert.equal(submits, 0);
-    const accepted = runtime.service.acceptProposal("local-owner", prepared.proposal.id, { commandId: cmd(), proposalDigest: prepared.proposal.digest });
     for (let i = 0; i < 8; i++) await runtime.worker!.pollOnce();
     assert.equal(runtime.service.getRun("local-owner", accepted.run.id).state, "succeeded");
     assert.equal(submits, 1);
@@ -168,7 +188,7 @@ it("T3 来源上限：64 项可交付，65 项在准备时拒绝，同图依赖�
       if (revision.content.format === "media") recordBlobSources(runtime.database, revision.content.blobId, groups[index]!);
     }
     const over = renderIntent(work, refs);
-    await assert.rejects(runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: over }),
+    await assert.rejects(admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, over),
       (error: any) => error.code === "INVALID_INPUT" && /64/.test(error.message));
     assert.equal(submits, 0);
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0);
@@ -179,7 +199,7 @@ it("T3 来源上限：64 项可交付，65 项在准备时拒绝，同图依赖�
     ] });
     chained.inputSources.push({ kind: "artifact_revision", ...refs[2]! });
     chained.finalOutput = { operationId: "second", outputSlot: "second-final" };
-    await assert.rejects(runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: chained }),
+    await assert.rejects(admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, chained),
       (error: any) => error.code === "INVALID_INPUT" && /64/.test(error.message));
     assert.equal(submits, 0);
     chained.operations[1]!.inputs[1] = { kind: "artifact_revision", ...refs[0]! };
@@ -370,17 +390,17 @@ it("C1 审计：本地拼接只启用 1280×720 / 24fps / 一次尝试", async (
     const work = stageWork(runtime, conversation.id, "输出范围视频");
     const clip = mediaRevision(runtime, conversation.id, assets.clipA, 1200);
     for (const parameters of [{ width: 640, height: 360 }, { fps: 30 }]) {
-      await assert.rejects(() => prepareIntent(runtime, conversation.id, renderIntent(work, [clip], parameters)),
+      await assert.rejects(() => admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, renderIntent(work, [clip], parameters)),
         (error: { code?: string }) => error.code === "CAPABILITY_UNAVAILABLE");
     }
-    const multipleAttempts = renderIntent(work, [clip]);
-    multipleAttempts.operations[0]!.maxCreateAttempts = 2;
-    await assert.rejects(() => prepareIntent(runtime, conversation.id, multipleAttempts),
-      (error: { code?: string }) => error.code === "INVALID_INPUT");
+    const multipleAttempts = localRenderIntentOf(renderIntent(work, [clip]));
+    const verdict = validatorFor("ToolRenderProject")({ ...multipleAttempts,
+      operations: [{ ...multipleAttempts.operations[0], maxCreateAttempts: 2 }] });
+    assert.equal(verdict.ok, false, "免费入口不接受调用方追加创建次数");
     const textInput = renderIntent(work, [clip]);
     textInput.inputSources = [];
     textInput.operations[0]!.inputs = [{ kind: "text", text: "文字不能直接交给视频拼接。" }];
-    await assert.rejects(() => prepareIntent(runtime, conversation.id, textInput),
+    await assert.rejects(() => admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, textInput),
       (error: { code?: string }) => error.code === "INVALID_INPUT");
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
@@ -399,8 +419,9 @@ it("C1 审计：收窄能力后，旧提案不能继续受理不再支持的输�
     const conversation = first.service.createConversation("local-owner", { commandId: cmd(), title: "旧规格提案" }).conversation;
     const work = stageWork(first, conversation.id, "旧规格视频");
     const clip = mediaRevision(first, conversation.id, assets.clipA, 1200);
-    const { proposal } = await prepareIntent(first, conversation.id,
+    const proposal = historicalLocalProposal(first, conversation.id,
       renderIntent(work, [clip], { width: 640, height: 360 }));
+    assert.equal(proposal.state, "ready", "历史 ¥0 提案仍可读取");
     await first.close();
     second = await buildRuntime(assets.directory, staticClock, (blobs, db) =>
       new LocalRenderPort(db, blobs, staticClock, { workRoot: assets.workRoot }));
@@ -470,7 +491,7 @@ it("C1 审计：关闭装配等待异步端口清理后再关闭 SQLite", async 
 });
 
 
-it("C1 审计：HTTP prepare 重放直接返回回执，不重复探测同一输入", async () => {
+it("C1 审计：历史 ¥0 HTTP prepare 回执仍可重放，不重复探测或创建提案", async () => {
   const assets = await prepareAssets();
   const originalPath = process.env.PATH;
   const ffprobe = (await run("which", ["ffprobe"])).stdout.trim();
@@ -485,12 +506,19 @@ it("C1 审计：HTTP prepare 重放直接返回回执，不重复探测同一输
     const work = stageWork(runtime, conversation.id, "准备重放视频");
     const clip = mediaRevision(runtime, conversation.id, assets.clipA, 1200);
     const request = { commandId: cmd(), spec: renderIntent(work, [clip]) };
+    const historical = historicalLocalProposal(runtime, conversation.id, request.spec);
+    storeCommandReceipt(runtime.database, staticClock(), { ownerId: "local-owner", operation: "prepareProposal", targetId: conversation.id, commandId: request.commandId }, request, historical);
+    writeFileSync(trace, "");
     const first = await runtime.service.prepareProposal("local-owner", conversation.id, request);
+    assert.equal(first.replayed, true);
+    assert.equal(first.proposal.id, historical.id);
     const before = readFileSync(trace, "utf8");
     const replay = await runtime.service.prepareProposal("local-owner", conversation.id, request);
     assert.equal(replay.replayed, true);
     assert.equal(replay.proposal.id, first.proposal.id);
     assert.equal(readFileSync(trace, "utf8"), before, "重放不应再启动 ffprobe");
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 1, "历史回执读取不新造提案");
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM authorizations").get() as { n: number }).n, 0);
   } finally {
     process.env.PATH = originalPath;
     await runtime.close(); await rm(assets.directory, { recursive: true, force: true });

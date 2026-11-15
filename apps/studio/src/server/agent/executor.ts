@@ -6,7 +6,7 @@ import type { EventHub } from "./event-log.js";
 import type { PiModelSelection, PiRuntimeHost, ConversationSession } from "./pi-runtime.js";
 import type { ActiveRequestContext, CrashPointHook } from "./pi-tools.js";
 import type {
-  ContextStatus, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewContext,
+  ContextStatus, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewConfirmation, ReviewContext,
 } from "../../shared/agent/generated/contracts.js";
 import {
   claimNextRequest, emptyReferences, finalizeRequestMessages, getConversation, insertMessage,
@@ -231,7 +231,7 @@ export class ConversationRunner {
     const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
     const confirmation = this.options.db.prepare(
       `SELECT work_id FROM (
-         SELECT work_id FROM work_review_confirmations WHERE source_kind='user_message' AND source_id=?
+         SELECT work_id FROM work_review_confirmations WHERE subject_scope='work_item' AND source_kind='user_message' AND source_id=?
          UNION ALL
          SELECT work_id FROM work_stage_confirmations WHERE source_kind='user_message' AND source_id=?
        ) LIMIT 1`,
@@ -286,8 +286,8 @@ export class ConversationRunner {
     ).all(request.id) as { proposal_id: string }[];
     // 引用以实际已消费的动作来源消息为准：steering 被原生接收后 context 读最新关联，
     // 不始终停留在最初 request.message_id。
-    const message = this.options.db.prepare("SELECT references_json, target_json, feedback_json, library_selections_json, review_context_json FROM messages WHERE id=?")
-      .get(this.holder.current.actionSourceMessageId) as { references_json: string; target_json: string | null; feedback_json: string | null; library_selections_json: string | null; review_context_json: string | null };
+    const message = this.options.db.prepare("SELECT references_json, target_json, feedback_json, library_selections_json, review_context_json, review_confirmation_json FROM messages WHERE id=?")
+      .get(this.holder.current.actionSourceMessageId) as { references_json: string; target_json: string | null; feedback_json: string | null; library_selections_json: string | null; review_context_json: string | null; review_confirmation_json: string | null };
     const references = JSON.parse(message.references_json) as { proposalIds: string[]; artifacts: { artifactId: string }[] };
     // 消息声明的组审阅指向（C2/F05）：与 target 互斥，双作品会话里随消息明确当前对象。
     const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
@@ -324,6 +324,7 @@ export class ConversationRunner {
       conversationId: this.conversationId,
       requestId: request.id,
       actionSourceMessageId: this.holder.current.actionSourceMessageId,
+      reviewConfirmation: message.review_confirmation_json ? JSON.parse(message.review_confirmation_json) as ReviewConfirmation : null,
       target,
       editingWorkId,
       reviewContext,

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ArtifactHead, ArtifactRevision, AudioSummary, CreativeProjectContent, FileContent, InputRef, MediaContent, OperationSpec, Proposal, RenderParameters, Run, Work } from "../../shared/agent/generated/contracts.js";
 import { AudioSummaryView, MediaSourceDetails } from "./AudioSummaryView.js";
-import { MarkdownText } from "./markdown.js";
+import { MarkdownBody } from "./markdown.js";
 
 export const runEnded = (state: Run["state"]) => ["succeeded", "failed", "cancelled"].includes(state);
 const money = (amount: number) => `¥${(amount / 100).toFixed(2)}`;
@@ -325,7 +325,7 @@ export function ProjectPreview({ content }: { content: CreativeProjectContent })
 
 // 修订正文按 format 判别渲染；调用方只提供准确修订，不预读内容。
 export function RevisionBody({ content, simulated }: { content: ArtifactRevision["content"]; simulated: boolean }) {
-  if (content.format === "markdown") return <MarkdownText text={content.text} />;
+  if (content.format === "markdown") return <MarkdownBody content={content} />;
   if (content.format === "media") return <MediaPreview content={content} simulated={simulated} />;
   if (content.format === "file") return <FilePreview content={content} />;
   return <ProjectPreview content={content} />;

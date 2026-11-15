@@ -2,8 +2,10 @@ import type {
   MessageInput, AcceptProposal, ToolDelivery, DeliveryItem,
   InstallSkillPackage, RemoveSkillPackage, SkillPackagesView,
   ReviewConfirmation, ToolConfirmReview, CreationBinding,
-  ToolPublishProject, ToolRenderProject, CodeProjectParameters,
-  LocalCreationSpec, LibrarySelection, Run, Proposal,
+  StandaloneArtifactConfirmation, AdoptPreviewConfirmation, ArtifactHead,
+  ToolStartWork, ToolPublishProject, ToolRenderProject, CodeProjectParameters, RenderParameters,
+  ProjectRenderRequestOperation, LocalRenderOperation,
+  LocalCreationSpec, LibrarySelection, LibraryRunInputSource, LibraryMaterial, Run, Proposal,
 } from "../../../apps/studio/src/shared/agent/generated/contracts.js";
 
 export const requestPrompts = {
@@ -34,6 +36,43 @@ export const approvalMessage = {
   ...requestPrompts, commandId: "cmd_review", text: "人物可以，背景再改",
   reviewConfirmation: approveCharacter, librarySelections: [],
 } satisfies MessageInput;
+
+export const approveStandaloneScript = {
+  kind: "standalone_artifact", artifactId: "script_standalone", revisionId: "script_v1", action: "approve",
+} satisfies StandaloneArtifactConfirmation;
+export const recordStandaloneApproval: ToolConfirmReview = approveStandaloneScript;
+export const standaloneApprovalMessage = {
+  ...requestPrompts, commandId: "cmd_standalone", text: "认可这一版脚本",
+  reviewConfirmation: approveStandaloneScript, librarySelections: [],
+} satisfies MessageInput;
+export const standaloneScriptHead = {
+  id: "script_standalone", title: "独立脚本新版", kind: "script", workId: null,
+  revisionId: "script_v2", revisionNumber: 2, updatedAt: "2026-11-14T08:01:00Z",
+  standaloneApproval: { confirmationId: "confirmation_script_1", revisionId: "script_v1", approvedAt: "2026-11-14T08:00:00Z" },
+} satisfies ArtifactHead;
+export const startWorkWithoutContent = { title: "开始一件新视频" } satisfies ToolStartWork;
+export const startWorkWithScript = {
+  title: "从独立文稿开始视频",
+  adoptContent: { kind: "artifact_revision", artifactId: "script_standalone", revisionId: "script_v1", digest: "a".repeat(64) },
+} satisfies ToolStartWork;
+export const startWorkWithMessage = {
+  title: "从消息内容开始视频",
+  adoptContent: { kind: "message_text", messageId: "message_content", text: "清晨沿着山路出发。" },
+} satisfies ToolStartWork;
+export const adoptPreview = {
+  kind: "adopt_preview", workId: "work_1", groupId: "visual_1", itemId: "walk_preview",
+  source: { artifactId: "preview_1", revisionId: "preview_v1" }, action: "finalize_video",
+} satisfies AdoptPreviewConfirmation;
+export const recordPreviewFinalization: ToolConfirmReview = adoptPreview;
+export const adoptPreviewMessage = {
+  ...requestPrompts, commandId: "cmd_adopt", text: "以这版定稿并入库",
+  reviewConfirmation: adoptPreview, librarySelections: [],
+} satisfies MessageInput;
+
+export function confirmationTarget(input: ReviewConfirmation): string {
+  if ("kind" in input) return input.kind === "standalone_artifact" ? input.artifactId : input.source.artifactId;
+  return input.workId;
+}
 
 const projectRevision = { artifactId: "project_1", revisionId: "project_v1" };
 export const freezeProject = {
@@ -76,6 +115,39 @@ export const localSnapshot = {
   finalOutput: { operationId: "portrait", outputSlot: "image" },
 } satisfies LocalCreationSpec;
 
+export const nativeMixedParameters = {
+  assembly: "mixed_concat", format: "mp4", width: 1280, height: 720, fps: 24,
+  segments: [{ kind: "video", inputSlot: 0, startMs: 0, durationMs: 3000, originalGain: 0.4 }],
+  segmentIds: ["opening"],
+  music: {
+    inputSlot: 1, candidateId: "candidate_music", sourceStartMs: 0, sourceDurationMs: 3000,
+    timelineStartMs: 0, playDurationMs: 3000, repeat: false, gain: 0.2,
+    fadeInMs: 0, fadeOutMs: 0, duckUnderNarration: false,
+  },
+} satisfies RenderParameters;
+export const nativeRenderOperation = {
+  operationId: "concat", outputSlot: "video",
+  inputs: [
+    { kind: "blob", blobId: "blob_raw_video", digest: "a".repeat(64) },
+    { kind: "blob", blobId: "blob_music", digest: "b".repeat(64) },
+  ],
+  parameters: nativeMixedParameters,
+  target: { group: { mode: "existing", groupId: "visual_1" }, item: { mode: "existing", itemId: "video_item" } },
+} satisfies ProjectRenderRequestOperation;
+export const renderNativeConcat = {
+  workId: "work_1", title: "已有片段混音", scope: "使用已有片段与音乐", purpose: "production",
+  inputSources: [], reviewInputs: [], operations: [nativeRenderOperation],
+} satisfies ToolRenderProject;
+export const frozenNativeOperation = {
+  ...nativeRenderOperation, kind: "render", model: null,
+  target: { groupId: "visual_1", itemId: "video_item", baseRevisionId: null },
+  musicSource: {
+    provider: "freetouse", assetId: "music_1", sourceUrl: "https://example.invalid/music/1",
+    creatorName: "Example Artist", creatorUrl: null, licenseUrl: "https://example.invalid/license",
+    acquiredAt: "2026-11-14T08:00:00Z", attributionText: "Example music attribution",
+  },
+} satisfies LocalRenderOperation;
+
 export const localRun = {
   id: "run_local", conversationId: "conversation_1", workId: "work_1", snapshotId: "snapshot_1",
   origin: { kind: "local_request", requestId: "request_1" }, revision: 1, state: "queued", finance: null,
@@ -86,6 +158,10 @@ export const localRun = {
 export const previewBinding = {
   workId: "work_1", groupId: "visual_1", itemId: "walk_preview", purpose: "preview",
   inputSources: [character], reviewInputs: [], projectRevision, runId: "run_preview",
+} satisfies CreationBinding;
+export const adoptedVideoBinding = {
+  ...previewBinding, itemId: "video_item", purpose: "production",
+  projectRevisions: [projectRevision], adoptedFrom: adoptPreview.source,
 } satisfies CreationBinding;
 export const reviewDelivery = {
   items: [{
@@ -102,8 +178,20 @@ export const reuseProjectFile = {
   sourceVideo: { artifactId: "video_1", revisionId: "video_v1" },
   source: { kind: "project_file", project: projectRevision, relativePath: "src/walk.py" },
 } satisfies LibrarySelection;
+export const rawInputSource = {
+  kind: "run_input", runId: "run_preview", operationId: "concat", inputIndex: 0, blobId: "blob_raw_video",
+} satisfies LibraryRunInputSource;
+export const rawLibraryMaterial = {
+  source: rawInputSource, label: "原始片段", kind: "video", provenance: [],
+} satisfies LibraryMaterial;
+export const revisionLibraryMaterial = {
+  source: { artifactId: "character_1", revisionId: "character_v1" }, label: "人物", kind: "image", provenance: [],
+} satisfies LibraryMaterial;
+export const reuseRawInput = {
+  sourceVideo: { artifactId: "video_1", revisionId: "video_v1" }, source: rawInputSource,
+} satisfies LibrarySelection;
 export const reuseMessage = {
-  ...requestPrompts, commandId: "cmd_reuse", text: "沿用这个人物工程做新片段", librarySelections: [reuseProjectFile],
+  ...requestPrompts, commandId: "cmd_reuse", text: "沿用这个人物工程和原始片段", librarySelections: [reuseProjectFile, reuseRawInput],
 } satisfies MessageInput;
 
 export function canAccept(proposal: Proposal): boolean {
@@ -129,6 +217,34 @@ void forgedApproval;
 void imageWithFps;
 void localWithBudget;
 void doubleRunOrigin;
+// 联合中旧 work 分支无 kind；混合 payload 的排他性由 examples.json 的运行时 oneOf 反例验证。
+// @ts-expect-error 准确独立稿分支不能混入旧 work 目标。
+const mixedApprovalBranches: StandaloneArtifactConfirmation = { ...approveStandaloneScript, workId: "work_1" };
+// @ts-expect-error 独立稿只支持 approve。
+const standaloneFinalization: ToolConfirmReview = { ...approveStandaloneScript, action: "finalize_video" };
+// @ts-expect-error 预览采用必须明确 finalize_video。
+const adoptAsApproval: ToolConfirmReview = { ...adoptPreview, action: "approve" };
+// @ts-expect-error 预览来源是无 kind 的 RevisionRef。
+const adoptContentSource: ToolConfirmReview = { ...adoptPreview, source: { kind: "artifact_revision", artifactId: "preview_1", revisionId: "preview_v1" } };
+// @ts-expect-error 工具输入不能提交宿主冻结的 musicSource。
+const requestWithMusicSource: ProjectRenderRequestOperation = { ...nativeRenderOperation, musicSource: frozenNativeOperation.musicSource };
+// @ts-expect-error raw 坐标不能省略准确已定稿来源视频。
+const rawWithoutVideo: LibrarySelection = { source: rawInputSource };
+// @ts-expect-error 旧 LibraryMaterial.source 仍为无 kind 的 RevisionRef。
+const taggedRevisionMaterial: LibraryMaterial = { ...revisionLibraryMaterial, source: { kind: "artifact_revision", artifactId: "character_1", revisionId: "character_v1" } };
+void mixedApprovalBranches;
+void standaloneFinalization;
+void adoptAsApproval;
+void adoptContentSource;
+void requestWithMusicSource;
+void rawWithoutVideo;
+void taggedRevisionMaterial;
+// @ts-expect-error 采用文稿需要包含 digest 的准确 ContentSourceInput。
+const adoptWithoutDigest: ToolStartWork = { title: "采用文稿", adoptContent: { kind: "artifact_revision", artifactId: "script_standalone", revisionId: "script_v1" } };
+// @ts-expect-error 独立稿认可 ID 不能作为新 work 的审批输入。
+const startWithStandaloneConfirmation: ToolStartWork = { ...startWorkWithScript, confirmationId: "confirmation_script_1" };
+void adoptWithoutDigest;
+void startWithStandaloneConfirmation;
 
 export const installSkillPackage = { source: "/srv/fixtures/creative-skills" } satisfies InstallSkillPackage;
 export const removeSkillPackage = { packageId: "package_local" } satisfies RemoveSkillPackage;

@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.42",
+  "title": "Frame contract payloads 0.1.43",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -1650,6 +1650,28 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "updatedAt": {
           "$ref": "#/$defs/Time"
+        },
+        "standaloneApproval": {
+          "type": "object",
+          "readOnly": true,
+          "description": "仅独立 script 的真实认可投影；认可 revisionId 可早于当前 head，读取该版沿用 read_artifact。",
+          "properties": {
+            "confirmationId": {
+              "$ref": "#/$defs/Id"
+            },
+            "revisionId": {
+              "$ref": "#/$defs/Id"
+            },
+            "approvedAt": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "confirmationId",
+            "revisionId",
+            "approvedAt"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -4129,7 +4151,8 @@ export const contractsSchema: Record<string, unknown> = {
                 "message": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 1200
+                  "maxLength": 9600,
+                  "description": "有界诊断；本地执行可保留约 8KiB 真实输出尾部及退出上下文，沿 read_run 返回。"
                 }
               },
               "required": [
@@ -5371,12 +5394,13 @@ export const contractsSchema: Record<string, unknown> = {
             {
               "type": "string",
               "minLength": 1,
-              "maxLength": 1200
+              "maxLength": 9600
             },
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "有界诊断；本地执行可保留约 8KiB 真实输出尾部及退出上下文，不扩展日志或事件协议。"
         },
         "billing": {
           "anyOf": [
@@ -7077,11 +7101,15 @@ export const contractsSchema: Record<string, unknown> = {
     },
     "ToolStartWork": {
       "type": "object",
+      "description": "明确开始视频作品；title-only 保持原行为。可选 adoptContent 引用用户明确采用的已存在准确文本修订或消息，宿主核对归属与文本来源，并以当前真实用户来源在同一事务创建作品、内容采用组/事项及该 work 的真实确认。只引用原文，不复制稿件，不复用独立稿 confirmationId 作为 work 审批，不自动制作；认可来源消息/身份由宿主注入。",
       "properties": {
         "title": {
           "type": "string",
           "minLength": 1,
           "maxLength": 120
+        },
+        "adoptContent": {
+          "$ref": "#/$defs/ContentSourceInput"
         }
       },
       "required": [
@@ -8810,7 +8838,7 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
-    "ReviewConfirmation": {
+    "WorkReviewConfirmation": {
       "type": "object",
       "description": "单项或整组准确版本的真实用户认可。没有组版本锁；只认可不排请求，approve_and_continue 按钮仅排一次，finalize_video 只定稿准确最终视频。来源消息/身份由宿主注入。",
       "properties": {
@@ -8901,94 +8929,93 @@ export const contractsSchema: Record<string, unknown> = {
         }
       ]
     },
-    "ToolConfirmReview": {
+    "StandaloneArtifactConfirmation": {
       "type": "object",
-      "description": "confirm_review 只记录当前真实用户认可，不额外排队；来源由当前请求注入。",
+      "description": "仅认可已交付且不属于 work 的独立 script 准确修订；不创建 work、提案或运行。来源消息/身份由宿主注入。",
       "properties": {
+        "kind": {
+          "type": "string",
+          "const": "standalone_artifact"
+        },
+        "artifactId": {
+          "$ref": "#/$defs/Id"
+        },
+        "revisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "action": {
+          "type": "string",
+          "const": "approve"
+        }
+      },
+      "required": [
+        "kind",
+        "artifactId",
+        "revisionId",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "AdoptPreviewConfirmation": {
+      "type": "object",
+      "description": "明确将当前已交付的准确预览同字节采用为本 work 成片并一次定稿；宿主在同一事务核对必要认可与来源，不重生成、不改原预览。",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "adopt_preview"
+        },
         "workId": {
           "$ref": "#/$defs/Id"
         },
         "groupId": {
           "$ref": "#/$defs/Id"
         },
-        "items": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "itemId": {
-                "$ref": "#/$defs/Id"
-              },
-              "source": {
-                "$ref": "#/$defs/ContentSourceInput"
-              }
-            },
-            "required": [
-              "itemId",
-              "source"
-            ],
-            "additionalProperties": false
-          },
-          "minItems": 1,
-          "maxItems": 64
+        "itemId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
         },
         "action": {
           "type": "string",
-          "enum": [
-            "approve",
-            "approve_and_continue",
-            "finalize_video"
-          ]
+          "const": "finalize_video"
         }
       },
       "required": [
+        "kind",
         "workId",
         "groupId",
-        "items",
+        "itemId",
+        "source",
         "action"
       ],
-      "additionalProperties": false,
-      "allOf": [
+      "additionalProperties": false
+    },
+    "ReviewConfirmation": {
+      "description": "旧 work 认可形状不变；独立稿认可和预览采用由 kind 明确区分，三个分支互斥。来源消息/身份由宿主注入。",
+      "oneOf": [
         {
-          "if": {
-            "properties": {
-              "action": {
-                "type": "string",
-                "const": "finalize_video"
-              }
-            },
-            "required": [
-              "action"
-            ]
-          },
-          "then": {
-            "properties": {
-              "items": {
-                "type": "array",
-                "maxItems": 1,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "source": {
-                      "type": "object",
-                      "properties": {
-                        "kind": {
-                          "type": "string",
-                          "const": "artifact_revision"
-                        }
-                      },
-                      "required": [
-                        "kind"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "source"
-                  ]
-                }
-              }
-            }
-          }
+          "$ref": "#/$defs/WorkReviewConfirmation"
+        },
+        {
+          "$ref": "#/$defs/StandaloneArtifactConfirmation"
+        },
+        {
+          "$ref": "#/$defs/AdoptPreviewConfirmation"
+        }
+      ]
+    },
+    "ToolConfirmReview": {
+      "description": "confirm_review 只处理当前真实用户的准确认可或预览定稿，不额外排队；来源由当前请求注入。",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkReviewConfirmation"
+        },
+        {
+          "$ref": "#/$defs/StandaloneArtifactConfirmation"
+        },
+        {
+          "$ref": "#/$defs/AdoptPreviewConfirmation"
         }
       ]
     },
@@ -9038,6 +9065,11 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "runId": {
           "$ref": "#/$defs/Id"
+        },
+        "adoptedFrom": {
+          "$ref": "#/$defs/RevisionRef",
+          "readOnly": true,
+          "description": "只读：同字节采用时由宿主保存的准确原预览修订；沿原 run 和冻结来源追溯，不创建运行或重采最新工程。"
         }
       },
       "required": [
@@ -9868,6 +9900,11 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "target": {
           "$ref": "#/$defs/FrozenReviewTarget"
+        },
+        "musicSource": {
+          "$ref": "#/$defs/MediaProvenance",
+          "readOnly": true,
+          "description": "只读：服务端从实际音乐输入解析并在 digest 前冻结的来源事实，与 OperationSpec.musicSource 同义；工具及 ProjectRenderRequestOperation 不接受提交。"
         }
       },
       "required": [
@@ -10004,7 +10041,7 @@ export const contractsSchema: Record<string, unknown> = {
           "maxItems": 24
         },
         "parameters": {
-          "$ref": "#/$defs/CodeProjectParameters"
+          "$ref": "#/$defs/RenderParameters"
         },
         "target": {
           "$ref": "#/$defs/ReviewTarget"
@@ -10024,7 +10061,7 @@ export const contractsSchema: Record<string, unknown> = {
     },
     "ToolRenderProject": {
       "type": "object",
-      "description": "当前明确制作请求的一次本地受理。宿主核对 work/scope 和必要认可、注入请求来源、分配新目标、冻结工程及操作，免费动作不准备费用卡。",
+      "description": "当前明确制作请求的一次本地受理。接受现有 RenderParameters 的 code_project 及四种原生拼接；宿主核对 work/scope 和必要认可、注入请求来源、分配新目标、冻结实际输入/工程及操作，纯本地动作不准备费用卡。原生拼接输出 video，工程按声明输出 image/audio/video。",
       "properties": {
         "workId": {
           "$ref": "#/$defs/Id"
@@ -10154,6 +10191,38 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "LibraryRunInputSource": {
+      "type": "object",
+      "description": "指向成片实际消费的准确冻结 operation.inputs 位置；inputIndex 为零起始索引，上限随现有每操作最多 24 个输入。blobId 必须匹配该位置；坐标不单独授予 blob 访问权。",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "run_input"
+        },
+        "runId": {
+          "$ref": "#/$defs/Id"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "inputIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "blobId": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "kind",
+        "runId",
+        "operationId",
+        "inputIndex",
+        "blobId"
+      ],
+      "additionalProperties": false
+    },
     "LibrarySelectionSource": {
       "oneOf": [
         {
@@ -10197,12 +10266,15 @@ export const contractsSchema: Record<string, unknown> = {
             "relativePath"
           ],
           "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/LibraryRunInputSource"
         }
       ]
     },
     "LibrarySelection": {
       "type": "object",
-      "description": "持久化准确来源视频和准确素材修订/工程文件；不是 sourceId、当前 head 或临时路径。发送时建立使用引用，选择本身不启动 work/制作。",
+      "description": "持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。",
       "properties": {
         "sourceVideo": {
           "$ref": "#/$defs/RevisionRef"
@@ -10221,7 +10293,15 @@ export const contractsSchema: Record<string, unknown> = {
       "type": "object",
       "properties": {
         "source": {
-          "$ref": "#/$defs/RevisionRef"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            {
+              "$ref": "#/$defs/LibraryRunInputSource"
+            }
+          ],
+          "description": "旧素材保持无 kind 的 RevisionRef；原始媒体输入使用 run_input 准确坐标。选择时旧来源转 artifact_revision，新来源原样传入，sourceVideo 仍必填。"
         },
         "label": {
           "type": "string",
@@ -10239,7 +10319,7 @@ export const contractsSchema: Record<string, unknown> = {
             "analysis",
             "project"
           ],
-          "description": "留存清单里该素材修订的 artifact 类别；文本类素材没有媒体来源记录，provenance 为空。"
+          "description": "留存清单里的素材类别；修订沿 artifact 类别，run_input 按实际媒体类型。文本类素材没有媒体来源记录，provenance 为空。"
         },
         "provenance": {
           "type": "array",

@@ -6,6 +6,7 @@ import type { ContentSource, LibraryMaterial, LibraryProjectFile } from "../../s
 import type { LibraryPick } from "./workspace-state.js";
 import { MarkdownBody, MarkdownText } from "./markdown.js";
 import { AudioSummaryView } from "./AudioSummaryView.js";
+import { RevisionBody } from "./ProductionCards.js";
 
 // 作品库（§6）：只收用户定稿的最终视频，条目身份是 video.revisionId；
 // 列表只给缩略图/标题/定稿时间，详情给播放/下载、采用的文稿与方案、回到对话。
@@ -24,14 +25,19 @@ function libraryFileGroups(entry: LibraryVideo): { files: LibraryProjectFile[]; 
   }, []);
 }
 
+const materialPickKey = (source: LibraryMaterial["source"]) => "kind" in source
+  ? `r:${source.runId}:${source.operationId}:${source.inputIndex}:${source.blobId}`
+  : `m:${source.artifactId}:${source.revisionId}`;
+
 function buildLibraryPicks(entry: LibraryVideo, pickedKeys: string[]): LibraryPick[] {
   const fileGroups = libraryFileGroups(entry);
   return [
     ...entry.materials
-      .filter(material => pickedKeys.includes(`m:${material.source.revisionId}`))
+      .filter(material => pickedKeys.includes(materialPickKey(material.source)))
       .map(material => ({
         label: `${material.label}（${MATERIAL_KIND_LABEL[material.kind]}）`,
-        selection: { sourceVideo: entry.video, source: { kind: "artifact_revision" as const, artifactId: material.source.artifactId, revisionId: material.source.revisionId } },
+        selection: { sourceVideo: entry.video, source: "kind" in material.source ? material.source
+          : { kind: "artifact_revision" as const, artifactId: material.source.artifactId, revisionId: material.source.revisionId } },
       })),
     ...entry.projectFiles
       .filter(file => pickedKeys.includes(`f:${file.project.revisionId}:${file.relativePath}`))
@@ -207,8 +213,11 @@ function LibraryPickLists({ entry, pickedKeys, onToggle }: { entry: LibraryVideo
   return <>
     {entry.materials.length ? <ul>
       {entry.materials.map(material => {
-        const key = `m:${material.source.revisionId}`;
-        return <li key={key}><label><input type="checkbox" checked={pickedKeys.includes(key)} onChange={() => onToggle(key)} />{material.label}<small>{MATERIAL_KIND_LABEL[material.kind]}</small></label></li>;
+        const key = materialPickKey(material.source);
+        return <li key={key}>
+          <label><input type="checkbox" checked={pickedKeys.includes(key)} onChange={() => onToggle(key)} />{material.label}<small>{MATERIAL_KIND_LABEL[material.kind]}</small></label>
+          <LibraryMaterialPreview material={material} />
+        </li>;
       })}
     </ul> : null}
     {fileGroups.length ? fileGroups.map((group, index) => <ul key={group.files[0]!.project.revisionId}>
@@ -219,6 +228,33 @@ function LibraryPickLists({ entry, pickedKeys, onToggle }: { entry: LibraryVideo
       })}
     </ul>) : null}
   </>;
+}
+
+function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
+  const source = material.source;
+  const [open, setOpen] = useState(false);
+  const [read, setRead] = useState<{ revision: ArtifactRevision | null; failed: boolean }>({ revision: null, failed: false });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    if (!open || "kind" in source) return;
+    let disposed = false;
+    setRead({ revision: null, failed: false });
+    agentApi.readRevision(source.artifactId, source.revisionId)
+      .then(revision => { if (!disposed) setRead({ revision, failed: false }); })
+      .catch(() => { if (!disposed) setRead({ revision: null, failed: true }); });
+    return () => { disposed = true; };
+  }, [source, open, attempt]);
+  return <details className="agent-library-material-preview" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>预览与下载</summary>
+    {open ? "kind" in source ? <div className="agent-preview-media">
+      {material.kind === "video" ? <video controls preload="metadata" src={blobUrl(source.blobId)} aria-label="视频预览" />
+        : material.kind === "image" ? <img src={blobUrl(source.blobId)} alt={material.label} loading="lazy" />
+        : material.kind === "audio" ? <audio controls preload="metadata" src={blobUrl(source.blobId)} aria-label="音频预览" /> : null}
+      <a href={blobUrl(source.blobId)} download>下载文件</a>
+    </div> : read.revision ? <RevisionBody content={read.revision.content} simulated={false} />
+      : read.failed ? <p role="status">素材读取失败。<button type="button" onClick={() => setAttempt(value => value + 1)}>重试读取素材</button></p>
+      : <p className="agent-stage-muted">正在读取…</p> : null}
+  </details>;
 }
 
 // §11.7 来源8：输入框旁“从作品库选择”弹层——选视频→勾素材/制作文件→并入当前输入草稿；

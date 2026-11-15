@@ -305,6 +305,8 @@ for (const crashPoint of ["after-claim", "after-auto-compaction"]) {
 }
 
 it("审计 F3：连续 SIGKILL 不清除前一回合未完成的安全恢复义务", { timeout: 60000 }, async t => {
+  const started = performance.now();
+  const mark = (phase: string) => t.diagnostic(JSON.stringify({ phase, elapsedMs: Math.round(performance.now() - started) }));
   const dataDir = await mkdtemp(path.join(tmpdir(), "frame-double-crash-"));
   const port = await reservePort(), base = `http://127.0.0.1:${port}`;
   const json = async (method: string, url: string, body?: unknown): Promise<any> => {
@@ -312,19 +314,35 @@ it("审计 F3：连续 SIGKILL 不清除前一回合未完成的安全恢复义�
     assert.ok(response.ok, `HTTP ${response.status}`); return response.json();
   };
   const input = (text: string) => ({ commandId: `cmd-${crypto.randomUUID()}`, text, target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
+  mark("before-initial-start");
   let child = await startChild({ scenario: "continue", crashPoint: "", dataDir, port });
-  t.after(async () => { if (child.process.exitCode === null && child.process.signalCode === null) await child.close(); await rm(dataDir, { recursive: true, force: true }); });
+  mark("initial-listening");
+  t.after(async () => {
+    mark("cleanup-start");
+    if (child.process.exitCode === null && child.process.signalCode === null) await child.close();
+    await rm(dataDir, { recursive: true, force: true });
+    mark("cleanup-complete");
+  });
   const conv = await json("POST", "/conversations", { commandId: "create", title: "连续中断" });
   await json("POST", `/conversations/${conv.id}/messages`, input("保留早先的讨论"));
   await waitFor(async () => !(await json("GET", `/conversations/${conv.id}/snapshot`)).activeRequestId);
   await child.close();
+  mark("seed-closed");
   for (const [scenario, crashPoint, text] of [["deliver", "after-deliver-commit", "不得续接的中断回合"], ["continue", "after-claim", "尚未进入模型的回合"]]) {
+    mark(`before-start:${crashPoint}`);
     child = await startChild({ scenario: scenario!, crashPoint: crashPoint!, dataDir, port });
+    mark(`listening:${crashPoint}`);
     const sending = json("POST", `/conversations/${conv.id}/messages`, input(text!)).catch(() => null);
     assert.equal(await child.waitForCrashPoint(), crashPoint);
-    await child.close(); await sending;
+    mark(`reached:${crashPoint}`);
+    await child.close();
+    mark(`killed:${crashPoint}`);
+    await sending;
+    mark(`request-settled:${crashPoint}`);
   }
+  mark("before-safe-restart");
   child = await startChild({ scenario: "verify-safe-history", crashPoint: "", dataDir, port });
+  mark("safe-restart-listening");
   await json("POST", `/conversations/${conv.id}/messages`, input("继续讨论"));
   await waitFor(async () => !(await json("GET", `/conversations/${conv.id}/snapshot`)).activeRequestId);
   const completed = await json("GET", `/conversations/${conv.id}/snapshot`);
@@ -332,4 +350,5 @@ it("审计 F3：连续 SIGKILL 不清除前一回合未完成的安全恢复义�
   assert.equal(completed.artifacts.items.length, 1);
   assert.equal(completed.proposals.items.length, 0);
   assert.equal(completed.runs.items.length, 0);
+  mark("recovery-assertions-complete");
 });

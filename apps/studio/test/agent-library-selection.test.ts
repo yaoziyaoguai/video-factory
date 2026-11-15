@@ -10,6 +10,7 @@ import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG } from "../src/server/agent
 import { saveEdgeTtsServiceSettings } from "../src/server/agent/free-service-settings.js";
 import type { ArtifactRevision, DeliveryReceipt, DubFreeResult, ProductionIntent, RevisionRef } from "../src/shared/agent/generated/contracts.js";
 import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
+import { retainedVideoMaterials } from "../src/server/agent/library-materials.js";
 
 // G4-2 跨会话作品库选材：入口验证（真实 finalize_video + 定稿当时留存清单）、
 // 准确音频修订的元数据/原字节与再次交付、currentContext 披露、消息持久化、伪造与越权拒绝。
@@ -114,6 +115,9 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       workId: f.confirmed.workId, groupId: voiceTarget.groupId, items: [{ itemId: voiceTarget.itemId, source: audioSource }], action: "approve",
     } });
     f.spec.inputSources.push(audioSource);
+    // 同字节的另一个合法产出不被成片消费，不能按 blob 猜成 shot-1，也不能混进留存。
+    f.spec.operations.push({ ...f.spec.operations[0]!, operationId: "unused-shot", outputSlot: "unused-video" });
+    f.spec.maxSpend = { currency: "CNY", amountMinor: 2400 };
     f.spec.operations.push({ operationId: "narrated", outputSlot: "final", kind: "render", model: null,
       inputs: [{ kind: "operation_output", producerOperationId: "shot-1", outputSlot: "video-1" }, audioSource], maxCreateAttempts: 1,
       parameters: { assembly: "narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24,
@@ -124,7 +128,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     // 会话 A：跑成视频草稿并定稿，留存清单绑定实际采用的准确音频修订。
     const proposal = (await f.app.service.prepareProposal("local-owner", f.conversation.id, { commandId: cmd(), spec: f.spec })).proposal;
     const accepted = f.app.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
-    for (let i = 0; i < 8 && f.app.service.getRun("local-owner", accepted.run.id).state !== "succeeded"; i++) { await f.app.worker!.pollOnce(); f.advance(); }
+    for (let i = 0; i < 12 && f.app.service.getRun("local-owner", accepted.run.id).state !== "succeeded"; i++) { await f.app.worker!.pollOnce(); f.advance(); }
     assert.equal(f.app.service.getRun("local-owner", accepted.run.id).state, "succeeded");
     // 成片正式交付同时记录本次图中实际采用的方案与音频；定稿留存取这份交付的准确来源清单。
     const producedVideo = videoItemOf(f);
@@ -138,6 +142,31 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       })]), fauxAssistantMessage("成片已交付。"),
     ]);
     await f.app.service.sendMessage("local-owner", f.conversation.id, input("把完成的成片与实际来源一起交付"));
+    for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    const delivered = videoItemOf(f);
+    assert.equal(delivered.item.draft?.kind, "artifact_revision");
+    const producer = retainedVideoMaterials(f.app.database, "local-owner", delivered.item.draft as RevisionRef).producer;
+    assert.ok(producer, "再次交付不能丢失 producer");
+    assert.deepEqual({ runId: producer.runId, operationId: producer.operationId, outputSlot: producer.outputSlot },
+      { runId: accepted.run.id, operationId: "narrated", outputSlot: "final" }, "再次交付仍指向准确 producer");
+    const producedSource = producedVideo.item.draft as { artifactId: string; revisionId: string };
+    const deliveredRef = delivered.item.draft as { artifactId: string; revisionId: string };
+    const beforeWrongSlot = f.app.database.prepare("SELECT * FROM artifact_revisions ORDER BY rowid").all();
+    f.app.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "revise", artifactId: deliveredRef.artifactId,
+        baseRevisionId: deliveredRef.revisionId, title: "山路有声成片", kind: "video", content: { format: "local_output",
+          source: { kind: "run_output", runId: accepted.run.id, operationId: "narrated", outputSlot: "wrong-slot" } } }] })]),
+      context => {
+        const denied = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.equal(denied.isError, true, "仅 outputSlot 错误也必须拒绝");
+        assert.deepEqual(f.app.database.prepare("SELECT * FROM artifact_revisions ORDER BY rowid").all(), beforeWrongSlot, "错误坐标不落新稿");
+        return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "revise", artifactId: deliveredRef.artifactId,
+          baseRevisionId: deliveredRef.revisionId, title: "山路有声成片", kind: "video", content: { format: "local_output",
+            source: { kind: "artifact_revision", ...producedSource } } }] })]);
+      },
+      fauxAssistantMessage("准确版本已交付。"),
+    ]);
+    await f.app.service.sendMessage("local-owner", f.conversation.id, input("沿原成片准确来源更新当前草稿"));
     for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
     const video = videoItemOf(f);
     assert.equal(video.item.draft?.kind, "artifact_revision");
@@ -154,7 +183,19 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     assert.equal(library.length, 1);
     assert.equal(library[0]!.video.revisionId, draft.revisionId);
     assert.equal(library[0]!.provenanceStatus, "recorded");
-    assert.deepEqual(library[0]!.materials.map(item => item.source.revisionId), [f.revision.revisionId, audioRef.revisionId]);
+    const outputs = f.app.database.prepare(`SELECT o.id,o.output_blob_id,r.artifact_id,r.id AS revision_id
+      FROM production_operations o JOIN artifact_revisions r ON r.id=o.output_revision_id WHERE o.run_id=?`).all(accepted.run.id) as
+      { id: string; output_blob_id: string; artifact_id: string; revision_id: string }[];
+    const shot = outputs.find(row => row.id === "shot-1")!, unusedShot = outputs.find(row => row.id === "unused-shot")!;
+    assert.ok(shot && unusedShot);
+    assert.equal(shot.output_blob_id, unusedShot.output_blob_id, "合法两操作可共享完全相同的媒体字节");
+    assert.notEqual(shot.revision_id, unusedShot.revision_id, "同字节输出仍保留各自准确修订");
+    const shotRef = { artifactId: shot.artifact_id, revisionId: shot.revision_id };
+    assert.deepEqual(library[0]!.materials.map(item => {
+      assert.ok("revisionId" in item.source, "本场景的素材都是准确产物修订");
+      return item.source.revisionId;
+    }), [shot.revision_id, f.revision.revisionId, audioRef.revisionId], "采用的生成片段保留，未消费的同字节产物不混入");
+    const shotBytes = readFileSync(f.app.service.readBlob("local-owner", shot.output_blob_id).path);
     const originalPage = f.app.service.snapshot("local-owner", f.conversation.id);
     const originalConfirmations = f.app.database.prepare("SELECT * FROM work_review_confirmations WHERE conversation_id=? ORDER BY id").all(f.conversation.id);
     const originalBlob = f.app.service.readBlob("local-owner", audioContent.blobId);
@@ -186,6 +227,19 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
         const denied = context.messages.filter(message => message.role === "toolResult").at(-1)!;
         assert.equal(denied.isError, true, "知道 A 的准确修订仍不能绕过 B 的库物化");
         assert.match(denied.content.filter(part => part.type === "text").map(part => part.text).join(""), /不属于当前会话/);
+        const selectedClip = f.app.service.snapshot("local-owner", other.id).messages.items.find(message => message.librarySelections?.length)!.references.artifacts[2]!;
+        return fauxAssistantMessage([fauxToolCall("read_artifact", { ...selectedClip })]);
+      },
+      context => {
+        const readResult = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.notEqual(readResult.isError, true, JSON.stringify(readResult.content));
+        assert.ok(readResult.content.some(part => part.type === "image"), "视频 read_artifact 返回可解码帧，不是音频式 JSON");
+        const selectedClip = f.app.service.snapshot("local-owner", other.id).messages.items.find(message => message.librarySelections?.length)!.references.artifacts[2]!;
+        const read = f.app.service.readRevision("local-owner", selectedClip.artifactId, selectedClip.revisionId);
+        assert.equal(read.content.format, "media");
+        if (read.content.format !== "media") assert.fail("生成片段物化后仍是媒体");
+        assert.equal(read.content.blobId, shot.output_blob_id);
+        assert.deepEqual(readFileSync(f.app.service.readBlob("local-owner", read.content.blobId).path), shotBytes, "跨会话读到准确生成片段原字节");
         return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "改编配音", kind: "audio",
           content: { format: "local_output", source: { kind: "artifact_revision", ...selectedAudio } } }] })]);
       },
@@ -196,6 +250,8 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       source: { kind: "artifact_revision" as const, artifactId: f.artifact.id, revisionId: f.revision.revisionId },
     }, { sourceVideo: { artifactId: draft.artifactId, revisionId: draft.revisionId },
       source: { kind: "artifact_revision" as const, ...audioRef },
+    }, { sourceVideo: { artifactId: draft.artifactId, revisionId: draft.revisionId },
+      source: { kind: "artifact_revision" as const, ...shotRef },
     }];
     await f.app.service.sendMessage("local-owner", other.id, { ...input("用这条片子的原方案做改编"), librarySelections: selections });
     for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", other.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
@@ -205,7 +261,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     const userMessage = page.messages.items.find(message => message.role === "user" && message.text.includes("改编"))!;
     assert.ok(userMessage);
     assert.deepEqual(userMessage.librarySelections, selections);
-    assert.equal(userMessage.references.artifacts.length, 2);
+    assert.equal(userMessage.references.artifacts.length, 3);
     const reference = userMessage.references.artifacts[0]!;
     const copy = f.app.service.readRevision("local-owner", reference.artifactId, reference.revisionId);
     const copyHead = page.artifacts.items.find(item => item.id === reference.artifactId)!;
@@ -213,7 +269,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     assert.ok(copyHead.title.includes("作品库引用"));
     assert.deepEqual(copy.content, f.revision.content);
     assert.equal(copy.baseRevisionId, null);
-    assert.ok(redelivery, "当前会话合法库音频应能再次正式交付");
+    assert.ok(redelivery, `当前会话合法库音频应能再次正式交付：${JSON.stringify(page.messages.items.slice(-3))}`);
     const redelivered = f.app.service.readRevision("local-owner", redelivery.revisions[0]!.artifactId, redelivery.revisions[0]!.revisionId);
     assert.deepEqual(redelivered.content, audioContent, "B 新草稿仍共享原 blob 且保留配音元数据");
     assert.ok(f.app.database.prepare("SELECT 1 FROM revision_blob_links WHERE revision_id=? AND blob_id=?").get(redelivered.revisionId, audioContent.blobId));

@@ -1,6 +1,6 @@
 import type {
-  AcceptProposal, AdmissionReceipt, CancelReceipt, CancelRun, CreativeProjectContent, FrozenReviewTarget,
-  InputRef, LocalCreationReceipt, LocalCreationSpec, LocalRenderOperation, MarkdownContent, MessageInput, RequestReceipt, Run,
+  AcceptProposal, AdmissionReceipt, CancelReceipt, CancelRun, FrozenReviewTarget,
+  LocalCreationReceipt, LocalCreationSpec, LocalRenderOperation, MessageInput, OperationRequest, RequestReceipt, Run,
   ToolRenderProject,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
@@ -8,7 +8,7 @@ import { AgentError } from "./errors.js";
 import { type EventHub, insertEvent } from "./event-log.js";
 import {
   acceptanceBlockerFor, finalOutputIsVideo, getArtifactRow, getProposalRow, getRevisionRow, missingRequiredApprovals,
-  validateCodeProjectExecution, verifyReviewInput, type QuoteCatalog,
+  normalizeOperationInputs, validateProductionAudio, verifyReviewInput, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import {
   parseCreationState, requireWork, resolveContentSource, workInFlight, writeWorkState,
@@ -194,7 +194,7 @@ export class ProductionService {
 
   // render_project 的本地受理（§4.2.1）：免费动作不建提案/授权/账单；真实请求来源由调用方从
   // 当前请求注入。目标在同一事务内解析或分配并随操作冻结，新事项尚无草稿、只展示“制作中”。
-  admitLocalRender(ownerId: string, conversationId: string, request: { requestId: string; messageId: string }, intent: ToolRenderProject): LocalCreationReceipt {
+  admitLocalRender(ownerId: string, conversationId: string, request: { requestId: string; messageId: string }, intent: ToolRenderProject, probes?: Map<string, RenderFileProbe>): LocalCreationReceipt {
     if (!this.enabled) throw new AgentError("CAPABILITY_UNAVAILABLE", "制作能力尚未接入，暂不能受理这次本地制作。");
     return this.db.transaction(() => {
       requireConversation(this.db, ownerId, conversationId);
@@ -205,7 +205,7 @@ export class ProductionService {
       const reviewInputs = intent.reviewInputs.map(input => verifyReviewInput(this.db, scope, input, { workId: work.id }));
       const lastOperation = intent.operations[intent.operations.length - 1]!;
       // 认可门覆盖整个受理批次：视频输出不在最后一项时（如成片后追加封面图）同样受正式认可约束。
-      if (intent.purpose === "production" && intent.operations.some(op => op.parameters.expectedMediaKind === "video")) {
+      if (intent.purpose === "production" && intent.operations.some(op => op.parameters.assembly !== "code_project" || op.parameters.expectedMediaKind === "video")) {
         if (reviewInputs.length === 0) {
           throw new AgentError("INVALID_INPUT", "正式视频制作需要先获得组审阅认可，再发起这次渲染。");
         }
@@ -274,54 +274,34 @@ export class ProductionService {
         if (!itemId || !group.items.some(item => item.id === itemId)) throw new AgentError("INVALID_INPUT", "渲染目标事项与审阅组不一致。");
         return { groupId: group.id, itemId, baseRevisionId };
       };
+      const catalog = this.catalog();
+      const requestedOperations: Extract<OperationRequest, { kind: "render" }>[] = intent.operations.map(operation => ({
+        operationId: operation.operationId, outputSlot: operation.outputSlot, inputs: operation.inputs,
+        kind: "render", model: null, maxCreateAttempts: 1, parameters: operation.parameters,
+      }));
+      const { validation, renderParameters, musicSources } = normalizeOperationInputs(this.db, scope, inputSources, requestedOperations, catalog, probes);
       const operations: LocalRenderOperation[] = [];
       const projectArtifactIds: string[] = [];
       for (const operation of intent.operations) {
-        if (operation.parameters.assembly !== "code_project") throw new AgentError("INVALID_INPUT", "本地渲染只受理冻结工程（code_project）。");
-        const parameters = operation.parameters;
-        const project = getArtifactRow(this.db, ownerId, parameters.projectRevision.artifactId);
-        const revision = project ? getRevisionRow(this.db, parameters.projectRevision.artifactId, parameters.projectRevision.revisionId) : undefined;
-        if (!project || project.conversation_id !== conversationId || project.kind !== "project" || !revision) {
-          throw new AgentError("INVALID_INPUT", "渲染工程必须引用本会话真实的冻结工程修订。");
+        const parameters = renderParameters.get(operation.operationId)!;
+        if (parameters.assembly === "code_project") {
+          projectArtifactIds.push(parameters.projectRevision.artifactId);
+        } else {
+          const entry = catalog[`render:${parameters.assembly}`];
+          if (!entry || entry.binding !== null) throw new AgentError("CAPABILITY_UNAVAILABLE", "本地合成能力尚未启用，不能受理这次渲染。");
+          const requested = requestedOperations.find(op => op.operationId === operation.operationId)!;
+          entry.validate?.(requested, validation.trusted.get(operation.operationId), validation);
         }
-        const content = JSON.parse(revision.content_json) as CreativeProjectContent;
-        validateCodeProjectExecution(parameters, content, operation.inputs);
-        for (const input of operation.inputs) validateLocalInput(this.db, scope, input);
+        const musicSource = musicSources.get(operation.operationId);
         operations.push({ operationId: operation.operationId, outputSlot: operation.outputSlot, inputs: operation.inputs,
-          kind: "render", model: null, parameters, target: resolveTarget(operation) });
-        projectArtifactIds.push(parameters.projectRevision.artifactId);
+          kind: "render", model: null, parameters, ...(musicSource ? { musicSource } : {}), target: resolveTarget(operation) });
       }
-      if (new Set(operations.map(op => op.operationId)).size !== operations.length) throw new AgentError("INVALID_INPUT", "操作 ID 不能重复。");
-      if (new Set(operations.map(op => op.outputSlot)).size !== operations.length) throw new AgentError("INVALID_INPUT", "输出槽位不能重复。");
-      // 同名输出路径本身合法：每个操作在 run+operation 独立工作区执行（local-render），
-      // 输出与自身封存输入/输入槽分离由执行边界保证，不限制两个工程各用 out.mp4。
-      // S3：operation_output 在受理入口一次核对 producer、输出槽与依赖可执行关系。
-      // 自指或成环的操作永远等不到输入，worker 只会跳过它并把 run 永久留在 queued；
-      // 必须在受理时拒绝，不留永久 pending run。
-      const byOperationId = new Map(operations.map(op => [op.operationId, op]));
-      const resolvedOperations = new Set<string>();
-      const resolvingOperations = new Set<string>();
-      const checkDependencies = (operation: LocalRenderOperation): void => {
-        if (resolvedOperations.has(operation.operationId)) return;
-        if (resolvingOperations.has(operation.operationId)) throw new AgentError("INVALID_INPUT", "操作依赖不能循环。");
-        resolvingOperations.add(operation.operationId);
-        for (const input of operation.inputs) {
-          if (input.kind !== "operation_output") continue;
-          const producer = byOperationId.get(input.producerOperationId);
-          if (!producer || producer.outputSlot !== input.outputSlot) {
-            throw new AgentError("INVALID_INPUT", "依赖输出必须指向本次受理内操作声明的真实输出槽。");
-          }
-          checkDependencies(producer);
-        }
-        resolvingOperations.delete(operation.operationId);
-        resolvedOperations.add(operation.operationId);
-      };
-      for (const operation of operations) checkDependencies(operation);
       const spec: LocalCreationSpec = { type: "local_creation", workId: work.id, title: intent.title,
         requestSource: { requestId: request.requestId, messageId: request.messageId },
         scope: intent.scope, purpose: intent.purpose, inputSources, reviewInputs,
         operations: operations as LocalCreationSpec["operations"],
         finalOutput: { operationId: lastOperation.operationId, outputSlot: lastOperation.outputSlot } };
+      validateProductionAudio(this.db, spec);
       // 元数据实际变化才升组版本；同一受理内同组只升一次（新事项沿既有直接提升）。
       for (const changed of metadataChanged) changed.revision += 1;
       writeWorkState(this.db, this.clock(), work, state);
@@ -388,30 +368,5 @@ export class ProductionService {
     })();
     this.hub.notifyCommitted(receipt.run.conversationId);
     return receipt;
-  }
-}
-
-// 本地渲染操作的数据输入核对：冻结事实存在且属于本会话；不在此展开执行语义。
-// operation_output 没有 storage 事实，其 producer/槽位/环检查在受理事务内单独一次核对（见 admitLocalRender）。
-function validateLocalInput(db: AgentDatabase, scope: { ownerId: string; conversationId: string }, input: InputRef): void {
-  if (input.kind === "text") return;
-  if (input.kind === "blob") {
-    const row = db.prepare("SELECT digest, conversation_id FROM production_blobs WHERE id=? AND owner_id=?").get(input.blobId, scope.ownerId) as { digest: string; conversation_id: string } | undefined;
-    if (!row || row.digest !== input.digest || row.conversation_id !== scope.conversationId) throw new AgentError("INVALID_INPUT", "媒体输入不属于当前会话或已失效。");
-    return;
-  }
-  if (input.kind === "project_revision") {
-    const revision = getRevisionRow(db, input.projectRevision.artifactId, input.projectRevision.revisionId);
-    const artifact = getArtifactRow(db, scope.ownerId, input.projectRevision.artifactId);
-    if (!revision || revision.digest !== input.digest || artifact?.conversation_id !== scope.conversationId) {
-      throw new AgentError("INVALID_INPUT", "工程输入不存在或已失效。");
-    }
-    return;
-  }
-  if (input.kind === "operation_output") return;
-  const revision = getRevisionRow(db, input.artifactId, input.revisionId);
-  const artifact = getArtifactRow(db, scope.ownerId, input.artifactId);
-  if (!revision || revision.digest !== input.digest || artifact?.conversation_id !== scope.conversationId) {
-    throw new AgentError("INVALID_INPUT", "输入修订不存在或已失效。");
   }
 }

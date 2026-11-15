@@ -6,7 +6,7 @@ import type {
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
   PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch,
   FreeServiceSettings, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
-  CreationBinding, MediaProvenance,
+  CreationBinding,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
@@ -24,11 +24,12 @@ import {
 import {
   feedbackNote, getArtifactRow, getProposalRow, getRevisionRow, insertRevision, listArtifactRows, listProposalRows,
   maxArtifactSeq, maxProposalSeq, rowToArtifactHead, rowToArtifactRevision, rowToProposal, productionAudioFacts,
-  applyPrepareProposal, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
+  applyPrepareProposal, requirePaidProduction, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import { probeRenderInputs } from "./media-probe.js";
-import { getWorkRow, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, workInFlight, workProjection } from "./creative-work.js";
+import { getWorkRow, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, withStandaloneApproval, workInFlight, workProjection } from "./creative-work.js";
+import { adoptPreview } from "./preview-adoption.js";
 import { listMaterialBatches, readMaterialBatch as readMaterialBatchRow } from "./material-store.js";
 import { ConversationRunnerRegistry, recoverInterruptedRequests } from "./executor.js";
 import type { PiRuntimeHost } from "./pi-runtime.js";
@@ -43,6 +44,7 @@ import {
 import type { SaveEdgeTtsSettings, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings } from "../../shared/agent/generated/contracts.js";
 import { toRun, runSegments, type RunRow } from "./production-store.js";
 import { getScopedRunRow } from "./production-index.js";
+import { retainedVideoMaterials } from "./library-materials.js";
 
 // 面向 HTTP 的策略门面：契约校验、幂等、限额、确认短语、归属检查都在这里；
 // 命令回执先于队列限额检查；任何 409/429/503 都不落业务状态。
@@ -364,15 +366,15 @@ export class AgentService {
     const db = this.options.db;
     const fetched = db.prepare(`
       SELECT * FROM (
-        SELECT 0 AS src, rowid AS pos, conversation_id, work_id, subject_json, created_at
+        SELECT 0 AS src, rowid AS pos, conversation_id, work_id, subject_json, source_id, created_at
         FROM work_review_confirmations
-        WHERE owner_id = ? AND action = 'finalize_video'
+        WHERE owner_id = ? AND subject_scope = 'work_item' AND action = 'finalize_video'
           AND rowid = (SELECT MIN(f2.rowid) FROM work_review_confirmations f2
                        WHERE f2.owner_id = work_review_confirmations.owner_id AND f2.action = 'finalize_video'
                          AND json_extract(f2.subject_json, '$.revisionId') = json_extract(work_review_confirmations.subject_json, '$.revisionId'))
           AND (? IS NULL OR rowid < ?)
         UNION ALL
-        SELECT 1 AS src, rowid AS pos, conversation_id, work_id, subject_json, created_at
+        SELECT 1 AS src, rowid AS pos, conversation_id, work_id, subject_json, source_id, created_at
         FROM work_stage_confirmations
         WHERE owner_id = ? AND action = 'finalize_video'
           AND rowid = (SELECT MIN(f2.rowid) FROM work_stage_confirmations f2
@@ -416,15 +418,17 @@ export class AgentService {
     let originMessageId: string | null = null;
     let narrationText: string | null = null;
     let audioSummary: LibraryVideo["audioSummary"];
-    if (revision.run_id) {
-      const run = db.prepare("SELECT id, rowid AS run_order, proposal_id, snapshot_id FROM production_runs WHERE id = ? AND owner_id = ?")
-        .get(revision.run_id, ownerId) as { id: string; run_order: number; proposal_id: string; snapshot_id: string } | undefined;
+    const retained = retainedVideoMaterials(db, ownerId, subject);
+    const producer = retained.producer;
+    if (producer) {
+      const run = db.prepare("SELECT id, proposal_id FROM production_runs WHERE id = ? AND owner_id = ?")
+        .get(producer.runId, ownerId) as { id: string; proposal_id: string | null } | undefined;
       if (run) {
-        const snapshot = db.prepare("SELECT spec_json FROM production_snapshots WHERE id = ?").get(run.snapshot_id) as { spec_json: string };
-        const audio = productionAudioFacts(db, JSON.parse(snapshot.spec_json) as ProductionSpec, run.run_order);
+        const audio = productionAudioFacts(db, { ...producer.spec,
+          finalOutput: { operationId: producer.operationId, outputSlot: producer.outputSlot } }, producer.runOrder);
         narrationText = audio.narrationText;
         audioSummary = audio.audioSummary;
-        const proposal = getProposalRow(db, ownerId, run.proposal_id);
+        const proposal = run.proposal_id ? getProposalRow(db, ownerId, run.proposal_id) : undefined;
         const planSource = proposal?.plan_source_json ? JSON.parse(proposal.plan_source_json) as { artifactId?: string; revisionId?: string } : null;
         if (planSource?.artifactId && planSource?.revisionId) {
           const planRevision = getRevisionRow(db, planSource.artifactId, planSource.revisionId);
@@ -447,28 +451,16 @@ export class AgentService {
     // 旧阶段绑定未记录这些来源，如实标 not_recorded，不从当前 head 补齐。
     const parsedBinding = revision.creation_binding_json ? JSON.parse(revision.creation_binding_json) as CreationBinding : null;
     const modernBinding = parsedBinding && Array.isArray(parsedBinding.inputSources) ? parsedBinding : null;
-    // 留存清单完整投影（G4-2）：全部 input source 修订（含文本稿）与封存工程文件清单
-    // 都可跨会话选材；服务端入口验证与这份清单同源。
-    const materials: LibraryVideo["materials"] = [];
-    if (modernBinding) {
-      for (const source of modernBinding.inputSources) {
-        if (source.kind !== "artifact_revision") continue;
-        const materialArtifact = getArtifactRow(db, ownerId, source.artifactId);
-        const materialRevision = getRevisionRow(db, source.artifactId, source.revisionId);
-        if (!materialArtifact || !materialRevision) continue;
-        const materialContent = JSON.parse(materialRevision.content_json) as { format?: string; sources?: MediaProvenance[] };
-        materials.push({ source: { artifactId: source.artifactId, revisionId: source.revisionId },
-          label: materialArtifact.title, kind: materialArtifact.kind as LibraryVideo["materials"][number]["kind"],
-          provenance: materialContent.format === "media" ? materialContent.sources ?? [] : [] });
-      }
-    }
+    // 准确输出的实际消费集合与选材授权共用；原始blob保留run/操作/输入位置，不造修订。
+    const materials = retained.materials;
+    if (modernBinding?.adoptedFrom) originMessageId = row.source_id;
     // §11.7 来源3：多工程合成的定稿沿来源链展开全部封存工程的文件清单，每行 project 指明所属
     // 工程，同名 relativePath 不会指到另一个工程；最终主工程（projectRevision）分组在前，
     // 纯拼接合成没有主工程时 project 为 null 而清单非空。读取只沿既有记录去重，不补当前 head。
     const projectFiles: LibraryVideo["projectFiles"] = [];
-    if (modernBinding) {
+    if (retained.projects.length) {
       const seenProjects = new Set<string>();
-      for (const projectRef of [modernBinding.projectRevision, ...(modernBinding.projectRevisions ?? [])]) {
+      for (const projectRef of retained.projects) {
         if (!projectRef || seenProjects.has(projectRef.revisionId)) continue;
         seenProjects.add(projectRef.revisionId);
         const projectRevision = getRevisionRow(db, projectRef.artifactId, projectRef.revisionId);
@@ -501,7 +493,7 @@ export class AgentService {
     const rows = fetched.slice(0, pageSize);
     const watermark = cursor === undefined ? maxEventSeq(this.options.db, conversationId) : decodeListCursor(cursor, conversationId, "artifacts").w;
     return {
-      items: rows.map(rowToArtifactHead),
+      items: rows.map(row => withStandaloneApproval(this.options.db, rowToArtifactHead(row))),
       nextCursor: pageCursor(fetched, pageSize, { v: 1, c: conversationId, k: "artifacts", w: watermark }),
       watermark: encodeEventCursor(conversationId, watermark),
     };
@@ -593,14 +585,18 @@ export class AgentService {
       const now = this.options.clock(), requestId = newAgentId("req"), messageId = newAgentId("msg");
       const references: MessageReferences = {
         ...emptyReferences(),
-        artifacts: confirmation.items.flatMap(item => item.source.kind === "artifact_revision"
-          ? [{ artifactId: item.source.artifactId, revisionId: item.source.revisionId }] : []),
+        artifacts: "kind" in confirmation
+          ? [confirmation.kind === "standalone_artifact"
+            ? { artifactId: confirmation.artifactId, revisionId: confirmation.revisionId } : confirmation.source]
+          : confirmation.items.flatMap(item => item.source.kind === "artifact_revision"
+            ? [{ artifactId: item.source.artifactId, revisionId: item.source.revisionId }] : []),
       };
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId, role: "user", kind: "chat",
         state: queues ? "queued" : "completed", text: input.text,
         target: null,
         createdSeq: nextSeq(this.options.db, "messages", conversationId), references,
+        reviewConfirmation: confirmation,
       });
       insertQueuedRequest(this.options.db, now, {
         id: requestId, conversationId, ownerId, commandId: input.commandId, text: input.text,
@@ -609,11 +605,11 @@ export class AgentService {
       });
       if (binding) this.options.db.prepare("UPDATE requests SET model_binding_json=? WHERE id=?").run(JSON.stringify(binding), requestId);
       else this.options.db.prepare("UPDATE requests SET state='completed', delivery_closed=1 WHERE id=?").run(requestId);
-      recordReviewConfirmation(this.options.db, now, { ownerId, conversationId }, {
-        workId: confirmation.workId, groupId: confirmation.groupId,
-        items: confirmation.items.map(item => ({ itemId: item.itemId, source: item.source })),
-        action: confirmation.action,
-      }, { kind: "user_message", messageId });
+      const scope = { ownerId, conversationId }, origin = { kind: "user_message" as const, messageId };
+      if ("kind" in confirmation) {
+        if (confirmation.kind === "adopt_preview") adoptPreview(this.options.db, now, scope, confirmation, origin);
+        else recordReviewConfirmation(this.options.db, now, scope, confirmation, origin);
+      } else recordReviewConfirmation(this.options.db, now, scope, confirmation, origin);
       const row = getRequestRow(this.options.db, ownerId, requestId)!;
       const result = requestReceipt(row, false);
       storeCommandReceipt(this.options.db, now, {
@@ -698,22 +694,33 @@ export class AgentService {
       if (!videoArtifact || !videoRevision || videoArtifact.kind !== "video") {
         throw new AgentError("INVALID_INPUT", "作品库来源不是有效的视频修订。");
       }
-      const parsedBinding = videoRevision.creation_binding_json ? JSON.parse(videoRevision.creation_binding_json) as CreationBinding : null;
-      const modernBinding = parsedBinding && Array.isArray(parsedBinding.inputSources) ? parsedBinding : null;
-      if (!modernBinding) throw new AgentError("INVALID_INPUT", "这条定稿没有记录留存清单，不能引用其中的素材。");
+      const retained = retainedVideoMaterials(db, ownerId, selection.sourceVideo);
       const picked = selection.source;
       if (picked.kind === "artifact_revision") {
-        const source = modernBinding.inputSources.find(item => item.kind === "artifact_revision"
+        const source = retained.materials.map(item => item.source).find(item => !("kind" in item)
           && item.artifactId === picked.artifactId && item.revisionId === picked.revisionId);
-        if (!source || source.kind !== "artifact_revision") throw new AgentError("INVALID_INPUT", "所选素材不在定稿当时的留存清单里。");
+        if (!source || "kind" in source) throw new AgentError("INVALID_INPUT", "所选素材不在定稿当时的留存清单里。");
         const artifact = getArtifactRow(db, ownerId, source.artifactId);
         const revision = getRevisionRow(db, source.artifactId, source.revisionId);
         if (!artifact || !revision) throw new AgentError("INVALID_INPUT", "所选素材修订已不存在。");
         items.push({ kind: artifact.kind, title: `${artifact.title}（作品库引用）`, content: JSON.parse(revision.content_json) });
+      } else if (picked.kind === "run_input") {
+        const material = retained.materials.find(item => "kind" in item.source && item.source.kind === "run_input"
+          && item.source.runId === picked.runId && item.source.operationId === picked.operationId
+          && item.source.inputIndex === picked.inputIndex && item.source.blobId === picked.blobId);
+        if (!material) throw new AgentError("INVALID_INPUT", "所选原始素材不在这版成片实际采用的输入里。");
+        const blob = this.options.production!.blobs.get(ownerId, picked.blobId);
+        if (blob.mime_type !== "video/mp4" && blob.mime_type !== "video/webm" && blob.mime_type !== "image/png"
+          && blob.mime_type !== "image/jpeg" && blob.mime_type !== "audio/mpeg" && blob.mime_type !== "audio/wav") {
+          throw new AgentError("INVALID_INPUT", "所选原始素材不是可复用媒体。");
+        }
+        items.push({ kind: material.kind, title: `${material.label}（作品库引用）`, content: {
+          format: "media", blobId: blob.id, mimeType: blob.mime_type, durationMs: blob.duration_ms,
+          ...(material.provenance.length ? { sources: material.provenance } : {}),
+        } });
       } else {
         // §11.7 来源3：多工程合成的定稿允许引用来源链上任一封存工程；同名 relativePath 按所选工程区分。
-        const involved = [modernBinding.projectRevision, ...(modernBinding.projectRevisions ?? [])].filter(ref => ref != null);
-        const project = involved.find(ref => ref.artifactId === picked.project.artifactId && ref.revisionId === picked.project.revisionId);
+        const project = retained.projects.find(ref => ref.artifactId === picked.project.artifactId && ref.revisionId === picked.project.revisionId);
         if (!project) {
           throw new AgentError("INVALID_INPUT", "所选文件不在定稿封存工程里。");
         }
@@ -852,7 +859,7 @@ export class AgentService {
   readArtifactHead(ownerId: string, artifactId: string): ArtifactHead {
     const row = getArtifactRow(this.options.db, ownerId, artifactId);
     if (!row || !row.head_revision_id) throw new AgentError("NOT_FOUND", "没有找到这个产物。");
-    return rowToArtifactHead(row);
+    return withStandaloneApproval(this.options.db, rowToArtifactHead(row));
   }
 
   readRevision(ownerId: string, artifactId: string, revisionId: string): ArtifactRevision {
@@ -915,6 +922,7 @@ export class AgentService {
     const key = { ownerId, operation: "prepareProposal", targetId: conversationId, commandId: input.commandId };
     const prior = checkCommandReceipt<Proposal>(this.options.db, key, input);
     if (prior.kind === "replay") return { status: 201, proposal: prior.receipt, replayed: true };
+    requirePaidProduction(input.spec);
     // 付费前探测：真实 render 目录（任一 assembly 分支）要求已有输入文件可读（事务外执行）。
     let probes: Map<string, RenderFileProbe> | undefined;
     if (this.options.catalog()[RENDER_CATALOG_KEY]?.probeRenderInputs || this.options.catalog()[NARRATED_CATALOG_KEY]?.probeRenderInputs
@@ -1094,6 +1102,7 @@ interface LibraryConfirmationRow {
   conversation_id: string;
   work_id: string;
   subject_json: string;
+  source_id: string;
   created_at: string;
 }
 

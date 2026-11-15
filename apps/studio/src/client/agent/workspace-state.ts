@@ -136,9 +136,12 @@ export function savePanelLayout(layout: PanelLayout): void {
 const DRAFT_PREFIX = "vf:agent-draft:";
 
 // G4-2 作品库“带入对话”可能连续触发（同一会话多次选材）：同一来源定稿下的同一素材/工程文件只保留一份。
-const libraryPickKey = (pick: LibraryPick) => pick.selection.source.kind === "artifact_revision"
-  ? `m:${pick.selection.source.revisionId}:${pick.selection.sourceVideo.revisionId}`
-  : `f:${pick.selection.source.relativePath}:${pick.selection.sourceVideo.revisionId}`;
+const libraryPickKey = ({ selection: { source, sourceVideo } }: LibraryPick) => JSON.stringify([
+  sourceVideo.artifactId, sourceVideo.revisionId,
+  source.kind === "artifact_revision" ? [source.kind, source.artifactId, source.revisionId]
+    : source.kind === "run_input" ? [source.kind, source.runId, source.operationId, source.inputIndex, source.blobId]
+    : [source.kind, source.project.artifactId, source.project.revisionId, source.relativePath],
+]);
 
 export function mergeLibraryPicks(existing: readonly LibraryPick[] | undefined, incoming: readonly LibraryPick[]): LibraryPick[] {
   const seen = new Set((existing ?? []).map(libraryPickKey));

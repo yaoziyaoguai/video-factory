@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -122,7 +123,7 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
     await run("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
       "-ar", "32000", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "128k", path.join(directory, "voice.mp3")]);
 
-    const { runtime, conversationId, blobs } = await setup();
+    const { runtime, conversationId, blobs, directory: runtimeDirectory } = await setup();
     try {
       const imageRef = await mediaRevision(blobs, runtime, conversationId, path.join(directory, "still.png"), "image/png", null);
       const largeImageRef = await mediaRevision(blobs, runtime, conversationId, path.join(directory, "large.png"), "image/png", null);
@@ -148,11 +149,26 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
         const images = imagesOf(largeCaptured.parts);
         assert.equal(largeCaptured.isError, false, describeParts(largeCaptured));
         assert.equal(images.length, 1, describeParts(largeCaptured));
-        assert.match(textsOf(largeCaptured.parts).join("\n"), /original 2400x1200, displayed at 2000x1000/, describeParts(largeCaptured));
+        assert.match(textsOf(largeCaptured.parts).join("\n"), /original 2400x1200, displayed at 1280x640/, describeParts(largeCaptured));
         const largeImagePath = path.join(directory, "presented-large-image");
         await writeFile(largeImagePath, Buffer.from(images[0]!.data!, "base64"));
         const largeImageFacts = await probeImageFile(largeImagePath);
-        assert.deepEqual([largeImageFacts.width, largeImageFacts.height], [2000, 1000], "大图实际字节是缩放后尺寸");
+        assert.deepEqual([largeImageFacts.width, largeImageFacts.height], [1280, 640], "大图实际字节是缩放后尺寸");
+        assert.ok(images[0]!.data!.length <= 256 * 1024, "模型输入的单图 base64 不超过 256KiB");
+
+        // 单独核对 hook 之前保存的真实工具输出，避免发送投影掩盖 read_artifact 的旧策略。
+        const sessionRoot = path.join(runtimeDirectory, "pi-sessions", conversationId);
+        const sessionFile = (await readdir(sessionRoot, { recursive: true })).find(file => file.endsWith(".jsonl"))!;
+        const rawResult = SessionManager.open(path.join(sessionRoot, sessionFile)).buildSessionContext().messages
+          .filter(message => message.role === "toolResult" && message.toolName === "read_artifact").at(-1)!;
+        assert.equal(rawResult.role, "toolResult");
+        if (rawResult.role !== "toolResult") throw new Error("缺少原始 read_artifact 结果");
+        const rawImage = rawResult.content.find(block => block.type === "image")!;
+        assert.ok(rawImage.data.length <= 256 * 1024, "工具原始输出也使用同一 base64 预算");
+        assert.equal(rawImage.data, images[0]!.data, "发送投影保留已经合规的图片字节");
+        await writeFile(largeImagePath, Buffer.from(rawImage.data, "base64"));
+        const rawImageFacts = await probeImageFile(largeImagePath);
+        assert.deepEqual([rawImageFacts.width, rawImageFacts.height], [1280, 640], "hook 之前工具原始输出已经是小图");
       }
 
       // 视频未给时间点：头/中/尾三个代表帧，写明已看范围与总时长，不声称看过完整视频。
@@ -171,7 +187,7 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
           return match ? [match[1]!] : [];
         });
         assert.deepEqual(labels, expectedTimes.map(String), `代表帧时间点应为 ${expectedTimes.join("/")}ms`);
-        assert.equal(texts.filter(text => /original 2400x1200, displayed at 2000x1000/.test(text)).length, 3, "每帧都带视频原始画布的尺寸映射说明");
+        assert.equal(texts.filter(text => /original 2400x1200, displayed at 1280x640/.test(text)).length, 3, "每帧都带视频原始画布的尺寸映射说明");
         assert.equal(images.length, 3, describeParts(frames));
         assert.ok(images.every(image => (image.mimeType === "image/png" || image.mimeType === "image/jpeg") && (image.data?.length ?? 0) > 0), describeParts(frames));
         assert.equal(new Set(images.map(image => image.data)).size, 3, "三个时间点抽出的是不同画面");
@@ -179,7 +195,7 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
           const file = path.join(directory, `presented-frame-${index}`);
           await writeFile(file, Buffer.from(image.data!, "base64"));
           const facts = await probeImageFile(file);
-          assert.deepEqual([facts.width, facts.height], [2000, 1000], `代表帧 ${index} 在 FFmpeg 限尺寸后经 SDK 缩放`);
+          assert.deepEqual([facts.width, facts.height], [1280, 640], `代表帧 ${index} 在 FFmpeg 限尺寸后经 SDK 缩放`);
         }
       }
 
@@ -191,7 +207,7 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
         assert.equal(explicit.isError, false, describeParts(explicit));
         assert.deepEqual(texts.filter(text => text.startsWith("t=")), ["t=1000ms"], "只带指定时间点标注");
         assert.equal(texts.some(text => text.includes("（代表帧）") || text.startsWith("已看范围")), false, "指定帧不冒充代表帧范围");
-        assert.equal(texts.filter(text => /original 2400x1200, displayed at 2000x1000/.test(text)).length, 1, describeParts(explicit));
+        assert.equal(texts.filter(text => /original 2400x1200, displayed at 1280x640/.test(text)).length, 1, describeParts(explicit));
         assert.equal(images.length, 1, "只抽一帧");
         assert.ok((images[0]!.data?.length ?? 0) > 0);
       }

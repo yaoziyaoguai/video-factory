@@ -1,5 +1,6 @@
 import { VIDEO_TOPIC_CHARTS } from "../../shared/agent/video-topics.js";
-import { formatDimensionNote, resizeImage, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { formatDimensionNote, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { resizeImageForModel } from "./image-projection.js";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -17,12 +18,12 @@ import type {
   CreativeProjectContent, ProjectFile, FileContent,
   ToolDubFree, DubFreeResult, SpeechBoundary, DubbedSpeechMeta,
 } from "../../shared/agent/generated/contracts.js";
-import type { PiBusinessTools, RequestContext, WorkFeedbackView, WorkWithFeedback } from "../../shared/agent/ports.js";
+import type { PiBusinessTools, RequestContext, ReviewConfirmationResult, WorkFeedbackView, WorkWithFeedback } from "../../shared/agent/ports.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError, AgentToolError } from "./errors.js";
 import {
   applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getArtifactRow, getInvocation, getRevisionRow,
-  insertRevision, registerInvocation, rowToArtifactRevision, rowToProposal, hasProductionLock,
+  insertRevision, registerInvocation, rowToArtifactHead, rowToArtifactRevision, rowToProposal, hasProductionLock, requirePaidProduction,
   NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type ArtifactRow, type ProposalRow, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
@@ -32,8 +33,9 @@ import { insertEvent } from "./event-log.js";
 import { importMaterial, persistSearchBatch, readMaterialBatch } from "./material-store.js";
 import {
   createWork, parseCreationState, recordReviewConfirmation, relatedWorkFeedback,
-  requireWork, workInFlight, workProjection,
+  requireWork, withStandaloneApproval, workInFlight, workProjection, writeWorkState,
 } from "./creative-work.js";
+import { adoptPreview } from "./preview-adoption.js";
 import type { CreativeRunner, CreativeWorkspace } from "./creative-runner.js";
 import type { ProductionService } from "./production-service.js";
 import { readMusicChart } from "./music-charts.js";
@@ -192,8 +194,24 @@ export class BusinessTools implements PiBusinessTools {
     if (!title) throw new AgentToolError("INVALID_INPUT", "视频标题不能为空。");
     const write = this.db.transaction(() => {
       this.requireRunningRequest(context);
-      const row = createWork(this.db, this.clock(), { ownerId: context.actorId, conversationId: context.conversationId }, title);
-      return workProjection(this.db, row);
+      const scope = { ownerId: context.actorId, conversationId: context.conversationId }, now = this.clock();
+      if (input.adoptContent?.kind === "artifact_revision") {
+        const artifact = getArtifactRow(this.db, context.actorId, input.adoptContent.artifactId);
+        if (!artifact || artifact.conversation_id !== context.conversationId) throw new AgentError("NOT_FOUND", "没有找到本会话可采用的独立脚本。");
+        if (artifact.kind !== "script") throw new AgentError("INVALID_INPUT", "开始视频时只能直接采用已有脚本或真实消息原文。");
+        if (artifact.work_id !== null) throw new AgentError("INVALID_INPUT", "这份脚本属于其他视频，不能作为独立稿直接采用。");
+      }
+      const row = createWork(this.db, now, scope, title);
+      if (!input.adoptContent) return workProjection(this.db, row);
+      const groupId = newAgentId("grp"), itemId = newAgentId("item");
+      writeWorkState(this.db, now, row, { groups: [{ id: groupId, title: "脚本与内容", revision: 1, nextIntent: null,
+        items: [{ id: itemId, label: "内容", role: "content", required: true, draft: null, approved: null, confirmationId: null, approvedAt: null }],
+      }] });
+      // 明确开始并采用是本次真实认可；沿共同内核核对来源/交付时序，失败连同新作品一起回滚。
+      const { work } = recordReviewConfirmation(this.db, now, scope, {
+        workId: row.id, groupId, items: [{ itemId, source: input.adoptContent }], action: "approve",
+      }, { kind: "user_message", messageId: context.actionSourceMessageId });
+      return workProjection(this.db, work);
     });
     return write();
   }
@@ -211,14 +229,19 @@ export class BusinessTools implements PiBusinessTools {
   }
 
   // 普通认可只记录用户已经表达的事实；不推进未要求的下一组工作，也不能在这里受理制作。
-  async confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<Work> {
-    const write = this.db.transaction(() => {
+  async confirmReview(context: RequestContext, input: ToolConfirmReview): Promise<ReviewConfirmationResult> {
+    const write = this.db.transaction((): ReviewConfirmationResult => {
       this.requireRunningRequest(context);
-      const { work } = recordReviewConfirmation(this.db, this.clock(), {
-        ownerId: context.actorId, conversationId: context.conversationId,
-      }, {
-        workId: input.workId, groupId: input.groupId, items: input.items, action: input.action,
-      }, { kind: "user_message", messageId: context.actionSourceMessageId });
+      const scope = { ownerId: context.actorId, conversationId: context.conversationId };
+      const origin = { kind: "user_message" as const, messageId: context.actionSourceMessageId };
+      const now = this.clock();
+      if ("kind" in input) {
+        if (input.kind === "adopt_preview") return workProjection(this.db, adoptPreview(this.db, now, scope, input, origin));
+        const recorded = recordReviewConfirmation(this.db, now, scope, input, origin);
+        const artifact = withStandaloneApproval(this.db, rowToArtifactHead(getArtifactRow(this.db, context.actorId, input.artifactId)!));
+        return { kind: "standalone_artifact", artifact, confirmationId: recorded.confirmationId };
+      }
+      const { work } = recordReviewConfirmation(this.db, now, scope, input, origin);
       return workProjection(this.db, work);
     });
     return write();
@@ -380,6 +403,7 @@ export class BusinessTools implements PiBusinessTools {
 
   async prepareProduction(context: RequestContext, input: ToolPrepareProposal): Promise<Proposal> {
     this.requireRequest(context);
+    requirePaidProduction(input.spec);
     const register = this.db.transaction(() =>
       registerInvocation(this.db, this.clock(), {
         ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId,
@@ -520,9 +544,12 @@ export class BusinessTools implements PiBusinessTools {
   async renderProject(context: RequestContext, input: ToolRenderProject): Promise<LocalCreationReceipt> {
     const request = this.requireRunningRequest(context);
     if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再受理本地渲染。");
-    if (!this.production) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费本地渲染通道未装配。");
+    if (!this.production || !this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费本地渲染通道未装配。");
+    const probes = await probeRenderInputs(this.db, this.blobs, { ownerId: context.actorId, conversationId: context.conversationId }, input);
+    const current = this.requireRunningRequest(context);
+    if (current.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再受理本地渲染。");
     return this.production.admitLocalRender(context.actorId, context.conversationId,
-      { requestId: context.requestId, messageId: context.actionSourceMessageId }, input);
+      { requestId: context.requestId, messageId: context.actionSourceMessageId }, input, probes);
   }
 
   // 免费配音（dub_free）：edge-tts 维护版客户端产 mp3 与词级边界；时长按真实解码结果落库，
@@ -679,8 +706,7 @@ type ToolContentBlock = { type: "text"; text: string } | { type: "image"; data: 
 // 视频帧带原始画布尺寸：FFmpeg 先限尺寸、SDK 可能再压，任一缩放发生时用一条说明把
 // 模型坐标映射回视频原始分辨率；帧未被缩放时不需要说明。
 async function resizedImageBlocks(bytes: Buffer, mimeType: string, video?: { width: number; height: number }): Promise<ToolContentBlock[]> {
-  const resized = await resizeImage(bytes, mimeType);
-  if (!resized) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "图像无法缩放到模型可接受的大小。");
+  const resized = await resizeImageForModel(bytes, mimeType);
   const note = video && (resized.width < video.width || resized.height < video.height)
     ? `[Image: original ${video.width}x${video.height}, displayed at ${resized.width}x${resized.height}. Multiply coordinates by ${(video.width / resized.width).toFixed(2)} to map to original image.]`
     : formatDimensionNote(resized);
@@ -808,7 +834,7 @@ export function buildAgentTools(
   const readArtifact: ToolDefinition = {
     name: "read_artifact",
     label: "读取产物修订",
-    description: "读取当前会话某个产物指定修订的完整内容。文本与工程清单直接读回；图片返回真实图像；视频按 frameTimesMs（毫秒，最多 8 个时间点）抽取带时间标注的画面，改镜头前先用它核对实际画面；未给时间点时返回头/中/尾三个代表帧并写明已看范围。音频只返回可证实的事实（时长/采样率），没有独立听过音频的能力时不声称听过。作品库文件卡（format=file）文本类读回原文、二进制只给事实清单，不把字节冒称文本。修改前必须先读过用户绑定的基准修订。",
+    description: "读取当前会话某个产物指定修订的完整内容。文本与工程清单直接读回；图片返回真实图像；视频按 frameTimesMs（毫秒，最多 8 个时间点）抽取带时间标注的画面，改镜头前先用它核对实际画面；未给时间点时返回头/中/尾三个代表帧并写明已看范围。音频只返回可证实的事实（时长/采样率），没有独立听过音频的能力时不声称听过。作品库文件卡（format=file）文本类读回原文、二进制只给事实清单，不把字节冒称文本。修改前必须先读过用户绑定的基准修订。返回的 revision.digest 是修订JSON身份摘要，不是媒体文件SHA-256；不要把它与 inputs 文件字节摘要比较，宿主已核对冻结输入身份。",
     parameters: inlineSchema("ToolReadArtifact"),
     async execute(toolCallId, args, signal) {
       const context = requireContext(holder, toolCallId);
@@ -851,7 +877,7 @@ export function buildAgentTools(
   const prepareProduction: ToolDefinition = {
     name: "prepare_production",
     label: "准备制作提案",
-    description: "用户明确委托准备付费制作后，创建待确认的提案（含服务端报价与有效期）；本工具不能批准执行。"
+    description: "用户明确委托准备付费制作后，创建待确认的提案（含服务端报价与有效期）；本工具不能批准执行。纯本地拼接、混音或代码渲染直接用 render_project；含付费媒体的整批操作一次提案，不拆出部分先执行。"
       + "对话文字可直接用 spec.inputSources 的 message_text 分支（真实 messageId 加逐字原文），没有作品引用时 inputSources 留空，不要为此先创建 Prompt 作品。"
       + "模型与启用参数取自 frame-current-state.mediaModels；render 为本地合成，model:null。按本次需要安排操作，不额外增加步骤；创建次数由通道固定，不要自行加重试。"
       + "正式整片（purpose=production）的成片必须带 workId，且方案等必要依据已通过 confirm_review 认可；受理依据放 reviewInputs（引用 read_work 返回的准确 confirmationId 与事项），实际生成输入放 inputSources，两者不要混同。已认可的方案修订直接作为 inputSources 引用，不复制、不追加报价到正文、不让用户重新认可同一稿。"
@@ -861,7 +887,7 @@ export function buildAgentTools(
       + "为已有视频准备新版本时，先用 read_run / read_proposal 核对上一版实际使用的输入与产出：未受影响的段落直接引用原有 blob 或产物修订作为 render 输入，只为受影响的段落新增生成操作；本会话已采用的素材同样优先复用。不为省事把所有片段重新生成，也不为复用重复安排付费操作。"
       + "需要指定片段区间/图片停留时用 timed_narrated_concat：segments 按成片顺序给出视频 inputSlot/startMs/durationMs 或图片 inputSlot/durationMs，narrationInputSlot 指定旁白；成片时长取片段之和，旁白替换原声、不足补静音、超过画面总长会如实失败。"
       + "三路声音用mixed_concat：segments与必需segmentIds逐段对应方案，video逐段originalGain（省略1）；可加一路已采用music（candidateId绑定该音频槽，明确选区/位置/播放长/repeat/gain/fades/duckUnderNarration）和完整narration（槽/位置/gain）。gain0–1，画面总长≤120s，全部输入合计≤24。音乐不足不暗循环；独立配音不裁词、不变速、不延长画面；未知原声不能假装分离人声和背景乐。"
-      + "换音乐或音量只安排本地render，read_run取得proposalId再read_proposal恢复原始视觉段、原声设置和既有配音；不能用已经混旧曲的整片再叠新曲，也不重生相同画面/旁白。只换型号/音色/台词才有新speech。明确本次MiniMax时用frame-current-state.mediaModels中的准确binding和voice，不改全局默认或失败偷换OpenAI。新混音仍交视频草稿，等待用户认可。"
+      + "换音乐或音量直接用 render_project：先 read_run 核对原片段与音轨，原运行来自提案时再用其 proposalId 读取准确提案，复用原始视觉段、原声设置和既有配音。不能用已经混旧曲的整片再叠新曲，也不重生相同画面/旁白。只换型号/音色/台词才有新speech。明确本次MiniMax时用frame-current-state.mediaModels中的准确binding和voice，不改全局默认或失败偷换OpenAI。新混音仍交视频草稿，等待用户认可。"
       + "ordered_concat/narrated_concat 保持完整保留素材与旁白的原语义，不裁剪；无法满足时长差距时如实说明，不得声称可达成长度。",
     parameters: inlineSchema("ToolPrepareProposal"),
     async execute(toolCallId, args) {
@@ -894,8 +920,10 @@ export function buildAgentTools(
   const renderProject: ToolDefinition = {
     name: "render_project",
     label: "受理本地渲染",
-    description: "把冻结的 project 修订与声明输出交给现有本地 worker 免费执行，立即返回 run（后台完成，不等待结果、完成后不自动点评）。每个操作声明 operationId/outputSlot、inputs（blob/媒体修订作为数据输入，按数组下标物化为 inputs/<slot>.<扩展名>；operation_output 串接前序产物；文本与工程引用不落文件）、code_project 参数（projectRevision 指向 publish_project 返回的准确工程修订、entrypoint 与该修订冻结的入口完全一致、outputPath 是本次执行将产生的工作区相对文件——不必预先存在，也不能与封存文件或 inputs/<slot>.* 落位同名、expectedMediaKind 与该媒体实际需要的字段：图片给尺寸与 png/jpeg，音频给采样率/声道与 wav/mp3，视频才给 fps）与 target（已有组/项传准确 id，新组/项用 create 声明，服务端一次分配身份）。执行按工程冻结的 argv 逐项直传进程，入口正常结束但没生成声明输出即失败，不会交付旧文件。"
-      + "正式整片（purpose=production 的视频输出）必须先有组审阅认可，reviewInputs 引用 read_work 返回的准确 confirmationId；初始样张按 scope 判断可空。受理后该作品在途期间不再受理新制作，但保存后继工程与独立认可不受影响。产物是否交付另行用 deliver_artifacts 引用运行输出。",
+    description: "把已有素材或冻结工程交给现有本地 worker 免费执行，立即返回 run（后台完成，不等待结果、完成后不自动点评），不创建提案、授权或费用。每个操作声明 operationId/outputSlot、inputs、现有 RenderParameters 与 target：支持 code_project、ordered_concat、narrated_concat、timed_narrated_concat、mixed_concat。纯本地整批走本工具；要新增付费图片/视频/配音时，完整批次走 prepare_production 一次确认。"
+      + "native 输入按数组下标指定槽位；ordered_concat 按顺序拼接（原声按 audioMode），narrated_concat 完整保留画面与旁白，timed_narrated_concat 按 segments 区间/静帧时间合成。mixed_concat 的 segmentIds 与 segments 对应，可设置逐段 originalGain、一路已有 music 和完整 narration；音乐选区、位置、播放长、repeat、gain、fades、duckUnderNarration 都要明确，不暗循环、不加速或裁旁白。music.candidateId 仅引用已采用的音乐候选，本地已登记音轨可省略；musicSource 由服务器从真实输入解析，不能自填许可。"
+      + "code_project 的 projectRevision 用 publish_project 返回的准确修订，entrypoint 必须与冻结入口一致，outputPath 不与封存文件或 inputs/<slot>.* 同名；expectedMediaKind 与尺寸/采样率/声道/fps 字段按实际媒体填写。媒体输入物化为 inputs/<slot>.<扩展名>，operation_output 可串接批内输出；按冻结 argv 执行，正常退出却没有声明输出仍失败。target 已有组/项传准确 id，新组/项用 create 声明并由服务端分配身份。"
+      + "purpose=production 时批内每个视频都受组审阅认可约束，reviewInputs 引用 read_work 的准确 confirmationId 与采用版本；预览草稿可空。受理后该作品在途期间不再受理新制作，保存后继工程与独立认可不受影响。完成先落 target 草稿，不自动认可或定稿；需要正式交付时用 deliver_artifacts 引用运行输出。",
     parameters: inlineSchema("ToolRenderProject"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
@@ -986,7 +1014,7 @@ export function buildAgentTools(
   const startWork: ToolDefinition = {
     name: "start_work",
     label: "开始视频创作",
-    description: "用户明确要正式做一条视频后，为这条视频建立创作事项（标题由用户内容概括）并作为本回合的创作工作区，之后的原生工具直接服务它。普通 Prompt、热点讨论、单独写脚本不要调用。推进节奏按用户需要建审阅组（内容、画面声音方案、成片等），必选依据经用户认可后才能用于正式制作；用户明确要先看局部预览时可以直接做预览，不强迫先补内容稿。",
+    description: "用户明确要正式做一条视频后，为这条视频建立创作事项（标题由用户内容概括）并作为本回合的创作工作区，之后的原生工具直接服务它。用户同时明确采用已有独立脚本或消息原文时，给 adoptContent 准确来源，本次采用直接建立内容事项和真实认可，不复制正文或修订、不要求重复认可，也不自动制作。只开始作品时省略 adoptContent。普通 Prompt、热点讨论、单独写脚本不要调用。推进节奏按用户需要建审阅组（内容、画面声音方案、成片等），必选依据经用户认可后才能用于正式制作；用户明确要先看局部预览时可以直接做预览，不强迫先补内容稿。",
     parameters: inlineSchema("ToolStartWork"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
@@ -1019,12 +1047,14 @@ export function buildAgentTools(
   const confirmReview: ToolDefinition = {
     name: "confirm_review",
     label: "记录审阅认可",
-    description: "只记录用户本轮明确表达的认可：approve（认可指定项当前稿，暂停）、approve_and_continue（认可并继续下一组所需工作）、finalize_video（认可已存在的成片修订并定稿）。items 逐项给出准确 itemId 与所认可的来源（真实修订或本次消息原文消息）；不要因为语气接近、假设或引用别人就记录。镜头修改不包含继续认可，不能用本工具绕过改稿失败。本工具不能开始制作。",
+    description: "记录用户当前消息明确表达的认可：普通组用 workId/groupId/items/action，逐项给出准确当前来源；approve 认可后暂停，approve_and_continue 认可并继续所需创作，finalize_video 定稿已交付的成片。kind=standalone_artifact 只认可当前独立脚本的 artifactId/revisionId，不建立作品或开始视频。kind=adopt_preview 用准确 workId/groupId/itemId/source 将已交付预览同字节采用并定稿。结构化按钮消息只能执行原动作与目标，不能把认可或继续升级成定稿；普通自然语言可明确认可不同目标并定稿。不能提前认可本次消息后才产生的产物，也不能假设认可或绕过改稿失败。本工具不受理制作。",
     parameters: inlineSchema("ToolConfirmReview"),
     async execute(toolCallId, args) {
       const context = requireContext(holder, toolCallId);
-      const work = await tools.confirmReview(context, args as ToolConfirmReview);
-      return { content: [{ type: "text" as const, text: JSON.stringify(work) }], details: { workId: work.id } };
+      const result = await tools.confirmReview(context, args as ToolConfirmReview);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: "kind" in result
+        ? { artifactId: result.artifact.id, confirmationId: result.confirmationId }
+        : { workId: result.id } };
     },
   };
 

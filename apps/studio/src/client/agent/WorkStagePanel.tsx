@@ -11,7 +11,7 @@ import { REVIEW_ROLE_LABELS } from "./FramePresentation.js";
 import type { FeedbackDrafts } from "./useFeedbackDrafts.js";
 import type {
   ArtifactHead, ArtifactRevision, ContentSource, ContentSourceInput, MaterialBatch, MaterialBatchIndexItem,
-  ReviewGroup, ReviewItem, Run, RunSegment, Work,
+  ReviewGroup, ReviewItem, RevisionRef, Run, RunSegment, Work,
 } from "../../shared/agent/generated/contracts.js";
 
 // 组审阅面板：把 snapshot 的 works.reviewGroups 呈现为「组页签 + 逐事项卡 +
@@ -20,6 +20,7 @@ import type {
 
 export type ReviewAction = "approve" | "approve_and_continue" | "finalize_video";
 export interface ReviewEntry { itemId: string; source: ContentSourceInput; }
+export type AdoptPreview = (work: Work, group: ReviewGroup, item: ReviewItem, source: RevisionRef) => Promise<boolean>;
 
 const SEGMENT_STATE_LABEL = { pending: "等待中", running: "制作中", succeeded: "已生成", failed: "未完成", cancelled: "已停止" } as const;
 const blobContentUrl = (blobId: string) => `/api/agent/v1/blobs/${encodeURIComponent(blobId)}/content`;
@@ -54,9 +55,9 @@ export function workReviewLabel(work: Work): string {
 
 // 草稿按准确修订读取；失败有可见重试，不用永久 loading 代替错误。
 // 读到的修订回报父级合入共享缓存，整组认可的阅读守卫据此判断当前稿是否已加载。
-function useStageRevision(source: ContentSource | null, cache: Record<string, ArtifactRevision>, onLoaded?: ((revision: ArtifactRevision) => void) | undefined) {
-  const artifactId = source?.kind === "artifact_revision" ? source.artifactId : null;
-  const revisionId = source?.kind === "artifact_revision" ? source.revisionId : null;
+function useStageRevision(source: ContentSource | RevisionRef | null, cache: Record<string, ArtifactRevision>, onLoaded?: ((revision: ArtifactRevision) => void) | undefined) {
+  const artifactId = source && "artifactId" in source ? source.artifactId : null;
+  const revisionId = source && "revisionId" in source ? source.revisionId : null;
   const key = artifactId && revisionId ? `${artifactId}:${revisionId}` : null;
   const [result, setResult] = useState<{ key: string; revision: ArtifactRevision | null; error: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -77,6 +78,24 @@ function useStageRevision(source: ContentSource | null, cache: Record<string, Ar
   }, [artifactId, revisionId, key, cache, attempt]);
   return { revision: key ? cache[key] ?? (result?.key === key ? result.revision : null) : null,
     error: result?.key === key && result.error, retry: () => setAttempt(value => value + 1) };
+}
+
+export function StandaloneScriptApproval({ artifact, revisions, onRevisionLoaded }: {
+  artifact: ArtifactHead; revisions: Record<string, ArtifactRevision>;
+  onRevisionLoaded: (revision: ArtifactRevision) => void;
+}) {
+  const approval = artifact.standaloneApproval;
+  const { revision, error, retry } = useStageRevision(approval
+    ? { artifactId: artifact.id, revisionId: approval.revisionId } : null, revisions, onRevisionLoaded);
+  return <section aria-label="已确认成果">
+    <div className="agent-work-pane-title"><h3>已确认成果</h3>{revision ? <span>v{revision.revisionNumber}</span> : null}</div>
+    {!approval ? <p className="agent-stage-empty">认可后的脚本会留在这里。</p> : <article className="agent-confirmed-stage">
+      {approval.revisionId !== artifact.revisionId ? <p className="agent-stage-muted">新草稿讨论中，这份成果保持不变。</p> : null}
+      {revision ? <RevisionBody content={revision.content} simulated={false} />
+        : error ? <p role="status">成果读取失败。<button type="button" onClick={retry}>重新读取成果</button></p>
+        : <p className="agent-stage-loading">正在读取成果…</p>}
+    </article>}
+  </section>;
 }
 
 interface BatchState {
@@ -152,7 +171,7 @@ export function MaterialBatchCard({ batchId, summary, open, onToggle, onAdopt, a
 export function WorkStagePanel({
   conversationId, works, selectedWorkId, onSelectWork, artifacts, revisions, runs, materialBatches,
   onConfirmReview, onContinueReview, reviewBusyKeys, canContinueText, onOpenRun, onEnsureRun, referenceErrors, feedback, simulated, openBatchId,
-  navigation, onAdoptMaterial, adoptDisabled, onRevisionLoaded,
+  navigation, onAdoptMaterial, adoptDisabled, onRevisionLoaded, onAdoptPreview,
 }: {
   conversationId: string;
   works: Work[];
@@ -165,6 +184,7 @@ export function WorkStagePanel({
   materialBatches: MaterialBatchIndexItem[];
   onAdoptMaterial?: AdoptMaterial | undefined;
   adoptDisabled?: boolean | undefined;
+  onAdoptPreview: AdoptPreview;
   // 认可入口：entries 至少一项；返回是否成功，供成功后的局部跳转使用。
   onConfirmReview: (work: Work, group: ReviewGroup, action: ReviewAction, entries: readonly ReviewEntry[], label: string) => Promise<boolean>;
   // 必选项全部认可后的普通继续：一条不带 reviewConfirmation 的普通消息，不补确认、不定稿。
@@ -284,7 +304,7 @@ export function WorkStagePanel({
                 feedbackSegment={feedbackSegments[itemKey(item.id)] ?? null}
                 onPickSegment={segment => setFeedbackSegments(current => ({ ...current, [itemKey(item.id)]: segment }))}
                 referenceErrors={referenceErrors} onEnsureRun={onEnsureRun} onOpenRun={onOpenRun}
-                onConfirmReview={onConfirmReview} groupBusy={groupBusy}
+                onConfirmReview={onConfirmReview} onAdoptPreview={onAdoptPreview} groupBusy={groupBusy}
                 onRevisionLoaded={onRevisionLoaded}
                 viewingRevision={shownRevisions[itemKey(item.id)] ?? null}
                 onViewingRevision={ref => setShownRevisions(current => ({ ...current, [itemKey(item.id)]: ref }))}
@@ -361,7 +381,7 @@ export function WorkStagePanel({
 }
 
 function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulated, feedback,
-  feedbackSegment, onPickSegment, referenceErrors, onEnsureRun, onOpenRun, onConfirmReview, groupBusy,
+  feedbackSegment, onPickSegment, referenceErrors, onEnsureRun, onOpenRun, onConfirmReview, onAdoptPreview, groupBusy,
   viewingRevision, onViewingRevision, feedbackOpen, onToggleFeedback, onRevisionLoaded }: {
   work: Work; group: ReviewGroup; item: ReviewItem;
   artifacts: ArtifactHead[]; revisions: Record<string, ArtifactRevision>; runs: Run[]; simulated: boolean;
@@ -371,6 +391,7 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
   onEnsureRun: (runId: string) => void; onOpenRun: (runId: string) => void;
   onConfirmReview: (work: Work, group: ReviewGroup, action: ReviewAction, entries: readonly ReviewEntry[], label: string) => Promise<boolean>;
   groupBusy: boolean;
+  onAdoptPreview: AdoptPreview;
   viewingRevision: StageRevisionRef | null;
   onViewingRevision: (ref: StageRevisionRef | null) => void;
   feedbackOpen: boolean; onToggleFeedback: () => void;
@@ -504,6 +525,12 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
       <button type="button" onClick={() => onOpenRun(viewingRunId)}>查看制作记录</button>
     </p> : null}
     <div className="agent-review-actions">
+      {item.role === "clip" && !viewingOld && draft?.kind === "artifact_revision"
+        && revision?.content.format === "media" && revision.content.mimeType.startsWith("video/")
+        ? <button type="button" className="agent-stage-primary" disabled={groupBusy}
+            aria-label={`以这版「${item.label}」定稿并入库`}
+            onClick={() => void onAdoptPreview(work, group, item, { artifactId: draft.artifactId, revisionId: draft.revisionId })}>以这版定稿并入库</button>
+        : null}
       {!draft ? null
         : viewingOld ? <button type="button" className="agent-stage-secondary" onClick={() => onViewingRevision(draftRef)}>查看最新稿</button>
         : isVideo && finalizedCurrent ? <span className="agent-stage-muted">这一版已定稿并入库；修改请在对话中提出。</span>

@@ -697,6 +697,61 @@ export const MIGRATIONS: readonly {
   ] },
   // C2：消息可选携带其指向的视频创作与审阅组（reviewContext）；历史行为 NULL。
   { version: 22, statements: ["ALTER TABLE messages ADD COLUMN review_context_json TEXT"] },
+  { version: 23, statements: [
+    `ALTER TABLE messages ADD COLUMN review_confirmation_json TEXT`,
+    // 沿用同一张认可事实表；旧行按原顺序逐列保留，独立稿不伪造作品或事项。
+    `CREATE TABLE work_review_confirmations_v23(
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL REFERENCES conversations(id),
+      subject_scope TEXT NOT NULL DEFAULT 'work_item' CHECK(subject_scope IN ('work_item','standalone_artifact')),
+      work_id TEXT REFERENCES works(id),
+      group_id TEXT,
+      item_id TEXT,
+      action TEXT NOT NULL CHECK(action IN ('approve','approve_and_continue','finalize_video')),
+      subject_json TEXT NOT NULL,
+      source_kind TEXT NOT NULL CHECK(source_kind IN ('user_message','pi_tool')),
+      source_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK((subject_scope = 'work_item' AND work_id IS NOT NULL AND group_id IS NOT NULL AND item_id IS NOT NULL)
+        OR (subject_scope = 'standalone_artifact' AND work_id IS NULL AND group_id IS NULL AND item_id IS NULL
+          AND action = 'approve' AND json_extract(subject_json, '$.kind') IS 'artifact_revision'))
+    )`,
+    `INSERT INTO work_review_confirmations_v23(id,owner_id,conversation_id,subject_scope,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
+      SELECT id,owner_id,conversation_id,'work_item',work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at
+      FROM work_review_confirmations ORDER BY rowid`,
+    `DROP TABLE work_review_confirmations`,
+    `ALTER TABLE work_review_confirmations_v23 RENAME TO work_review_confirmations`,
+    `CREATE INDEX work_review_confirmations_item ON work_review_confirmations(work_id, item_id, created_at)`,
+    `CREATE INDEX work_review_confirmations_owner_action ON work_review_confirmations(owner_id, action)`,
+  ] },
+  { version: 24, statements: [
+    "ALTER TABLE production_operations ADD COLUMN output_revision_id TEXT REFERENCES artifact_revisions(id)",
+  ], data: db => {
+    const outputs = db.prepare(`SELECT o.run_id,o.id,o.spec_json,r.owner_id,r.conversation_id,r.work_id,r.frozen_target_json,s.spec_json AS snapshot_json
+      FROM production_operations o JOIN production_runs r ON r.id=o.run_id
+      JOIN production_snapshots s ON s.id=r.snapshot_id WHERE o.output_blob_id IS NOT NULL`).all() as {
+        run_id: string; id: string; spec_json: string; owner_id: string; conversation_id: string; work_id: string;
+        frozen_target_json: string | null; snapshot_json: string;
+      }[];
+    const candidates = db.prepare(`SELECT a.id FROM artifact_revisions a JOIN artifacts h ON h.id=a.artifact_id
+      JOIN revision_blob_links l ON l.revision_id=a.id JOIN production_operations o ON o.run_id=a.run_id AND o.output_blob_id=l.blob_id
+      WHERE o.run_id=? AND o.id=? AND h.owner_id=? AND h.conversation_id=?
+        AND json_extract(a.content_json,'$.format')='media'
+        AND (? IS NULL OR (json_extract(a.creation_binding_json,'$.workId')=?
+          AND json_extract(a.creation_binding_json,'$.groupId')=? AND json_extract(a.creation_binding_json,'$.itemId')=?))`);
+    const update = db.prepare("UPDATE production_operations SET output_revision_id=? WHERE run_id=? AND id=?");
+    for (const output of outputs) {
+      const operation = JSON.parse(output.spec_json) as { target?: { groupId: string; itemId: string }; outputSlot: string };
+      const snapshot = JSON.parse(output.snapshot_json) as { finalOutput: { operationId: string; outputSlot: string } };
+      const target = operation.target ?? (snapshot.finalOutput.operationId === output.id && snapshot.finalOutput.outputSlot === operation.outputSlot
+        && output.frozen_target_json ? JSON.parse(output.frozen_target_json) as { groupId: string; itemId: string } : null);
+      const matches = candidates.all(output.run_id, output.id, output.owner_id, output.conversation_id,
+        target?.groupId ?? null, output.work_id, target?.groupId ?? null, target?.itemId ?? null) as { id: string }[];
+      // 只补同一运行和媒体、冻结目标下唯一可证的修订；同字节多产出且没有目标的旧记录保留空。
+      if (matches.length === 1) update.run(matches[0]!.id, output.run_id, output.id);
+    }
+  } },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {

@@ -2,7 +2,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent, type EventHub } from "./event-log.js";
 import { canonicalJson, digestOf, newAgentId } from "./util.js";
-import type { Conversation, Message, MessageReferences, RequestReceipt, Target } from "../../shared/agent/generated/contracts.js";
+import type { Conversation, Message, MessageReferences, RequestReceipt, ReviewConfirmation, Target } from "../../shared/agent/generated/contracts.js";
 
 // 会话、请求队列与消息的持久操作。全部为短事务内可调用的同步函数；
 // 策略（确认短句、目标绑定、限额）在 AgentService，不在这里。
@@ -57,6 +57,7 @@ export interface MessageRow {
   feedback_json: string | null;
   library_selections_json: string | null;
   review_context_json: string | null;
+  review_confirmation_json: string | null;
   created_seq: number;
   created_at: string;
   updated_at: string;
@@ -271,17 +272,19 @@ export function insertMessage(
     feedback?: Message["feedback"];
     librarySelections?: Message["librarySelections"];
     reviewContext?: Message["reviewContext"];
+    reviewConfirmation?: ReviewConfirmation;
   },
 ): void {
   db.prepare(
     `INSERT INTO messages(id, conversation_id, owner_id, request_id, role, kind, state, revision, text, target_json,
-      references_json, feedback_json, library_selections_json, review_context_json, created_seq, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      references_json, feedback_json, library_selections_json, review_context_json, review_confirmation_json, created_seq, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(input.id, input.conversationId, input.ownerId, input.requestId, input.role, input.kind, input.state,
     input.text, input.target ? JSON.stringify(input.target) : null, JSON.stringify(input.references),
     input.feedback ? JSON.stringify(input.feedback) : null,
     input.librarySelections ? JSON.stringify(input.librarySelections) : null,
-    input.reviewContext ? JSON.stringify(input.reviewContext) : null, input.createdSeq, now, now);
+    input.reviewContext ? JSON.stringify(input.reviewContext) : null,
+    input.reviewConfirmation ? JSON.stringify(input.reviewConfirmation) : null, input.createdSeq, now, now);
   insertEvent(db, now, {
     conversationId: input.conversationId, ownerId: input.ownerId, kind: "message.changed",
     entityId: input.id, entityVersion: 1,

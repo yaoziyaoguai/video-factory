@@ -29,11 +29,13 @@ import {
 } from "../src/server/agent/ark-video-settings.js";
 import { probeAudioFile, probeVideoFile } from "../src/server/agent/media-probe.js";
 import { blobSources, recordBlobSources } from "../src/server/agent/material-store.js";
+import type { QuoteCatalog } from "../src/server/agent/artifact-store.js";
 import { attemptsFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import { deliverReviewDrafts, ensureConfirmedWork, finalVideoTarget } from "./helpers/creative-work-fixture.js";
 import { createWork, recordReviewConfirmation } from "../src/server/agent/creative-work.js";
-import { toolIntentOf } from "./helpers/tool-args.js";
+import { emptyReferences, insertMessage, nextSeq } from "../src/server/agent/conversation-store.js";
+import { admitLocalIntent, localRenderIntentOf, toolIntentOf } from "./helpers/tool-args.js";
 import type { AgentDatabase } from "../src/server/agent/db.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import type { MediaExecutionPort } from "../src/shared/agent/ports.js";
@@ -99,7 +101,7 @@ async function outputAudioFacts(file: string): Promise<{ codec: string | undefin
 interface Ref { artifactId: string; revisionId: string; digest: string }
 
 // 媒体修订按 worker.publish 的行形状直接落库：render 输入走 artifact_revision(media) 引用。
-function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Buffer, mimeType: "video/mp4" | "audio/mpeg" | "image/png", durationMs: number, dub?: MediaContent["dub"]): Ref {
+function mediaRevision(runtime: AgentRuntime, conversationId: string, buffer: Buffer, mimeType: "video/mp4" | "audio/mpeg" | "audio/wav" | "image/png", durationMs: number, dub?: MediaContent["dub"]): Ref {
   const blobs = runtime.production!.blobs;
   const blob = blobs.persist("local-owner", conversationId, buffer, mimeType, durationMs);
   const content: MediaContent = { format: "media", blobId: blob.id, mimeType, durationMs, ...(dub ? { dub } : {}) };
@@ -142,21 +144,28 @@ function orderedIntent(clips: Ref[]): ProductionIntent {
     finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 0 } };
 }
 
-// 视频 render/成片按 §4.2.1 落在已正式开始的创作内：受理依据来自真实组审阅认可（reviewInputs），
-// 夹具用产品内核把脚本事项推进到“已认可”，prepare 前绑定 workId 与认可事实。规则本身不放宽。
+// 视频 render/成片按 §4.2.1 落在已正式开始的创作内，认可依据仍取真实确认行。
+// DGR-03 只替换纯本地的 ¥0 提案入口，原媒体行为与付费整批授权继续验证。
 const scopeOf = (conversationId: string) => ({ ownerId: "local-owner", conversationId });
 
-async function prepareIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
+function bindIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): void {
   const work = ensureConfirmedWork(runtime.database, staticClock(), scopeOf(conversationId), intent.title);
   intent.workId = work.workId;
   intent.reviewInputs = [work.reviewInput];
-  // 最终视频/渲染按 F02 声明交付目标（新组成片事项）；配音等非视频输出不带目标。
   const final = intent.operations.find(op => op.operationId === intent.finalOutput.operationId && op.outputSlot === intent.finalOutput.outputSlot);
   if (final && (final.kind === "video" || final.kind === "render")) intent.outputTarget = finalVideoTarget();
+}
+
+async function prepareIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent) {
+  bindIntent(runtime, conversationId, intent);
   return runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
 }
 
 async function acceptIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<string> {
+  if (intent.operations.every(operation => operation.kind === "render" && operation.model === null)) {
+    bindIntent(runtime, conversationId, intent);
+    return (await admitLocalIntent(runtime, scopeOf(conversationId), intent)).run.id;
+  }
   const { proposal } = await prepareIntent(runtime, conversationId, intent);
   const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
   return admitted.run.id;
@@ -192,7 +201,7 @@ const workRootOf = (directory: string) => path.join(directory, "media-work");
 
 const LOCAL_CATALOG = () => ({ "render:ordered_concat": renderCatalogEntry(true), "render:narrated_concat": narratedRenderCatalogEntry(), "render:timed_narrated_concat": timedNarratedRenderCatalogEntry(), "render:mixed_concat": mixedRenderCatalogEntry() });
 
-function buildLocalRuntime(directory: string, createPort?: (blobs: ProductionBlobs, db: AgentDatabase) => MediaExecutionPort): Promise<AgentRuntime> {
+function buildLocalRuntime(directory: string, createPort?: (blobs: ProductionBlobs, db: AgentDatabase) => MediaExecutionPort, extraCatalog: QuoteCatalog = {}): Promise<AgentRuntime> {
   const workRoot = path.join(directory, "media-work");
   return createAgentRuntime({
     dataDir: directory, skillsRoot: defaultSkillsRoot,
@@ -200,7 +209,7 @@ function buildLocalRuntime(directory: string, createPort?: (blobs: ProductionBlo
     models: [FAUX_TEXT_ENTRY], defaultModelId: FAUX_TEXT_MODEL, clock: staticClock,
     media: { autoStart: false, factory: (db, blobs) => ({
       port: createPort ? createPort(blobs, db) : new LocalRenderPort(db, blobs, staticClock, { workRoot }),
-      catalog: LOCAL_CATALOG, models: () => [],
+      catalog: () => ({ ...LOCAL_CATALOG(), ...extraCatalog }), models: () => [],
     }) },
   });
 }
@@ -532,7 +541,7 @@ it("T6-05：旧 ordered_concat 无声分支与 narrated 共存且行为不变", 
 
 // —— T6-06：角色错误/未用 slot/同 slot 两用在 prepare 拒绝 ——
 
-it("T6-06：旁白/画面角色错用与槽位覆盖错误都在 prepare 拒绝，不产生运行", async () => {
+it("T6-06：旁白/画面角色错用与槽位覆盖错误都在本地受理拒绝，不产生运行", async () => {
   const assets = await prepareLocalAssets();
   const runtime = await buildLocalRuntime(assets.directory);
   try {
@@ -551,7 +560,8 @@ it("T6-06：旁白/画面角色错用与槽位覆盖错误都在 prepare 拒绝�
       { spec: withSlots(narratedIntent([clipA], narration), [0, 1], 1), pattern: /槽位引用与输入数量不一致/ },
     ];
     for (const { spec, pattern } of cases) {
-      await assert.rejects(runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec }),
+      bindIntent(runtime, conversation.id, spec);
+      await assert.rejects(admitLocalIntent(runtime, scopeOf(conversation.id), spec),
         (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && pattern.test(error.message ?? ""));
     }
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0);
@@ -941,7 +951,7 @@ it("T6-09：已知 70s+70s 组合在旁白付费前拒绝，重复引用逐次�
     // 旁白还是待生成文本：画面已核实也不披露“预计成片”（成片时长受旁白实际生成影响）。
     assert.doesNotMatch(proposal.priceDisclosure, /按当前输入预计成片约/);
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
-    // 已核实的素材组合（真实 70s 画面 + 真实旁白 mp3）才如实披露预计成片时长。
+    // 已核实的素材组合（真实 70s 画面 + 真实旁白 mp3）直接受理免费 run，不再制造时长/费用提案卡。
     const narrationAudio = mediaRevision(runtime, conversation.id, assets.narrationShort, "audio/mpeg", assets.shortMs);
     const verifiedSpec: ProductionIntent = {
       workId: null, title: "已核实时长组合",
@@ -953,8 +963,14 @@ it("T6-09：已知 70s+70s 组合在旁白付费前拒绝，重复引用逐次�
       ], { assembly: "narrated_concat", format: "mp4", width: 1280, height: 720, fps: 24, videoInputSlots: [0], narrationInputSlot: 1, durationPolicy: "preserve_all" })],
       finalOutput: { operationId: "render", outputSlot: "final" }, maxSpend: { currency: "CNY", amountMinor: 796 },
     };
-    const { proposal: verifiedProposal } = await prepareIntent(runtime, conversation.id, verifiedSpec);
-    assert.match(verifiedProposal.priceDisclosure, /按当前输入预计成片约 70\.0 秒（.*不做裁剪）/);
+    const existingProposals = (runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n;
+    bindIntent(runtime, conversation.id, verifiedSpec);
+    const verified = (await admitLocalIntent(runtime, scopeOf(conversation.id), verifiedSpec)).run;
+    assert.equal(verified.state, "queued");
+    assert.equal(verified.finance, null);
+    assert.equal(verified.origin.kind, "local_request");
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, existingProposals);
+    assert.equal((await probeVideoFile(longClip)).videoDurationMs, 70_000, "完整画面仍按真实 70s 冻结，不借入口变更裁剪");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
 });
 
@@ -1337,7 +1353,7 @@ it("T13-c/F07：生成后旁白 22s 超过 20s 画面：保留已付音频，ren
 });
 
 // T13-d：已核实的真实长旁白（21s > 20s 画面）仍在付费前拒绝——上界只对“待生成”让路。
-it("T13-d/F07：已有真实 21s 旁白超过 20s 画面，prepare 在付费前拒绝", async () => {
+it("T13-d/F07：已有真实 21s 旁白超过 20s 画面，本地受理前拒绝", async () => {
   const assets = await prepareTimedAssets();
   const runtime = await buildLocalRuntime(assets.directory);
   try {
@@ -1346,7 +1362,7 @@ it("T13-d/F07：已有真实 21s 旁白超过 20s 画面，prepare 在付费前�
     await makeMp3(narration, 21);
     const narrationMs = (await probeAudioFile(narration)).durationMs;
     const footage = timedFootage(assets, runtime, conversation.id);
-    await assert.rejects(prepareIntent(runtime, conversation.id, timedIntent(footage, mediaRevision(runtime, conversation.id, readFileSync(narration), "audio/mpeg", narrationMs))),
+    await assert.rejects(acceptIntent(runtime, conversation.id, timedIntent(footage, mediaRevision(runtime, conversation.id, readFileSync(narration), "audio/mpeg", narrationMs))),
       (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && /旁白约 21\.0s，超过画面总长 20\.0s/.test(error.message ?? ""));
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0, "不产生运行");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
@@ -1462,8 +1478,14 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "分段投影" }).conversation;
     const scope = scopeOf(conversation.id), db = runtime.database, now = staticClock();
     const work = createWork(db, now, scope, "分段投影");
+    const approvalMessage = (text: string) => {
+      const id = newAgentId("msg");
+      insertMessage(db, now, { id, ...scope, requestId: null, role: "user", kind: "chat", state: "completed", text, target: null,
+        createdSeq: nextSeq(db, "messages", conversation.id), references: emptyReferences() });
+      return id;
+    };
     // 内容组：分段内容主稿按真实交付事务建立；认可走新组确认并保留 confirmationId 供制作受理引用。
-    const contentReceipt = deliverReviewDrafts(db, now, scope, {
+    deliverReviewDrafts(db, now, scope, {
       items: [{ mode: "create", title: "分段内容", kind: "script", content: { format: "markdown", text: "全局说明。",
         sections: [
           { id: "sec-open", title: "开场", text: "清晨山脊。" },
@@ -1482,7 +1504,7 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     if (content?.kind !== "artifact_revision") assert.fail("内容主稿应是分段产物修订");
     const [recorded] = recordReviewConfirmation(db, now, scope, {
       workId: work.id, groupId: contentEntry.group.id, items: [{ itemId: contentEntry.item.id, source: content }], action: "approve_and_continue",
-    }, { kind: "user_message", messageId: contentReceipt.messageId }).items;
+    }, { kind: "user_message", messageId: approvalMessage("认可已交付的分段内容，并继续。") }).items;
     const contentReviewInput = { groupId: contentEntry.group.id, itemId: contentEntry.item.id, source: content, confirmationId: recorded!.confirmationId };
 
     // 冻结视觉输入（既有真实素材修订）：两段视频 + 一张静帧；旁白是既有配音修订。
@@ -1495,7 +1517,7 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
       { kind: "artifact_revision" as const, artifactId: narration.artifactId, revisionId: narration.revisionId, digest: narration.digest }] as unknown as ProductionIntent["operations"][number]["inputs"];
     // 方案组：分段方案主稿先行交付并认可（方案段落 segmentIds ↔ render segments），其确认作为制作受理依据；
     // 分段投影按 spec.reviewInputs 里第一个带段落的主稿解析，即这份方案修订。
-    const planReceipt = deliverReviewDrafts(db, now, scope, {
+    deliverReviewDrafts(db, now, scope, {
       items: [{ mode: "create", title: "分段方案", kind: "script", content: { format: "markdown", text: "整体节奏。",
         sections: [
           { id: "seg-open", title: "开场镜头", text: "固定镜头六秒。", sourceSectionIds: ["sec-open"] },
@@ -1513,7 +1535,7 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     if (planDraft?.kind !== "artifact_revision") assert.fail("方案主稿应是分段产物修订");
     const [planRecorded] = recordReviewConfirmation(db, now, scope, {
       workId: work.id, groupId: planEntry.group.id, items: [{ itemId: planEntry.item.id, source: planDraft }], action: "approve",
-    }, { kind: "user_message", messageId: planReceipt.messageId }).items;
+    }, { kind: "user_message", messageId: approvalMessage("认可已交付的分段方案。") }).items;
     const planReviewInput = { groupId: planEntry.group.id, itemId: planEntry.item.id, source: planDraft, confirmationId: planRecorded!.confirmationId };
 
     const intent: ProductionIntent = { workId: work.id, title: "分段成片",
@@ -1524,9 +1546,10 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
         segments: [{ kind: "video", inputSlot: 0, startMs: 1000, durationMs: 6000 }, { kind: "video", inputSlot: 1, startMs: 2000, durationMs: 6000 }, { kind: "image", inputSlot: 2, durationMs: 8000 }],
         narrationInputSlot: 3, segmentIds: ["seg-open", "seg-walk", "seg-night"] })],
       finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
-    const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent });
-    const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+    const admitted = await admitLocalIntent(runtime, scope, intent);
     const run = runtime.service.getRun("local-owner", admitted.run.id);
+    assert.equal(run.finance, null, "native 分段投影属于免费运行");
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0);
 
     const blobOf = (ref: Ref) =>
       (JSON.parse((db.prepare("SELECT content_json FROM artifact_revisions WHERE id = ?").get(ref.revisionId) as { content_json: string }).content_json) as { blobId: string }).blobId;
@@ -1575,4 +1598,292 @@ it("B2.4 分段方案把成片运行投影为可指向片段；无 segmentIds �
     const plainRunId = await acceptIntent(runtime, plain.id, orderedIntent(plainClips));
     assert.deepEqual(runtime.service.getRun("local-owner", plainRunId).segments, [], "无 segmentIds 时片段为空");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
+});
+
+it("DGR-03 native 三段 mixed_concat 经 render_project 与 worker 混入本地 WAV，无提案授权且只交草稿", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-local-native-"));
+  const runtime = await buildLocalRuntime(directory);
+  try {
+    const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "native 免费混音" }).conversation;
+    const scope = scopeOf(conversation.id);
+    const work = createWork(runtime.database, staticClock(), scope, "三段混音");
+    const clips = [];
+    for (const color of ["red", "blue", "green"] as const) {
+      const file = path.join(directory, `${color}.mp4`);
+      await makeClip(file, color, 24, 0.5);
+      clips.push(runtime.production!.blobs.persist(scope.ownerId, scope.conversationId, readFileSync(file), "video/mp4", 500));
+    }
+    const musicFile = path.join(directory, "music.wav");
+    await run("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=660:duration=2", "-c:a", "pcm_s16le", musicFile]);
+    const music = runtime.production!.blobs.persist(scope.ownerId, scope.conversationId, readFileSync(musicFile), "audio/wav", 2000);
+    runtime.host.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("render_project", {
+        workId: work.id, title: "三段混音草稿", scope: "三段画面加现有音乐", purpose: "draft", inputSources: [], reviewInputs: [],
+        operations: [{ operationId: "render", outputSlot: "final", inputs: [...clips, music].map(blob => ({ kind: "blob", blobId: blob.id, digest: blob.digest })),
+          parameters: { assembly: "mixed_concat", format: "mp4", width: 1280, height: 720, fps: 24, segmentIds: ["red", "blue", "green"],
+            segments: clips.map((_, inputSlot) => ({ kind: "video", inputSlot, startMs: 0, durationMs: 500, originalGain: 0.7 })),
+            music: { inputSlot: 3, sourceStartMs: 100, sourceDurationMs: 1500, timelineStartMs: 0, playDurationMs: 1500,
+              repeat: false, gain: 0.25, fadeInMs: 100, fadeOutMs: 100, duckUnderNarration: true } },
+          target: { group: { mode: "create", key: "preview", title: "预览", nextIntent: null },
+            item: { mode: "create", key: "video", label: "三段混音", role: "clip", required: true } } }],
+      })]),
+      context => {
+        const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        const text = result.content.filter(part => part.type === "text").map(part => part.text).join("");
+        assert.equal(result.isError, undefined, text);
+        return fauxAssistantMessage("已受理，等待预览。");
+      },
+    ]);
+    const sent = await runtime.service.sendMessage(scope.ownerId, scope.conversationId, {
+      commandId: cmd(), text: "把已有三段和本地音乐拼成预览", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null,
+    });
+    await waitForRequest(runtime, conversation.id);
+    const row = runtime.database.prepare("SELECT id, proposal_id FROM production_runs WHERE conversation_id=?").get(conversation.id) as { id: string; proposal_id: string | null } | undefined;
+    assert.ok(row, "render_project 必须受理 native 参数并建立免费 run");
+    assert.equal(row.proposal_id, null);
+    const admitted = runtime.service.getRun(scope.ownerId, row.id);
+    assert.deepEqual(admitted.origin, { kind: "local_request", requestId: sent.receipt.requestId });
+    assert.equal(admitted.finance, null);
+    const snapshot = JSON.parse((runtime.database.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(admitted.snapshotId) as { spec_json: string }).spec_json);
+    assert.equal(snapshot.type, "local_creation");
+    assert.equal(snapshot.maxSpend, undefined);
+    assert.deepEqual(snapshot.operations[0].inputs.map((input: { digest: string }) => input.digest), [...clips, music].map(blob => blob.digest));
+    assert.deepEqual(snapshot.operations[0].parameters.segments.map((segment: { originalGain: number }) => segment.originalGain), [0, 0, 0], "无声源的原声增益在冻结前规范化");
+    assert.equal(snapshot.operations[0].parameters.music.duckUnderNarration, false, "没有独立旁白时不虚构避让");
+    assert.equal(snapshot.operations[0].musicSource, undefined, "本地生成音乐不伪造外部许可");
+    const result = await drive(runtime, row.id);
+    assert.equal(result.state, "succeeded", JSON.stringify(result.issue));
+    assert.equal(result.finance, null);
+    const output = await outputFileOf(runtime, row.id, workRootOf(directory));
+    const facts = await probeVideoFile(output);
+    assert.ok(Math.abs(facts.videoDurationMs - 1500) < 100, JSON.stringify(facts));
+    assert.equal(facts.hasAudio, true);
+    assert.ok(isRed(await frameColor(output, 0.2)), "第一段保留红色画面");
+    assert.ok(isBlue(await frameColor(output, 0.7)), "第二段保留蓝色画面");
+    const green = await frameColor(output, 1.2);
+    assert.ok(green[1] > green[0] && green[1] > green[2], "第三段保留绿色画面");
+    assert.ok(await maxVolumeDb(output, 0.2, 0.8) > -45, "本地 WAV 确实进入输出音轨");
+    const item = runtime.service.snapshot(scope.ownerId, scope.conversationId).works.find(entry => entry.id === work.id)!.reviewGroups[0]!.items[0]!;
+    assert.equal(item.draft?.kind, "artifact_revision");
+    assert.equal(item.approved, null);
+    assert.equal(item.confirmationId, null);
+    for (const table of ["proposals", "authorizations", "user_actions", "work_review_confirmations"]) {
+      assert.equal((runtime.database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n, 0, `${table} 不新增记录`);
+    }
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_attempts WHERE billing_json IS NOT NULL OR reserve_minor<>0 OR billed_minor<>0").get() as { n: number }).n, 0);
+  } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+// 真实FFmpeg/SQLite/物化边界；受控文本只驱动工具，不代替V07/V08默认模型自然旅程。
+it("DGR-07 准确五源及raw成员校验，跨会话原字节读回再交付不修改源作品", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-raw-library-"));
+  const runtime = await buildLocalRuntime(directory);
+  try {
+    const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "五源库验证" }).conversation;
+    const scope = scopeOf(conversation.id);
+    const work = createWork(runtime.database, staticClock(), scope, "五源混音");
+    const clips = [];
+    for (const color of ["red", "blue", "green"] as const) {
+      const file = path.join(directory, `${color}.mp4`);
+      await makeClip(file, color, 24, 0.5);
+      clips.push(runtime.production!.blobs.persist(scope.ownerId, scope.conversationId, readFileSync(file), "video/mp4", 500));
+    }
+    const wav = path.join(directory, "music.wav"), mp3 = path.join(directory, "tone.mp3");
+    await run("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=660:duration=2", "-c:a", "pcm_s16le", wav]);
+    await makeMp3(mp3, 0.3);
+    const music = mediaRevision(runtime, conversation.id, readFileSync(wav), "audio/wav", 2000);
+    const tone = mediaRevision(runtime, conversation.id, readFileSync(mp3), "audio/mpeg", 350);
+    const sources = [music, tone].map(ref => ({ kind: "artifact_revision" as const, ...ref }));
+    const intent: ProductionIntent = { workId: work.id, title: "五源预览", scope: "实际五源", purpose: "preview",
+      inputSources: sources, reviewInputs: [], maxSpend: { currency: "CNY", amountMinor: 0 },
+      operations: [{ operationId: "mix", outputSlot: "video", kind: "render", model: null, maxCreateAttempts: 1,
+        inputs: [...clips.map(blob => ({ kind: "blob" as const, blobId: blob.id, digest: blob.digest })), ...sources],
+        parameters: { assembly: "mixed_concat", format: "mp4", width: 1280, height: 720, fps: 24, segmentIds: ["red", "blue", "green"],
+          segments: [
+            { kind: "video", inputSlot: 0, startMs: 0, durationMs: 500, originalGain: 0 },
+            { kind: "video", inputSlot: 1, startMs: 0, durationMs: 500, originalGain: 0 },
+            { kind: "video", inputSlot: 2, startMs: 0, durationMs: 500, originalGain: 0 },
+          ],
+          music: { inputSlot: 3, sourceStartMs: 0, sourceDurationMs: 1500, timelineStartMs: 0, playDurationMs: 1500,
+            repeat: false, gain: 0.2, fadeInMs: 100, fadeOutMs: 100, duckUnderNarration: true },
+          narration: { inputSlot: 4, timelineStartMs: 100, gain: 0.5 } } }],
+      finalOutput: { operationId: "mix", outputSlot: "video" },
+      outputTarget: { group: { mode: "create", key: "preview", title: "预览", nextIntent: null },
+        item: { mode: "create", key: "clip", label: "五源预览", role: "clip", required: true } } };
+    runtime.host.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("render_project", JSON.parse(canonicalJson(localRenderIntentOf(intent))))]),
+      fauxAssistantMessage("已受理五源预览。"),
+    ]);
+    await runtime.service.sendMessage(scope.ownerId, conversation.id, { commandId: cmd(), text: "用实际五源制作预览", target: null,
+      skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
+    await waitForRequest(runtime, conversation.id);
+    const runId = (runtime.database.prepare("SELECT id FROM production_runs WHERE conversation_id=?").get(conversation.id) as { id: string }).id;
+    const admitted = { run: runtime.service.getRun(scope.ownerId, runId) };
+    const runResult = await drive(runtime, admitted.run.id);
+    assert.equal(runResult.state, "succeeded", JSON.stringify(runResult.issue));
+    const preview = runResult.outputRevisions[0]!;
+    const originalRevision = runtime.service.readRevision(scope.ownerId, preview.artifactId, preview.revisionId);
+    const originalHead = runtime.service.readArtifactHead(scope.ownerId, preview.artifactId);
+    const group = runtime.service.readWork(scope.ownerId, work.id).reviewGroups.find(g => g.items.some(i => i.draft?.kind === "artifact_revision" && i.draft.revisionId === preview.revisionId))!;
+    const item = group.items[0]!;
+    await runtime.service.sendMessage(scope.ownerId, conversation.id, { commandId: cmd(), text: "以这版定稿并入库", target: null,
+      skillId: null, proposalRef: null, mode: "new", steerRequestId: null,
+      reviewConfirmation: { kind: "adopt_preview", workId: work.id, groupId: group.id, itemId: item.id, source: preview, action: "finalize_video" } });
+    const entry = runtime.service.listLibraryVideos(scope.ownerId, undefined, 20).items[0]!;
+    assert.equal(entry.materials.length, 5);
+    assert.equal(entry.project, null, "原生拼接不伪造工程");
+    const raw = entry.materials.flatMap(material => "kind" in material.source ? [material.source] : []);
+    assert.deepEqual(raw, clips.map((blob, inputIndex) => ({ kind: "run_input", runId: admitted.run.id, operationId: "mix", inputIndex, blobId: blob.id })));
+    assert.deepEqual(entry.materials.filter(material => !("kind" in material.source)).map(material => material.source),
+      [music, tone].map(({ artifactId, revisionId }) => ({ artifactId, revisionId })));
+    assert.deepEqual(runtime.service.readArtifactHead(scope.ownerId, preview.artifactId), originalHead);
+    assert.deepEqual(runtime.service.readRevision(scope.ownerId, preview.artifactId, preview.revisionId), originalRevision);
+    const sourceState = runtime.service.snapshot(scope.ownerId, conversation.id);
+    const confirmations = runtime.database.prepare("SELECT * FROM work_review_confirmations WHERE conversation_id=? ORDER BY rowid").all(conversation.id);
+    const other = runtime.service.createConversation(scope.ownerId, { commandId: cmd(), title: "接收raw" }).conversation;
+    const selected = { sourceVideo: entry.video, source: raw[0]! };
+    const message = (selection: typeof selected) => ({ commandId: cmd(), text: "只读这个素材", target: null, skillId: null,
+      proposalRef: null, mode: "new" as const, steerRequestId: null, librarySelections: [selection] });
+    assert.throws(() => runtime.service.sendMessage(scope.ownerId, other.id, message({ ...selected, source: { ...selected.source, inputIndex: 1 } })), /实际采用/);
+    const unusedFile = path.join(directory, "unused.mp4");
+    await makeClip(unusedFile, "red", 24, 1);
+    const unused = runtime.production!.blobs.persist(scope.ownerId, conversation.id, readFileSync(unusedFile), "video/mp4", 1000);
+    assert.throws(() => runtime.service.sendMessage(scope.ownerId, other.id, message({ ...selected, source: { ...selected.source, blobId: unused.id } })), /实际采用/);
+    const blobCount = (runtime.database.prepare("SELECT COUNT(*) AS n FROM production_blobs").get() as { n: number }).n;
+    const runCount = (runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n;
+    let imported: { artifactId: string; revisionId: string };
+    runtime.host.faux!.setResponses([
+      () => {
+        imported = runtime.service.snapshot(scope.ownerId, other.id).messages.items.find(m => m.librarySelections?.length)!.references.artifacts[0]!;
+        return fauxAssistantMessage([fauxToolCall("read_artifact", { artifactId: imported.artifactId, revisionId: imported.revisionId, frameTimesMs: [100] })]);
+      },
+      context => {
+        const result = context.messages.filter(m => m.role === "toolResult").at(-1)!;
+        assert.notEqual(result.isError, true);
+        assert.ok(result.content.some(block => block.type === "image"), "真实原始视频读回必须有可解码帧");
+        return fauxAssistantMessage([fauxToolCall("start_work", { title: "C本地采用" })]);
+      },
+      () => {
+        const c = runtime.service.snapshot(scope.ownerId, other.id).works[0]!;
+        return fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "C片段草稿", kind: "video",
+          content: { format: "local_output", source: { kind: "artifact_revision", artifactId: imported.artifactId, revisionId: imported.revisionId } } }],
+          reviewGroups: [{ workId: c.id, group: { mode: "create", key: "clip", title: "片段", nextIntent: null },
+            items: [{ item: { mode: "create", key: "raw", label: "采用片段", role: "clip", required: false }, itemIndex: 0,
+              inputSources: [], reviewInputs: [], purpose: "preview" }] }] })]);
+      },
+      fauxAssistantMessage("C草稿已交付。"),
+    ]);
+    await runtime.service.sendMessage(scope.ownerId, other.id, message(selected));
+    await waitForRequest(runtime, other.id);
+    const copy = runtime.service.snapshot(scope.ownerId, other.id).artifacts.items.find(artifact => artifact.title === "C片段草稿")!;
+    assert.ok(copy);
+    const copyRevision = runtime.service.readRevision(scope.ownerId, copy.id, copy.revisionId);
+    assert.equal(copyRevision.content.format, "media");
+    if (copyRevision.content.format !== "media") assert.fail("应共享媒体");
+    assert.equal(copyRevision.content.blobId, clips[0]!.id);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_blobs").get() as { n: number }).n, blobCount);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, runCount);
+    assert.deepEqual(runtime.service.snapshot(scope.ownerId, conversation.id).artifacts.items, sourceState.artifacts.items);
+    assert.deepEqual(runtime.service.snapshot(scope.ownerId, conversation.id).works, sourceState.works);
+    assert.deepEqual(runtime.database.prepare("SELECT * FROM work_review_confirmations WHERE conversation_id=? ORDER BY rowid").all(conversation.id), confirmations);
+    runtime.production!.blobs.verify(clips[0]!);
+  } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it("DGR-03 纯 local 在 prepare 任何新写前引导 render_project，零报价媒体仍须整批提案授权且不能混免费入口", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-local-native-gates-"));
+  const binding = { providerId: "faux-video", modelId: "zero-priced-video", connectionId: "test-local", configurationRevisionId: "zero-price" };
+  const runtime = await buildLocalRuntime(directory, undefined, {
+    "video:zero-priced-video": { binding, quoteMinor: 0, priceKind: "bounded", maxCreateAttempts: 1 },
+  });
+  try {
+    const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "免费入口边界" }).conversation;
+    const scope = scopeOf(conversation.id);
+    const work = createWork(runtime.database, staticClock(), scope, "入口边界");
+    const clip = runtime.production!.blobs.persist(scope.ownerId, scope.conversationId, Buffer.from("never-probed-local-gate"), "video/mp4", 1000);
+    const pure: ProductionIntent = { workId: work.id, title: "已有片段", scope: "预览拼接", purpose: "preview", inputSources: [], reviewInputs: [],
+      operations: [renderOp([{ kind: "blob", blobId: clip.id, digest: clip.digest }], { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 })],
+      finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
+    const counts = () => Object.fromEntries(["requests", "messages", "events", "tool_invocations", "proposals", "authorizations", "production_runs", "production_snapshots"]
+      .map(table => [table, (runtime.database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n]));
+    const before = counts();
+    await assert.rejects(runtime.service.prepareProposal(scope.ownerId, scope.conversationId, { commandId: cmd(), spec: pure }), /纯本地合成请使用 render_project/);
+    assert.deepEqual(counts(), before, "HTTP 误入 prepare 不探测或写入请求/消息/提案/运行");
+    const paid: ProductionIntent = { ...pure, title: "零报价媒体加本地拼接", operations: [
+      { kind: "video", model: binding, operationId: "video", outputSlot: "clip", maxCreateAttempts: 1,
+        inputs: [{ kind: "text", text: "一段新视频" }], parameters: { durationSeconds: 3, aspectRatio: "16:9", resolution: "720p", audioMode: "none" } },
+      renderOp([{ kind: "operation_output", producerOperationId: "video", outputSlot: "clip" }], { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 }),
+    ] };
+    const toolErrors: string[] = [];
+    runtime.host.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("prepare_production", JSON.parse(canonicalJson({ spec: toolIntentOf(pure) })))]),
+      context => {
+        const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.equal(result.isError, true);
+        toolErrors.push(result.content.filter(part => part.type === "text").map(part => part.text).join(""));
+        return fauxAssistantMessage([fauxToolCall("render_project", JSON.parse(canonicalJson({ workId: work.id, title: "不能拆出免费部分", scope: "混入媒体", purpose: "draft",
+          inputSources: [], reviewInputs: [], operations: paid.operations.map(operation => ({ ...operation, target: finalVideoTarget() })) })))]);
+      },
+      context => {
+        const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.equal(result.isError, true, "付费媒体操作不能混进 render_project");
+        toolErrors.push(result.content.filter(part => part.type === "text").map(part => part.text).join(""));
+        return fauxAssistantMessage("整批需走制作提案。");
+      },
+    ]);
+    await runtime.service.sendMessage(scope.ownerId, scope.conversationId, { commandId: cmd(), text: "检查这次制作入口", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
+    await waitForRequest(runtime, conversation.id);
+    assert.equal(toolErrors.length, 2, "两个工具入口都明确拒绝，不提前结束测试回合");
+    assert.match(toolErrors[0]!, /纯本地合成请使用 render_project/);
+    assert.equal(counts().tool_invocations, 0, "工具拒绝纯local发生在 invocation 登记前");
+    assert.equal(counts().production_runs, 0, "不能把混批的本地部分提前受理");
+    assert.equal(counts().proposals, 0);
+    const { proposal } = await runtime.service.prepareProposal(scope.ownerId, scope.conversationId, { commandId: cmd(), spec: paid });
+    assert.ok("type" in proposal.spec);
+    assert.equal(proposal.spec.type, "paid_production");
+    assert.deepEqual(proposal.spec.operations.map(operation => operation.kind), ["video", "render"]);
+    assert.deepEqual(proposal.spec.operations.map(operation => operation.quotePerAttempt.amountMinor), [0, 0], "恰好零报价不改变媒体操作的授权语义");
+    assert.equal(counts().production_runs, 0);
+    assert.equal(counts().authorizations, 0);
+    const admitted = runtime.service.acceptProposal(scope.ownerId, proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+    assert.equal(admitted.run.origin.kind, "proposal");
+    assert.notEqual(admitted.run.finance, null);
+    assert.equal(counts().proposals, 1);
+    assert.equal(counts().authorizations, 1);
+    assert.equal(counts().production_runs, 1);
+    assert.equal(counts().production_snapshots, 1);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_operations").get() as { n: number }).n, 2, "一次授权完整受理两操作，不拆单");
+  } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it("DGR-03 正式批次 native 视频在前、工程图片在后仍须真实认可，拒绝时不分配目标或 run", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-local-native-approval-"));
+  const runtime = await buildLocalRuntime(directory);
+  try {
+    const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "整批视频认可" }).conversation;
+    const scope = scopeOf(conversation.id);
+    const work = createWork(runtime.database, staticClock(), scope, "视频加封面");
+    let rejection = "";
+    runtime.host.faux!.setResponses([
+      fauxAssistantMessage([fauxToolCall("render_project", JSON.parse(canonicalJson({ workId: work.id, title: "正式视频加封面", scope: "正式整批", purpose: "production", inputSources: [], reviewInputs: [],
+        operations: [{ operationId: "video", outputSlot: "video", inputs: [],
+          parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 }, target: finalVideoTarget() },
+        { operationId: "cover", outputSlot: "image", inputs: [], parameters: { assembly: "code_project", projectRevision: { artifactId: "project-missing", revisionId: "revision-missing" },
+            entrypoint: { argv: ["node", "main.cjs"] }, outputPath: "out.png", expectedMediaKind: "image", format: "png", width: 160, height: 90 },
+          target: { group: { mode: "create", key: "cover", title: "封面", nextIntent: null }, item: { mode: "create", key: "cover", label: "封面", role: "storyboard", required: true } } }],
+      })))]),
+      context => {
+        const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.equal(result.isError, true);
+        rejection = result.content.filter(part => part.type === "text").map(part => part.text).join("");
+        return fauxAssistantMessage("请先认可正式制作依据。");
+      },
+    ]);
+    await runtime.service.sendMessage(scope.ownerId, scope.conversationId, { commandId: cmd(), text: "正式制作视频和封面", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null });
+    await waitForRequest(runtime, conversation.id);
+    assert.match(rejection, /正式视频制作需要先获得组审阅认可/);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
+    assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_snapshots").get() as { n: number }).n, 0);
+    assert.deepEqual(runtime.service.snapshot(scope.ownerId, scope.conversationId).works.find(entry => entry.id === work.id)!.reviewGroups, []);
+  } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
 });

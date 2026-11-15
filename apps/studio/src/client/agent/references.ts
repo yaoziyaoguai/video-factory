@@ -37,5 +37,12 @@ export async function hydrateReferences(messages: Message[], known: ReferenceEnt
       .map(id => read(`artifact:${id}`, () => agentApi.readArtifactHead(id), item => { artifacts.set(id, item); })),
     ...[...refs].filter(([key]) => !cachedRevisions[key]).map(([key, ref]) => read(`revision:${key}`, () => agentApi.readRevision(ref.artifactId, ref.revisionId), item => { revisions[key] = item; })),
   ]);
+  // 认可版可早于当前 head，也不一定在消息首页；始终读取投影所指的准确修订。
+  await Promise.all([...artifacts.values()].filter(head => head.standaloneApproval).map(head => {
+    const revisionId = head.standaloneApproval!.revisionId;
+    const key = `${head.id}:${revisionId}`;
+    return cachedRevisions[key] || revisions[key] ? Promise.resolve()
+      : read(`revision:${key}`, () => agentApi.readRevision(head.id, revisionId), item => { revisions[key] = item; });
+  }));
   return { artifacts: [...artifacts.values()], proposals: [...proposals.values()], runs: [...runs.values()], revisions, errors };
 }

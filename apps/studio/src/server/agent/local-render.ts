@@ -488,32 +488,35 @@ export class LocalRenderPort implements MediaExecutionPort {
         `工程封存于执行镜像 ${content.runtimeImage}，当前宿主是 ${image}；环境不匹配，本工程不能在此宿主执行。`);
     }
     let output: Buffer;
+    let executionTail = Buffer.alloc(0);
+    let stage = "恢复工程";
     try {
       for (const file of content.files) {
+        stage = `恢复文件 ${file.relativePath}`;
         await this.creative.writeFile(workspace, file.relativePath,
           readFileSync(this.blobs.filePath(this.blobs.get(run.owner_id, file.blobId).digest)));
       }
       for (const resolved of input.resolvedInputs) {
+        stage = `输入落位（slot=${resolved.slot}）`;
         const blob = this.blobs.get(run.owner_id, resolved.blobId);
         await this.creative.writeFile(workspace,
           codeProjectInputPath(resolved.slot, blob.mime_type as MediaContent["mimeType"]),
           readFileSync(this.blobs.filePath(blob.digest)));
       }
       // 冻结工程的 entrypoint 是执行权威：argv 逐项直传进程，不经 shell 重新解释。
+      stage = "执行入口";
       const execution = await this.creative.executeArgv(workspace, content.entrypoint.argv,
-        { timeout: Math.ceil((this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000), ...(signal ? { signal } : {}) });
+        { timeout: Math.ceil((this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000), ...(signal ? { signal } : {}),
+          // 宿主已合流 stdout/stderr；只留本次执行尾部供 read_run 展开，不新增日志协议。
+          onData: chunk => { executionTail = Buffer.concat([executionTail, chunk]).subarray(-8192); } });
       if (execution.exitCode !== 0) {
-        return this.terminal(input.attemptId, "failed", `工程入口命令未成功结束（exit=${execution.exitCode ?? "null"}），未生成成品。`);
+        return this.terminal(input.attemptId, "failed", `工程入口命令未成功结束（exit=${execution.exitCode ?? "null"}），未生成成品。${executionTail.length ? `\n执行输出（末尾）：\n${executionTail.toString("utf8").trim()}` : ""}`);
       }
-      // 输出位初始为空（outputPath 与封存文件、输入落位分离），因此读不到就只能是本次执行没有产生输出。
-      try { output = await this.creative.readFile(workspace, parameters.outputPath); }
-      catch {
-        return this.terminal(input.attemptId, "failed",
-          `工程正常结束但没有产生声明的输出 ${parameters.outputPath}；本次执行没有成品，不能交付旧文件。`);
-      }
+      stage = `读取声明输出 ${parameters.outputPath}`;
+      output = await this.creative.readFile(workspace, parameters.outputPath);
     } catch (error) {
       if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
-      return this.terminal(input.attemptId, "failed", `代码工程执行失败：${error instanceof Error ? error.message : String(error)}`);
+      return this.terminal(input.attemptId, "failed", `代码工程${stage}失败：${error instanceof Error ? error.message : String(error)}；当前无法确认输出，尚未交付。${executionTail.length ? `\n执行输出（末尾）：\n${executionTail.toString("utf8").trim()}` : ""}`);
     }
     // 成品先按声明媒体类型校验，再原子落盘与登记；规格不符如实失败。
     const temporary = path.join(attemptDir, "output.part");

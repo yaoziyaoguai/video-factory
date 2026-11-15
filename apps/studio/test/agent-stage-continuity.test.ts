@@ -11,7 +11,7 @@ import { createWork, parseCreationState, writeWorkState } from "../src/server/ag
 import { newAgentId } from "../src/server/agent/util.js";
 import { deliverReviewDrafts, finalVideoTarget, seedConfirmedWork, type ConfirmedReviewWork } from "./helpers/creative-work-fixture.js";
 import type {
-  ArtifactHead, ArtifactRevision, ContentSource, ContentSourceInput, DeliveryItem, ProductionIntent, Proposal, Work,
+  ArtifactHead, ArtifactRevision, ContentSource, ContentSourceInput, DeliveryItem, ProductionIntent, Proposal, Work, WorkReviewConfirmation,
 } from "../src/shared/agent/generated/contracts.js";
 
 // R1 组审阅连续性验收：当前稿认可/继续、首次采用、交付归属、在途边界（§4.2.1）、意见真实归属（F03–F09）。
@@ -508,7 +508,8 @@ it("R1.2 上游视觉认可可跨组交付成片，完整保留引用；错事�
     const delivered = artifactOf(f, "准确引用视觉的成片");
     const revision = f.app.service.readRevision("local-owner", delivered.id, delivered.revisionId);
     assert.deepEqual(revision.creationBinding, { workId: work.id, groupId: final.group.id, itemId: final.item.id,
-      inputSources: [v2], reviewInputs: [reviewInput], purpose: "draft" });
+      inputSources: [v2], reviewInputs: [reviewInput], purpose: "draft",
+      runId: rendered.id, adoptedFrom: { artifactId: video.artifactId, revisionId: video.revisionId } });
     assert.equal(revisionDraftOf(videoItemOf(f, work.id).item).revisionId, delivered.revisionId);
     assert.equal(videoItemOf(f, work.id).item.approved, null, "跨组交付不会认可新成片");
     const other = seedConfirmedWork(f.app.database, new Date().toISOString(), { ownerId: "local-owner", conversationId: f.conversation.id }, "另一作品");
@@ -970,6 +971,176 @@ it("R1.4 原生 steer 后的意见按实际消息所属事项进入下一次 Pi 
   } finally { await f.close(); }
 });
 
+it("DG-R1 DGR05 公开 start_work 从空 works 采用独立 v2，原稿与独立 v1 认可不变", async () => {
+  const f = await setup(); try {
+    await turn(f, [deliverStep([scriptItem("先独立写的脚本", "第一版内容。")]), fauxAssistantMessage("先只交付脚本。")], "只写脚本，暂不做视频。");
+    const v1 = artifactOf(f, "先独立写的脚本");
+    assert.equal((await postMessage(f, chatInput("认可第一版。", { reviewConfirmation: {
+      kind: "standalone_artifact", artifactId: v1.id, revisionId: v1.revisionId, action: "approve",
+    } }))).statusCode, 202);
+    await turn(f, [deliverStep([{ mode: "revise", artifactId: v1.id, baseRevisionId: v1.revisionId,
+      title: v1.title, kind: "script", content: { format: "markdown", text: "第二版内容。" } }]), fauxAssistantMessage("第二版仍是草稿。")], "改到第二版，仍不做视频。");
+    const v2 = artifactOf(f, v1.title);
+    const revision = f.app.service.readRevision("local-owner", v2.id, v2.revisionId);
+    assert.equal(v2.standaloneApproval?.revisionId, v1.revisionId);
+    assert.deepEqual(works(f), [], "真实采用之前没有作品，也没有 fixture 预建组");
+    const artifactCount = countIn(f, "FROM artifacts"), revisionCount = countIn(f, "FROM artifact_revisions");
+    const text = "现在正式开始视频 A，采用这份第二版脚本。";
+    await turn(f, [fauxAssistantMessage([fauxToolCall("start_work", { title: "正式视频 A", adoptContent: {
+      kind: "artifact_revision", artifactId: v2.id, revisionId: v2.revisionId, digest: revision.digest,
+    } })]), fauxAssistantMessage("A 已采用第二版内容。")], text);
+    assert.equal(works(f).length, 1, "公开工具必须创建一次作品");
+    const work = works(f)[0]!;
+    const item = contentItemOf(f, work.id).item;
+    assert.deepEqual(item.draft, { kind: "artifact_revision", artifactId: v2.id, revisionId: v2.revisionId, digest: revision.digest });
+    assert.deepEqual(item.approved, item.draft, "这次明确采用意图同时形成准确内容确认");
+    assert.notEqual(item.confirmationId, v2.standaloneApproval!.confirmationId);
+    const action = f.app.service.snapshot("local-owner", f.conversation.id).messages.items.find(message => message.text === text)!;
+    const fact = f.app.database.prepare("SELECT subject_scope,work_id,action,source_id FROM work_review_confirmations WHERE id=?").get(item.confirmationId);
+    assert.deepEqual(fact, { subject_scope: "work_item", work_id: work.id, action: "approve", source_id: action.id });
+    assert.deepEqual(f.app.service.readArtifactHead("local-owner", v2.id), v2, "独立 head 和 v1 认可完全保持");
+    assert.equal(countIn(f, "FROM artifacts"), artifactCount);
+    assert.equal(countIn(f, "FROM artifact_revisions"), revisionCount, "采用不复制正文、不建立产物或修订");
+    assert.equal(countIn(f, "FROM proposals"), 0);
+    assert.equal(countIn(f, "FROM production_runs"), 0, "明确采用不自动渲染");
+    await turn(f, [startWorkStep("只开始 B"), fauxAssistantMessage("B 只开始，尚无内容。")], "再开始视频 B，暂时不采用内容。");
+    assert.deepEqual(works(f).find(entry => entry.title === "只开始 B")!.reviewGroups, [], "title-only 保持空组");
+  } finally { await f.close(); }
+});
+
+it("DG-R1 DGR05 start_work 采用真实消息，拒绝其他作品、越权、未来来源和结构化按钮挪用", async () => {
+  const f = await setup();
+  let release = () => {};
+  try {
+    const originalText = "清晨的路灯逐个熄灭，镜头沿街道向前。";
+    await turn(f, [fauxAssistantMessage("已记下原文。")], originalText);
+    const original = f.app.service.snapshot("local-owner", f.conversation.id).messages.items.find(message => message.text === originalText)!;
+    await turn(f, [fauxAssistantMessage([fauxToolCall("start_work", { title: "原文采用 A", adoptContent: {
+      kind: "message_text", messageId: original.id, text: original.text,
+    } })]), fauxAssistantMessage("已直接采用原文。")], "现在开始视频 A，直接采用刚才那段原文。");
+    const a = works(f)[0]!;
+    assert.deepEqual(contentItemOf(f, a.id).item.approved, { kind: "message_text", messageId: original.id, text: original.text, author: "user" });
+    assert.equal(countIn(f, "FROM artifacts"), 0, "真实消息采用不创建文本副本");
+    await turn(f, [deliverStep([
+      scriptItem("还独立的脚本", "后续可明确采用。"),
+      { mode: "create", title: "普通提示词边界", kind: "prompt", content: { format: "markdown", text: "提示词不能在此冒充独立脚本。" } },
+      scriptItem("已属于 A 的脚本", "这份主稿只属于 A。"),
+    ], [newGroupDelivery(a.id, "content", "bound", 2)]), fauxAssistantMessage("三份稿件已交付。")]);
+    const source = (ownerId: string, artifact: ArtifactHead) => ({ kind: "artifact_revision" as const, artifactId: artifact.id,
+      revisionId: artifact.revisionId, digest: f.app.service.readRevision(ownerId, artifact.id, artifact.revisionId).digest });
+    const independent = source("local-owner", artifactOf(f, "还独立的脚本"));
+    const bound = source("local-owner", artifactOf(f, "已属于 A 的脚本"));
+    const prompt = source("local-owner", artifactOf(f, "普通提示词边界"));
+    const foreignConversation = f.app.service.createConversation("other-owner", { commandId: cmd(), title: "其他归属" }).conversation;
+    const foreignDelivery = deliverReviewDrafts(f.app.database, new Date().toISOString(), { ownerId: "other-owner", conversationId: foreignConversation.id }, {
+      items: [scriptItem("其他人的稿", "不允许跨 owner 采用。")],
+    });
+    const foreign = source("other-owner", f.app.service.readArtifactHead("other-owner", foreignDelivery.receipt.revisions[0]!.artifactId));
+    const tools = new BusinessTools(f.app.database, () => new Date().toISOString(), () => OFFLINE_QUOTE_CATALOG);
+    const held = await holdRequest(f, "我再明确选择采用来源。"); release = held.release;
+    const futureDelivery = deliverReviewDrafts(f.app.database, new Date().toISOString(), { ownerId: "local-owner", conversationId: f.conversation.id }, {
+      items: [scriptItem("当前消息之后才交付", "不能由先前消息提前认可。")],
+    });
+    const future = source("local-owner", f.app.service.readArtifactHead("local-owner", futureDelivery.receipt.revisions[0]!.artifactId));
+    const counts = () => ["works", "work_review_confirmations", "proposals", "production_runs"].map(table => countIn(f, `FROM ${table}`));
+    const before = counts();
+    for (const [adoptContent, error] of [[prompt, /脚本或真实消息/], [bound, /属于其他视频/], [foreign, /没有找到/],
+      [{ ...independent, digest: "wrong-digest" }, /摘要不一致/], [future, /尚未交付|提前认可/],
+      [{ kind: "message_text" as const, messageId: original.id, text: "冒充原文" }, /原文逐字一致/]] as const) {
+      await assert.rejects(() => tools.startWork(held.context as never, { title: "不得残留的作品", adoptContent }), error);
+      assert.deepEqual(counts(), before, "失败不留下新作品、认可或制作记录");
+    }
+    release(); await waitIdle(f);
+
+    const boundTarget = workOf(f, a.id).reviewGroups.flatMap(group => group.items.map(item => ({ group, item })))
+      .find(({ item }) => item.draft?.kind === "artifact_revision" && item.draft.artifactId === bound.artifactId)!;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.app.faux!.setResponses([async () => { entered(); await gate; return fauxAssistantMessage("继续工作结束。"); }]);
+    const response = await confirmReview(f, { workId: a.id, groupId: boundTarget.group.id,
+      items: [{ itemId: boundTarget.item.id, source: bound }], action: "approve_and_continue" }, "认可 A 脚本并继续。");
+    assert.equal(response.statusCode, 202);
+    await ready;
+    const receipt = response.json();
+    const request = f.app.database.prepare("SELECT execution_epoch FROM requests WHERE id=?").get(receipt.requestId) as { execution_epoch: number };
+    const context = { actorId: "local-owner", conversationId: f.conversation.id, requestId: receipt.requestId,
+      executionEpoch: request.execution_epoch, target: null, toolCallId: "call-adopt-button", actionSourceMessageId: receipt.messageId };
+    const beforeButton = counts();
+    await assert.rejects(() => tools.startWork(context as never, { title: "按钮没有要求采用的新作品", adoptContent: independent }), /本次.*认可动作|原始.*动作/);
+    assert.deepEqual(counts(), beforeButton, "认可并继续不能借开始作品改认其他稿件");
+    release(); await waitIdle(f);
+  } finally { release(); await f.close(); }
+});
+
+it("DG-R1 DGR05 独立脚本准确认可、改稿保留旧认可，按钮不排 Pi 且后续采用另建真实作品确认", async () => {
+  const f = await setup();
+  try {
+    await turn(f, [fauxAssistantMessage("先聊一聊。")], "只讨论想法，不做视频。");
+    assert.equal(f.app.service.snapshot("local-owner", f.conversation.id).artifacts.items.length, 0);
+    await turn(f, [deliverStep([
+      { mode: "create", title: "普通提示词", kind: "prompt", content: { format: "markdown", text: "普通提示词。" } },
+      scriptItem("独立脚本", "第一版脚本。"),
+    ]), fauxAssistantMessage("脚本和提示词已交付。")], "写一份提示词和独立脚本，暂不做视频。");
+    const v1 = artifactOf(f, "独立脚本");
+    const prompt = artifactOf(f, "普通提示词");
+    const before = () => ["works", "proposals", "production_runs"].map(table => countIn(f, `FROM ${table}`));
+    assert.deepEqual(before(), [0, 0, 0]);
+    const assistantBefore = assistantCount(f);
+    const deliveredBefore = countIn(f, "FROM events WHERE kind='artifact.delivered'");
+    const approval = { kind: "standalone_artifact", artifactId: v1.id, revisionId: v1.revisionId, action: "approve" };
+    const body = chatInput("认可这一版脚本。", { reviewConfirmation: approval });
+    const response = await postMessage(f, body);
+    assert.equal(response.statusCode, 202, response.body);
+    const receipt = response.json();
+    const replay = await postMessage(f, body);
+    assert.equal(replay.statusCode, 202);
+    assert.equal(replay.json().messageId, receipt.messageId);
+    assert.equal(replay.json().replayed, true);
+    const head1 = artifactOf(f, "独立脚本");
+    assert.equal(head1.standaloneApproval?.revisionId, v1.revisionId);
+    assert.ok(head1.standaloneApproval?.confirmationId);
+    assert.deepEqual(before(), [0, 0, 0], "独立认可不创建作品/提案/运行");
+    assert.equal(assistantCount(f), assistantBefore, "按钮不触发 Pi");
+    assert.equal(countIn(f, "FROM events WHERE kind='artifact.delivered'"), deliveredBefore, "认可只刷新消息，不伪造新产物事件");
+    const fact = f.app.database.prepare("SELECT subject_scope,work_id,group_id,item_id,source_id FROM work_review_confirmations WHERE id=?")
+      .get(head1.standaloneApproval!.confirmationId);
+    assert.deepEqual(fact, { subject_scope: "standalone_artifact", work_id: null, group_id: null, item_id: null, source_id: receipt.messageId });
+    const badPrompt = await postMessage(f, chatInput("认可提示词。", { reviewConfirmation: { ...approval, artifactId: prompt.id, revisionId: prompt.revisionId } }));
+    assert.equal(badPrompt.statusCode, 400);
+
+    await turn(f, [deliverStep([{ mode: "revise", artifactId: v1.id, baseRevisionId: v1.revisionId,
+      title: "独立脚本", kind: "script", content: { format: "markdown", text: "第二版脚本。" } }]), fauxAssistantMessage("改到第二版。")], "只改脚本，不开始视频。");
+    const v2 = artifactOf(f, "独立脚本");
+    assert.notEqual(v2.revisionId, v1.revisionId);
+    assert.deepEqual(v2.standaloneApproval, head1.standaloneApproval, "新稿不继承为已认可；右侧仍读准确 v1");
+    assert.deepEqual(f.app.service.listArtifacts("local-owner", f.conversation.id, undefined, 50).items.find(item => item.id === v1.id)?.standaloneApproval,
+      head1.standaloneApproval, "列表与刷新使用真实旧版确认");
+    assert.equal(f.app.service.readRevision("local-owner", v1.id, head1.standaloneApproval!.revisionId).content.format, "markdown");
+    const stale = await postMessage(f, chatInput("认可旧按钮。", { reviewConfirmation: approval }));
+    assert.equal(stale.statusCode, 409, "新认可必须指向当前修订");
+    let toolResult: { content: unknown; details: unknown } | undefined;
+    await turn(f, [fauxAssistantMessage([fauxToolCall("confirm_review", { ...approval, revisionId: v2.revisionId })]), context => {
+      const result = context.messages.filter(entry => entry.role === "toolResult").at(-1)!;
+      toolResult = { content: JSON.parse(result.content.filter(part => part.type === "text").map(part => part.text).join("")), details: result.details };
+      return fauxAssistantMessage("第二版已认可。");
+    }], "认可当前第二版脚本，仍先不做视频。");
+    const confirmedV2 = artifactOf(f, "独立脚本");
+    assert.equal(confirmedV2.standaloneApproval?.revisionId, v2.revisionId, "自然语言工具同样认可准确独立稿");
+    assert.deepEqual(toolResult?.content, { kind: "standalone_artifact", artifact: confirmedV2, confirmationId: confirmedV2.standaloneApproval!.confirmationId });
+    assert.deepEqual(toolResult?.details, { artifactId: v1.id, confirmationId: confirmedV2.standaloneApproval!.confirmationId });
+    assert.deepEqual(before(), [0, 0, 0]);
+
+    const revision = f.app.service.readRevision("local-owner", v2.id, v2.revisionId);
+    await turn(f, [fauxAssistantMessage([fauxToolCall("start_work", { title: "后续明确采用的视频", adoptContent: {
+      kind: "artifact_revision", artifactId: v2.id, revisionId: v2.revisionId, digest: revision.digest,
+    } })]), fauxAssistantMessage("新视频已采用第二版。")], "现在开始这条视频，并采用已认可的第二版脚本。");
+    const adopted = contentItemOf(f, works(f)[0]!.id).item;
+    assert.equal(adopted.approved?.kind === "artifact_revision" ? adopted.approved.revisionId : null, v2.revisionId);
+    assert.notEqual(adopted.confirmationId, confirmedV2.standaloneApproval!.confirmationId, "独立确认不跨 work 充当制作依据");
+  } finally { await f.close(); }
+});
+
 it("R1.5 普通聊天与 Prompt 交付不登记创作事项；独立配音/图片正常制作且不建可见视频事项", async () => {
   const f = await setup(); try {
     await turn(f, [fauxAssistantMessage("Prompt：清晨沿山路行进的固定镜头。")], "给我一条山路视频的 Prompt，先不制作");
@@ -1056,6 +1227,165 @@ async function produceNextVideoRevision(f: Fixture, basis: { artifactId: string;
   assert.equal((await driveToTerminal(f, runId)).state, "succeeded");
   return revisionDraftOf(videoItemOf(f, workId).item);
 }
+
+it("DG-R1 候选普通定稿仍核对实际采用的必要依据，不要求未采用候选认可", async () => {
+  const f = await setup(); try {
+    await turn(f, [startWorkStep("候选定稿边界"), fauxAssistantMessage("已开始。")]);
+    const work = works(f)[0]!;
+    await turn(f, [deliverStep([scriptItem("实际采用的内容", "蓝色方块在绿色背景移动。"), scriptItem("未采用的背景候选", "这份不进入预览。")], [
+      newGroupDelivery(work.id), { ...newGroupDelivery(work.id, "scene", "unused", 1),
+        group: { mode: "create", key: "unused-group", title: "备选背景", nextIntent: null } },
+    ]), fauxAssistantMessage("内容和候选已交付。")]);
+    const content = contentItemOf(f, work.id);
+    const basis = revisionDraftOf(content.item);
+    const spec = videoSpec(work.id, basis, "仅试做预览", [], "preview");
+    spec.outputTarget = { group: { mode: "create", key: "preview", title: "预览", nextIntent: null },
+      item: { mode: "create", key: "clip", label: "预览", role: "clip", required: true } };
+    const proposal = (await f.app.service.prepareProposal("local-owner", f.conversation.id, { commandId: cmd(), spec })).proposal;
+    const accepted = f.app.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+    const run = await driveToTerminal(f, accepted.run.id);
+    assert.equal(run.state, "succeeded");
+    const original = run.outputRevisions[0]!;
+    deliverReviewDrafts(f.app.database, new Date().toISOString(), { ownerId: "local-owner", conversationId: f.conversation.id }, {
+      items: [{ mode: "create", title: "已有预览的成片候选", kind: "video", content: { format: "local_output", source: { kind: "artifact_revision", ...original } } }],
+      reviewGroups: [newGroupDelivery(work.id, "video")],
+    } as never);
+    const candidate = videoItemOf(f, work.id);
+    const finalize: WorkReviewConfirmation = { workId: work.id, groupId: candidate.group.id,
+      items: [{ itemId: candidate.item.id, source: revisionDraftOf(candidate.item) }], action: "finalize_video" };
+    const rejected = await confirmReview(f, finalize, "把这份候选定稿并入库。");
+    assert.equal(rejected.statusCode, 400, rejected.body);
+    assert.match(rejected.json().message, /脚本.*还未获得认可/);
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 0);
+    assert.equal((await confirmReview(f, { workId: work.id, groupId: content.group.id,
+      items: [{ itemId: content.item.id, source: basis }], action: "approve" })).statusCode, 202);
+    assert.equal((await confirmReview(f, finalize, "认可必要内容后定稿这份候选。")).statusCode, 202);
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 1);
+    assert.equal(itemOfRole(f, work.id, "clip").item.approved, null, "原预览不被暗中补认可");
+    assert.equal(itemOfRole(f, work.id, "scene").item.approved, null, "未采用的必选候选保持待认可");
+  } finally { await f.close(); }
+});
+
+it("DG-R1 DGR04 不提前认可同一初始消息后生成的视频，同时间戳下仍按真实交付顺序判定", async () => {
+  const now = new Date().toISOString();
+  const f = await setup({ clock: () => now });
+  let release = () => {};
+  try {
+    const a = await produceFinalizableVideo(f, "初始委托边界");
+    const held = await holdRequest(f, "继续做新一版，最后直接定稿。"); release = held.release;
+    const basis = artifactOf(f, "初始委托边界画面依据");
+    const basisRevision = f.app.service.readRevision("local-owner", basis.id, basis.revisionId);
+    const future = await produceNextVideoRevision(f, { artifactId: basis.id, revisionId: basis.revisionId, digest: basisRevision.digest },
+      a.workId, a.reviewInput, "后来才出现的新视频");
+    const target = videoItemOf(f, a.workId);
+    const tools = new BusinessTools(f.app.database, () => now, () => OFFLINE_QUOTE_CATALOG);
+    for (const action of ["approve", "finalize_video"] as const) {
+      await assert.rejects(() => tools.confirmReview(held.context as never, { workId: a.workId, groupId: target.group.id,
+        items: [{ itemId: target.item.id, source: future }], action }), /尚未交付|提前认可/);
+    }
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 0);
+    release(); await waitIdle(f);
+    await turn(f, [fauxAssistantMessage([fauxToolCall("confirm_review", { workId: a.workId, groupId: target.group.id,
+      items: [{ itemId: target.item.id, source: future }], action: "finalize_video" })]), fauxAssistantMessage("本次已明确认可成片。")], "这版现在看完了，定稿并入库。");
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 1);
+  } finally { release(); await f.close(); }
+});
+
+it("DG-R1 DGR04 自然语言复合认可与定稿可共存，已消费 steer 切换为新动作来源", async () => {
+  const f = await setup();
+  let release = () => {};
+  try {
+    await turn(f, [startWorkStep("A 脚本事项"), fauxAssistantMessage("A 已开始。")]);
+    const a = works(f)[0]!;
+    await turn(f, [deliverStep([scriptItem("A 独立内容稿", "A 的准确脚本。")], [newGroupDelivery(a.id)]), fauxAssistantMessage("A 脚本已交付。")]);
+    const content = contentItemOf(f, a.id);
+    const scriptApproval: WorkReviewConfirmation = { workId: a.id, groupId: content.group.id,
+      items: [{ itemId: content.item.id, source: revisionDraftOf(content.item) }], action: "approve" };
+    const b = await produceFinalizableVideo(f, "B 成片事项");
+    const target = videoItemOf(f, b.workId);
+    await turn(f, [fauxAssistantMessage([
+      fauxToolCall("confirm_review", { ...scriptApproval }),
+      fauxToolCall("confirm_review", { workId: b.workId, groupId: target.group.id,
+        items: [{ itemId: target.item.id, source: b.video }], action: "finalize_video" }),
+    ]), fauxAssistantMessage("A 脚本已认可，B 已定稿。")], "认可 A 脚本，把 B 成片定稿并入库。");
+    assert.ok(contentItemOf(f, a.id).item.confirmationId);
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 1);
+
+    const basis = artifactOf(f, "B 成片事项画面依据");
+    const basisRevision = f.app.service.readRevision("local-owner", basis.id, basis.revisionId);
+    const v2 = await produceNextVideoRevision(f, { artifactId: basis.id, revisionId: basis.revisionId, digest: basisRevision.digest },
+      b.workId, b.reviewInput, "B 第二版");
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let frame: { actionSourceMessageId: string; reviewConfirmation: unknown } | undefined;
+    f.app.faux!.setResponses([
+      async () => { entered(); await gate; return fauxAssistantMessage("先听补充。"); },
+      fauxAssistantMessage([fauxToolCall("confirm_review", { workId: b.workId, groupId: target.group.id,
+        items: [{ itemId: target.item.id, source: v2 }], action: "finalize_video" })]),
+      context => {
+        const last = context.messages.at(-1)!;
+        const text = typeof last.content === "string" ? last.content : last.content.filter(block => block.type === "text").map(block => block.text).join("");
+        frame = JSON.parse(text.slice("[frame-current-state]".length).split("\n")[0]!);
+        return fauxAssistantMessage("B 第二版已定稿。");
+      },
+    ]);
+    const response = await confirmReview(f, { ...scriptApproval, action: "approve_and_continue" }, "认可 A 并继续。");
+    assert.equal(response.statusCode, 202);
+    await ready;
+    const original = response.json();
+    const stored = f.app.database.prepare("SELECT review_confirmation_json FROM messages WHERE id=?").get(original.messageId) as { review_confirmation_json: string };
+    assert.deepEqual(JSON.parse(stored.review_confirmation_json), { ...scriptApproval, action: "approve_and_continue" }, "保存原按钮完整 payload");
+    const steer = await postMessage(f, chatInput("补充：现在把 B 第二版定稿并入库。", { mode: "steer", steerRequestId: original.requestId }));
+    assert.equal(steer.statusCode, 202);
+    release(); await waitIdle(f);
+    assert.equal(frame?.actionSourceMessageId, steer.json().messageId);
+    assert.equal(frame?.reviewConfirmation, null, "新自然语言来源不继承原按钮限制");
+    const final = f.app.database.prepare("SELECT source_id FROM work_review_confirmations WHERE action='finalize_video' AND json_extract(subject_json,'$.revisionId')=?")
+      .get(v2.revisionId) as { source_id: string };
+    assert.equal(final.source_id, steer.json().messageId, "确认事实使用实际消费的 steer 消息");
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 2);
+  } finally { release(); await f.close(); }
+});
+
+it("DG-R1 DGR04 按钮认可并继续不能换动作或目标，合法重放和后续创作保持可用", async () => {
+  const f = await setup();
+  let release = () => {};
+  try {
+    const a = await produceFinalizableVideo(f, "按钮边界短片");
+    const target = videoItemOf(f, a.workId);
+    const confirmation: WorkReviewConfirmation = { workId: a.workId, groupId: target.group.id,
+      items: [{ itemId: target.item.id, source: a.video }], action: "approve_and_continue" };
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.app.faux!.setResponses([async () => { entered(); await gate; return fauxAssistantMessage("继续工作已完成。"); }]);
+    const response = await confirmReview(f, confirmation, "认可并继续。");
+    assert.equal(response.statusCode, 202);
+    await ready;
+    const receipt = response.json();
+    const request = f.app.database.prepare("SELECT execution_epoch FROM requests WHERE id=?").get(receipt.requestId) as { execution_epoch: number };
+    const context = { actorId: "local-owner", conversationId: f.conversation.id, requestId: receipt.requestId,
+      executionEpoch: request.execution_epoch, target: null, toolCallId: "call-button", actionSourceMessageId: receipt.messageId };
+    const tools = new BusinessTools(f.app.database, () => new Date().toISOString(), () => OFFLINE_QUOTE_CATALOG);
+
+    await assert.rejects(() => tools.confirmReview(context as never, { ...confirmation, action: "finalize_video" }), /本次.*认可动作|原始.*动作/);
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 0, "按钮认可不能误入库");
+    const content = contentItemOf(f, a.workId);
+    await assert.rejects(() => tools.confirmReview(context as never, { ...confirmation,
+      groupId: content.group.id, items: [{ itemId: content.item.id, source: content.item.approved! }] }), /本次.*认可动作|原始.*动作/);
+    const duplicate = await tools.confirmReview(context as never, confirmation);
+    assert.equal("id" in duplicate ? duplicate.id : null, a.workId, "同一合法动作仍可去重返回");
+    await tools.deliverArtifacts({ ...context, toolCallId: "call-next-draft" } as never,
+      { items: [scriptItem("认可后的下一份稿", "下一组创作仍可保存。")], reviewGroups: [newGroupDelivery(a.workId, "plan")] } as never);
+    assert.ok(artifactOf(f, "认可后的下一份稿"), "认可来源限制不阻断合法创作");
+    release(); await waitIdle(f);
+
+    await turn(f, [fauxAssistantMessage([fauxToolCall("confirm_review", { ...confirmation, action: "finalize_video" })]),
+      fauxAssistantMessage("已按本条新消息定稿。")], "这版成片定稿并入库。");
+    assert.equal(f.app.service.listLibraryVideos("local-owner", undefined, 50).items.length, 1, "新自然语言消息可以明确定稿");
+  } finally { release(); await f.close(); }
+});
 
 it("C3 认可与定稿分离：普通认可不吞显式定稿，finalizedSource 只读投影准确，新 v2 不继承定稿", async () => {
   const f = await setup(); try {

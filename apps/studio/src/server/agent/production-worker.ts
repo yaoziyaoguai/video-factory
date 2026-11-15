@@ -10,7 +10,7 @@ import { canonicalJson, digestOf, newAgentId, type AgentClock } from "./util.js"
 import { ProductionBlobs, type BlobRow } from "./production-blobs.js";
 import type { ProductionCrashHook } from "./production-service.js";
 import { aggregateSources, mergeSources, recordBlobSources } from "./material-store.js";
-import { attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, quoteMinor, runRow, snapshotFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
+import { attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, operationOutputRevision, quoteMinor, runRow, snapshotFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
 import { issueSubmitPermit } from "./submit-permit.js";
 import { parseCreationState, setReviewItemDraft, setVideoOutput, type WorkRow } from "./creative-work.js";
 
@@ -454,7 +454,7 @@ export class ProductionWorker {
     this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,?,?,?,?)")
       .run(revisionId, artifactId, run.id, digestOf(content), canonicalJson(content), binding ? canonicalJson(binding) : null, now);
     this.db.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES(?,?)").run(revisionId, blob.id);
-    this.db.prepare("UPDATE production_operations SET output_blob_id=? WHERE run_id=? AND id=?").run(blob.id, run.id, op.operationId);
+    this.db.prepare("UPDATE production_operations SET output_blob_id=?,output_revision_id=? WHERE run_id=? AND id=?").run(blob.id, revisionId, run.id, op.operationId);
     insertEvent(this.db, now, { ownerId: run.owner_id, conversationId: run.conversation_id, kind: "artifact.delivered", entityId: artifactId, entityVersion: 1, notification: "new_output" });
   }
   // unknown 的用户说明按事实来源区分：本地无退出证据、供应商无任务身份，或仍在正常查询原任务。
@@ -483,7 +483,9 @@ export class ProductionWorker {
     const failedAttempt = failedOp && attempts.find(a => a.operation_id === failedOp.id && (a.state === "failed" || a.state === "cancelled"));
     const row = failedAttempt ? this.db.prepare("SELECT observation_json FROM ledger_observations WHERE attempt_id=? ORDER BY id DESC LIMIT 1").get(failedAttempt.id) as { observation_json: string } | undefined : undefined;
     const detail = row ? (JSON.parse(row.observation_json) as ExecutionObservation).message : null;
-    return [detail?.slice(0, 1000), "本次制作未完成，已保留产生的内容。"].filter(Boolean).join(" ");
+    // 本地执行已保留有界输出尾部，不能再取开头1000字丢掉真正报错；供应商说明沿用原上限。
+    const limit = failedOp && (JSON.parse(failedOp.spec_json) as OperationSpec).kind === "render" ? 9000 : 1000;
+    return [detail?.slice(0, limit), "本次制作未完成，已保留产生的内容。"].filter(Boolean).join(" ");
   }
 
   private fail(runId: string, code: NonNullable<Run["issue"]>["code"], message: string): void {
@@ -587,12 +589,8 @@ function operationSources(db: AgentDatabase, run: RunRow, op: OperationSpec): { 
     } else if (input.kind === "project_revision") {
       pushProject(input.projectRevision);
     } else if (input.kind === "operation_output") {
-      const producer = db.prepare(`
-        SELECT ar.creation_binding_json AS binding FROM production_operations po
-        JOIN revision_blob_links l ON l.blob_id = po.output_blob_id
-        JOIN artifact_revisions ar ON ar.id = l.revision_id AND ar.run_id = po.run_id
-        WHERE po.run_id = ? AND po.id = ?`).get(run.id, input.producerOperationId) as { binding: string | null } | undefined;
-      const producerBinding = producer?.binding ? JSON.parse(producer.binding) as CreationBinding : null;
+      const producer = operationOutputRevision(db, run.id, input.producerOperationId);
+      const producerBinding = producer?.creation_binding_json ? JSON.parse(producer.creation_binding_json) as CreationBinding : null;
       if (!producerBinding) continue;
       for (const source of producerBinding.inputSources) {
         if (source.kind === "artifact_revision") pushSource(source.artifactId, source.revisionId, source.digest);

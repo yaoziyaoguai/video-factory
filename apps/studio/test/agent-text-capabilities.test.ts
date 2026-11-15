@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { calculateCost, InMemoryCredentialStore, type Model, type Usage } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { calculateCost, InMemoryCredentialStore, Type, type ImageContent, type Model, type Usage } from "@earendil-works/pi-ai";
+import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-responses-shared";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { convertToLlm, createAgentSession, createReadTool, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { CreativeRunner } from "../src/server/agent/creative-runner.js";
 import { PiRuntimeHost } from "../src/server/agent/pi-runtime.js";
 import type { PiTextRegistration } from "../src/server/agent/text-model-settings.js";
 import { defaultTextBindingOf, initializeTextModelSettings, textModelsView, textRegistrationOf } from "../src/server/agent/text-model-settings.js";
@@ -20,6 +26,203 @@ import { findOpenAIChatModel, openaiChatCatalog, resolveThinkingLevel, thinkingC
 const staticClock = () => "2026-10-29T00:00:00.000Z";
 const skillsRoot = path.resolve(import.meta.dirname, "../skills");
 const OPENAI = "https://api.openai.com/v1";
+
+// 无外部素材的 HD 图片：纹理施加编码压力，大/小字和色块供人工核对压缩后的可辨认度。
+function imageProjectionFixture(index: number): Buffer {
+  const width = 1920, height = 1080, stride = width * 3 + 1;
+  const rows = Buffer.alloc(stride * height);
+  let random = index + 1;
+  const pixel = (x: number, y: number, color: number[]) => {
+    const offset = y * stride + 1 + x * 3;
+    rows[offset] = color[0]!; rows[offset + 1] = color[1]!; rows[offset + 2] = color[2]!;
+  };
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    random ^= random << 13; random ^= random >>> 17; random ^= random << 5;
+    const shade = 40 + ((random >>> 0) % 160);
+    pixel(x, y, [shade, shade + x % 23, shade + y % 23]);
+  }
+  const box = (left: number, top: number, w: number, h: number, color: number[]) => {
+    for (let y = top; y < top + h; y++) for (let x = left; x < left + w; x++) pixel(x, y, color);
+  };
+  const glyphs: Record<string, string> = {
+    F: "11111/10000/10000/11110/10000/10000/10000", R: "11110/10001/10001/11110/10100/10010/10001",
+    A: "01110/10001/10001/11111/10001/10001/10001", M: "10001/11011/10101/10101/10001/10001/10001",
+    E: "11111/10000/10000/11110/10000/10000/11111", D: "11110/10001/10001/10001/10001/10001/11110",
+    T: "11111/00100/00100/00100/00100/00100/00100", I: "11111/00100/00100/00100/00100/00100/11111",
+    L: "10000/10000/10000/10000/10000/10000/11111", "0": "01110/10001/10011/10101/11001/10001/01110",
+    "1": "00100/01100/00100/00100/00100/00100/01110", "2": "01110/10001/00001/00010/00100/01000/11111",
+    "3": "11110/00001/00001/01110/00001/00001/11110", "4": "00010/00110/01010/10010/11111/00010/00010",
+  };
+  const text = (value: string, left: number, top: number, scale: number) => {
+    for (const [column, char] of [...value].entries()) {
+      for (const [y, row] of (glyphs[char]?.split("/") ?? []).entries()) {
+        for (const [x, bit] of [...row].entries()) if (bit === "1") box(left + (column * 6 + x) * scale, top + y * scale, scale, scale, [10, 10, 10]);
+      }
+    }
+  };
+  box(80, 80, 1000, 200, [255, 255, 255]); text(`FRAME 0${index + 1}`, 120, 120, 10);
+  box(80, 850, 650, 110, [255, 255, 255]); text("DETAIL 42", 110, 885, 4);
+  box(1300, 700, 180, 180, [25, 70, 235]);
+  for (let y = 380; y < 580; y++) for (let x = 1300; x < 1500; x++) if ((x - 1400) ** 2 + (y - 480) ** 2 < 100 ** 2) pixel(x, y, [235, 35, 25]);
+  const chunk = (name: string, content: Buffer) => {
+    const bytes = Buffer.concat([Buffer.from(name), content]);
+    let crc = -1;
+    for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
+    const size = Buffer.alloc(4), checksum = Buffer.alloc(4);
+    size.writeUInt32BE(content.length); checksum.writeUInt32BE((crc ^ -1) >>> 0);
+    return Buffer.concat([size, bytes, checksum]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+
+test("DGR-01 真实 SDK 异步 hook 投影新旧图片：空业务上下文、冷重载和 Responses input", { timeout: 180_000 }, async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-dgr-images-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fixtureSkills = path.join(directory, "skills"), skillDirectory = path.join(fixtureSkills, "image-fixture");
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(path.join(skillDirectory, "SKILL.md"), "---\nname: image-fixture\ndescription: Local image fixture\n---\nInspect local images.\n");
+  const fixtures = [0, 1, 2].map(imageProjectionFixture);
+  const files = await Promise.all(fixtures.map(async (bytes, index) => {
+    const file = path.join(directory, `frame-${index}.png`); await writeFile(file, bytes); return file;
+  }));
+  const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+  const originalBlobs = fixtures.map(hash);
+  let networkCalls = 0;
+  t.mock.method(globalThis, "fetch", () => { networkCalls++; throw new Error("DGR image projection must not call HTTP"); });
+  const host = new PiRuntimeHost({ dataDir: directory, skillsRoot: fixtureSkills,
+    creativeRunner: new CreativeRunner({ socketPath: path.join(directory, "unused.sock") }) });
+  await host.init(); t.after(() => host.dispose());
+  const model = findOpenAIChatModel("gpt-6.1-sol", OPENAI)!;
+  const selection = { model, thinkingLevel: "medium" as const };
+  const nativeRead = await createReadTool(directory).execute("native-read", { path: files[0]! });
+  const dimensionNote = /\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by [\d.]+ to map to original image\.\]/g;
+  const metrics = (messages: AgentMessage[]) => {
+    const input = convertResponsesMessages(model, normalizeContext({ messages: convertToLlm(messages) }), new Set([model.provider]));
+    const images: string[] = [], texts: string[] = [];
+    const json = JSON.stringify(input, (key, value) => {
+      if (key === "image_url" && typeof value === "string" && value.startsWith("data:image/")) images.push(value.slice(value.indexOf(",") + 1));
+      if ((key === "text" || key === "output" || key === "content") && typeof value === "string") texts.push(value);
+      return value;
+    });
+    return { imageCount: images.length, imageBase64Bytes: images.reduce((sum, image) => sum + Buffer.byteLength(image), 0),
+      maxImageBase64Bytes: Math.max(...images.map(image => Buffer.byteLength(image))), textBytes: Buffer.byteLength(texts.join("")), inputBytes: Buffer.byteLength(json) };
+  };
+  const measurements: unknown[] = [];
+  for (const count of [3, 20]) {
+    let businessContext: string | null = null;
+    let opened = await host.openConversationSession(`images-${count}`, "s1", [], [], selection, undefined, () => businessContext);
+    let session = opened.session;
+    t.after(() => session.dispose());
+    const manager = session.sessionManager;
+    manager.appendMessage({ role: "system", content: session.systemPrompt, timestamp: 1000,
+      sections: { cwd: `<cwd>\n${opened.workspaceDir}\n</cwd>`, skills: `References are relative to ${skillDirectory}.`, fixture: "<fixture>KEEP SYSTEM SECTION</fixture>" },
+      toolsAdded: [{ name: "read_artifact", description: "Local fixture", parameters: Type.Object({ artifactId: Type.String() }) }] });
+    manager.appendMessage({ role: "user", content: "已看过的帧需要在本会话保留。", timestamp: 1001 });
+    manager.appendCompaction("原摘要：保持准确工具关联和时间点，不代表看过完整视频。", null, 100);
+    let imageIndex = 0;
+    while (imageIndex < count) {
+      if (count === 20 && imageIndex === 18) {
+        manager.appendMessage({ role: "user", timestamp: 2000 + imageIndex,
+          content: [{ type: "text", text: "用户图片，保留这段原文。" }, { type: "image", mimeType: "image/png", data: fixtures[1]!.toString("base64") }] });
+        imageIndex++; continue;
+      }
+      const native = count === 20 && imageIndex === 19;
+      const toolName = native ? "read" : "read_artifact", callId = `image-call-${imageIndex}`;
+      manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: toolName, arguments: native ? { path: files[0]! } : { artifactId: `fixture-${imageIndex}` } }],
+        api: model.api, provider: model.provider, model: model.id, stopReason: "toolUse", timestamp: 1500 + imageIndex,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+      const content: typeof nativeRead.content = native ? nativeRead.content : [];
+      if (!native) for (let frame = 0; frame < (count === 3 ? 3 : 1); frame++) {
+        content.push({ type: "text", text: `t=${imageIndex * 1000}ms（代表帧）` },
+          { type: "text", text: "[Image: original 3840x2160, displayed at 1920x1080. Multiply coordinates by 2.00 to map to original image.]" },
+          { type: "image", mimeType: "image/png", data: fixtures[imageIndex % 3]!.toString("base64") });
+        imageIndex++;
+      }
+      manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName, content, isError: false, timestamp: 3000 + imageIndex });
+      if (native) imageIndex++;
+    }
+    manager.appendMessage({ role: "user", content: "继续修改，并保留所有帧的时间点。", timestamp: 4000 });
+    session.agent.state.messages = manager.buildSessionContext().messages;
+    const original = JSON.stringify(manager.getEntries()), sessionFile = manager.getSessionFile()!;
+    const originalJsonl = hash(await readFile(sessionFile)), historyHash = hash(JSON.stringify(session.agent.state.messages));
+    const before = metrics(session.agent.state.messages);
+    assert.equal(before.imageCount, count);
+    assert.ok(before.imageBase64Bytes > count * 256 * 1024, "fixture 必须复现旧图片超过发送预算");
+    for (const coldReload of [false, true]) {
+      if (coldReload) {
+        session.dispose();
+        opened = await host.openConversationSession(`images-${count}`, "s1", [], [], selection, undefined, () => businessContext);
+        session = opened.session;
+      }
+      const hookErrors: string[] = [];
+      const unsubscribe = session.extensionRunner.onError(error => hookErrors.push(error.error));
+      const source = session.agent.state.messages;
+      const projected = await session.agent.transformContext!(source);
+      unsubscribe();
+      assert.deepEqual(hookErrors, []);
+      const after = metrics(projected);
+      measurements.push({ count, coldReload, currentContext: businessContext, before, after, originalJsonl, historyHash });
+      t.diagnostic(JSON.stringify(measurements.at(-1)));
+      assert.equal(after.imageCount, count, "所有真正 image 块仍在 Responses input 中");
+      assert.ok(after.maxImageBase64Bytes <= 256 * 1024, `单图 base64 超限：${after.maxImageBase64Bytes}`);
+      assert.ok(after.imageBase64Bytes <= count * 256 * 1024);
+      const projectedSource: AgentMessage[] = businessContext === null ? projected : projected.slice(0, -1);
+      assert.equal(projectedSource.length, source.length);
+      for (const [index, message] of source.entries()) {
+        const transformed = projectedSource[index]!;
+        const { content: originalContent, ...metadata } = message as typeof message & { content?: unknown };
+        const { content: transformedContent, ...transformedMetadata } = transformed as typeof transformed & { content?: unknown };
+        if (message.role === "system") {
+          assert.equal(transformed.role, "system");
+          assert.ok("sections" in transformed && transformed.sections?.fixture === "<fixture>KEEP SYSTEM SECTION</fixture>");
+          assert.ok("sections" in transformed && transformed.sections?.cwd === "<cwd>\n/workspace\n</cwd>");
+          assert.ok("sections" in transformed && transformed.sections?.skills === "References are relative to /skills/image-fixture.");
+          assert.deepEqual("toolsAdded" in transformed ? transformed.toolsAdded : undefined, "toolsAdded" in message ? message.toolsAdded : undefined);
+        } else {
+          assert.deepEqual(transformedMetadata, metadata, "保留 role、工具关联、时间戳与其它元数据");
+          const visibleText = (content: unknown) => Array.isArray(content) ? content.filter(block => block.type === "text").map(block => block.text.replace(dimensionNote, "")).filter(Boolean) : content;
+          assert.deepEqual(visibleText(transformedContent), visibleText(originalContent), "仅尺寸说明允许变化，时间点和正文保持");
+          if (Array.isArray(transformedContent)) for (const [blockIndex, block] of transformedContent.entries()) if (block.type === "image") {
+            assert.ok(block.data.length <= 256 * 1024);
+            const imageFile = path.join(directory, "projected-image"); await writeFile(imageFile, Buffer.from(block.data, "base64"));
+            const { probeImageFile } = await import("../src/server/agent/media-probe.js");
+            const facts = await probeImageFile(imageFile);
+            assert.deepEqual([facts.width, facts.height], [1280, 720]);
+            const note = transformedContent[blockIndex - 1]?.text;
+            assert.match(note, /displayed at 1280x720/);
+            if ("toolName" in message && message.toolName === "read_artifact") assert.match(note, /original 3840x2160.*coordinates by 3\.00/);
+            if ("toolName" in message && message.toolName === "read") assert.match(note, /original 1920x1080.*coordinates by 1\.50/);
+          }
+        }
+      }
+      assert.equal(hash(JSON.stringify(session.agent.state.messages)), historyHash, "内存历史不被投影改写");
+      assert.equal(JSON.stringify(session.sessionManager.getEntries()), original, "Session 条目与压缩摘要不变");
+      assert.equal(hash(await readFile(sessionFile)), originalJsonl, "原 JSONL 摘要不变");
+      assert.deepEqual(await Promise.all(files.map(async file => hash(await readFile(file)))), originalBlobs, "原 blob 字节不变");
+      assert.equal(session.settingsManager.getProviderRetrySettings().timeoutMs, 45_000);
+      assert.equal(session.settingsManager.getProviderRetrySettings().maxRetries, 0);
+      if (businessContext !== null) {
+        const injected = projected.at(-1)!;
+        assert.equal(injected.role, "system");
+        assert.equal("content" in injected ? injected.content : undefined, businessContext);
+      }
+      const evidenceDir = process.env.FRAME_DGR_IMAGE_EVIDENCE_DIR;
+      if (evidenceDir && count === 3 && !coldReload) {
+        await mkdir(evidenceDir, { recursive: true });
+        const images = projected.flatMap(message => "content" in message && Array.isArray(message.content) ? message.content.filter((block): block is ImageContent => block.type === "image") : []);
+        for (const [index, image] of images.entries()) {
+          await writeFile(path.join(evidenceDir, `image-fixture-source-${index}.png`), fixtures[index]!);
+          await writeFile(path.join(evidenceDir, `image-fixture-projected-${index}.${image.mimeType === "image/jpeg" ? "jpg" : "png"}`), Buffer.from(image.data, "base64"));
+        }
+      }
+      businessContext = count === 3 ? "" : '[frame-current-state]{"fixture":true}';
+    }
+    session.dispose();
+  }
+  assert.equal(networkCalls, 0);
+  if (process.env.FRAME_DGR_IMAGE_EVIDENCE_DIR) await writeFile(path.join(process.env.FRAME_DGR_IMAGE_EVIDENCE_DIR, "image-sdk-sizes.json"), JSON.stringify({ sdk: "1.4.0", networkCalls, measurements }, null, 2) + "\n");
+});
 
 test("M1 精确目录查询沿用 URL 规范化；网关地址、错误路径与其他型号不冒充能力", () => {
   assert.equal(findOpenAIChatModel("gpt-6.1-sol", OPENAI)?.id, "gpt-6.1-sol");

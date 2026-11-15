@@ -4,7 +4,7 @@ import type { AgentDatabase } from "./db.js";
 import { renderSlotRole } from "./render-inputs.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import type { RenderFileProbe } from "./artifact-store.js";
-import type { ProductionIntent } from "../../shared/agent/generated/contracts.js";
+import type { ProductionIntent, ToolRenderProject } from "../../shared/agent/generated/contracts.js";
 
 const run = promisify(execFile);
 
@@ -216,13 +216,13 @@ export async function probeVideoFile(file: string, ffprobePath = "ffprobe", sign
   };
 }
 
-// 付费前探测已有渲染输入文件：render 操作引用的 blob/媒体修订逐个 ffprobe；
+// 制作受理前探测已有渲染输入文件：付费批次与纯本地 render 的 blob/媒体修订共用 ffprobe；
 // 依赖输出（operation_output）尚未产生，按冻结能力校验、产出后再验证，这里跳过。
 export async function probeRenderInputs(
   db: AgentDatabase,
   blobs: ProductionBlobs,
   scope: { ownerId: string; conversationId: string },
-  intent: Pick<ProductionIntent, "operations">,
+  intent: Pick<ProductionIntent, "operations"> | Pick<ToolRenderProject, "operations">,
   ffprobePath?: string,
 ): Promise<Map<string, RenderFileProbe>> {
   const targets = new Map<string, { digest: string; role: "video" | "image" | "audio" }>();
@@ -230,7 +230,7 @@ export async function probeRenderInputs(
     (db.prepare("SELECT digest FROM production_blobs WHERE id=? AND owner_id=? AND conversation_id=?")
       .get(blobId, scope.ownerId, scope.conversationId) as { digest: string } | undefined)?.digest;
   for (const op of intent.operations) {
-    if (op.kind !== "render") continue;
+    if ("kind" in op && op.kind !== "render") continue;
     for (const [slot, input] of op.inputs.entries()) {
       const role = renderSlotRole(op.parameters, slot);
       if (role === "none") continue;

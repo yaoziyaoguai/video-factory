@@ -297,6 +297,140 @@ afterEach(() => {
 const workPane = () => document.querySelector(".agent-work") as HTMLElement;
 
 describe("R2 组审阅工作台", () => {
+  it("DG-R1 独立脚本只认当前准确版且保留聊天草稿；v2 草稿与已认 v1 在刷新后各自读取", async () => {
+    const v1: ArtifactRevision = { ...revisionFixture("standalone", "script-v1", 1, ""), content: {
+      format: "markdown", text: "", sections: [
+        { id: "opening", title: "开场", text: "独立脚本第一版" },
+        { id: "middle", title: "发展", text: "第一版中段：雨落在窗台。" },
+        { id: "ending", title: "结尾", text: "第一版结尾：灯还亮着。" },
+      ],
+    } };
+    const v2: ArtifactRevision = { ...revisionFixture("standalone", "script-v2", 2, "", "script-v1"), content: {
+      format: "markdown", text: "", sections: [
+        { id: "opening", title: "开场", text: "独立脚本第二版" },
+        { id: "middle", title: "发展", text: "第二版中段：风吹开了门。" },
+        { id: "ending", title: "结尾", text: "第二版结尾：天色渐明。" },
+      ],
+    } };
+    const script = artifactFixture("standalone", "独立脚本文稿", "script-v1", 1, "script", null);
+    const prompt = artifactFixture("prompt", "普通提示词", "prompt-v1", 1, "prompt", null);
+    let headOutsidePage: ArtifactHead | null = null;
+    const confirmationMessage = messageFixture({ id: "approved-script", role: "user", text: "认可独立脚本这一版。",
+      references: { artifacts: [{ artifactId: "standalone", revisionId: "script-v1" }], proposalIds: [], runIds: [], materialBatchIds: [] } });
+    const harness = installStageRoutes({ artifacts: [script, prompt], bootstrap: NO_TEXT_BOOTSTRAP,
+      onRequest: (url, call) => {
+        if (url.endsWith("/artifacts/standalone/revisions/script-v1")) return { status: 200, body: v1 };
+        if (url.endsWith("/artifacts/standalone/revisions/script-v2")) return { status: 200, body: v2 };
+        if (url.endsWith("/artifacts/standalone")) return { status: 200, body: harness.snapshot.artifacts.items[0] ?? headOutsidePage };
+        if (url.endsWith("/messages/approved-script")) return { status: 200, body: harness.snapshot.messages.items[0] ?? confirmationMessage };
+        if (call.method === "POST" && url.endsWith("/messages")) {
+          const command = call.body as MessageInput;
+          expect(command.reviewConfirmation).toEqual({ kind: "standalone_artifact", artifactId: "standalone",
+            revisionId: harness.snapshot.artifacts.items[0]!.revisionId, action: "approve" });
+          return { status: 202, body: { requestId: "approve-script", messageId: "approved-script", state: "completed", replayed: false, runId: null } };
+        }
+        return null;
+      } });
+    let page = renderAt("/agent/conv-w");
+    await userEvent.click(await screen.findByRole("button", { name: "普通提示词" }));
+    expect(screen.queryByRole("button", { name: "认可这一版" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "独立脚本文稿" }));
+    await within(screen.getByRole("region", { name: "草稿与修改" })).findByText("独立脚本第一版");
+    await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先留着我的聊天草稿");
+    await userEvent.click(screen.getByRole("button", { name: "认可这一版" }));
+    const command = harness.calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as MessageInput;
+    expect(command).toMatchObject({ target: null, skillId: null, proposalRef: null, mode: "new", reviewContext: null });
+    expect(command.librarySelections).toBeUndefined();
+    await waitFor(() => expect(screen.getByRole("button", { name: "认可这一版" })).toBeEnabled());
+
+    harness.snapshot.artifacts.items[0] = { ...script, standaloneApproval: { confirmationId: "confirm-v1", revisionId: "script-v1", approvedAt: "2026-01-02T00:00:00Z" } };
+    harness.snapshot.messages.items = [confirmationMessage];
+    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "approve-v1", kind: "message.changed", entityId: "approved-script", entityVersion: 1 });
+    await within(screen.getByRole("region", { name: "已确认成果" })).findByText("独立脚本第一版");
+    expect(screen.queryByText("有更新")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先留着我的聊天草稿");
+
+    harness.snapshot.artifacts.items[0] = { ...harness.snapshot.artifacts.items[0]!, revisionId: "script-v2", revisionNumber: 2 };
+    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "draft-v2", kind: "artifact.delivered", entityId: "standalone", entityVersion: 2 });
+    await waitFor(() => expect(screen.getByRole("button", { name: "独立脚本文稿", pressed: true })).toHaveTextContent("有更新"));
+    expect(screen.queryByRole("button", { name: "认可这一版" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "独立脚本文稿", pressed: true }));
+    await within(screen.getByRole("region", { name: "草稿与修改" })).findByText("独立脚本第二版");
+    expect(within(screen.getByRole("region", { name: "已确认成果" })).getByText("独立脚本第一版")).toBeInTheDocument();
+    page.unmount();
+    page = renderAt("/agent/conv-w");
+    const draftAfterReload = within(await screen.findByRole("region", { name: "草稿与修改" }));
+    expect(await draftAfterReload.findByText("独立脚本第二版")).toBeVisible();
+    expect(draftAfterReload.getByText("第二版中段：风吹开了门。")).toBeVisible();
+    expect(draftAfterReload.queryByText("第一版中段：雨落在窗台。")).toBeNull();
+    const approvedAfterReload = within(screen.getByRole("region", { name: "已确认成果" }));
+    expect(await approvedAfterReload.findByText("独立脚本第一版")).toBeVisible();
+    expect(approvedAfterReload.getByText("第一版中段：雨落在窗台。")).toBeVisible();
+    expect(approvedAfterReload.getByText("第一版结尾：灯还亮着。")).toBeVisible();
+    expect(approvedAfterReload.queryByText("独立脚本第二版")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "认可这一版" }));
+    headOutsidePage = { ...harness.snapshot.artifacts.items[0]!, standaloneApproval: { confirmationId: "confirm-v2", revisionId: "script-v2", approvedAt: "2026-01-03T00:00:00Z" } };
+    harness.snapshot.artifacts.items = [];
+    harness.snapshot.messages.items = [{ ...confirmationMessage, revision: 2, references: { ...confirmationMessage.references, artifacts: [{ artifactId: "standalone", revisionId: "script-v2" }] } }];
+    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "approve-v2", kind: "message.changed", entityId: "approved-script", entityVersion: 2 });
+    await within(screen.getByRole("region", { name: "已确认成果" })).findByText("独立脚本第二版");
+    expect(approvedAfterReload.getByText("第二版中段：风吹开了门。")).toBeVisible();
+    expect(approvedAfterReload.getByText("第二版结尾：天色渐明。")).toBeVisible();
+    expect(approvedAfterReload.queryByText("第一版中段：雨落在窗台。")).toBeNull();
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先留着我的聊天草稿");
+    expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(2);
+    expect(harness.snapshot.works).toEqual([]);
+    expect(harness.snapshot.proposals.items).toEqual([]);
+    expect(harness.snapshot.runs.items).toEqual([]);
+  });
+
+  it("DG-R1 当前视频预览一次提交准确 adopt_preview，旧版不可采用且普通 clip 认可仍独立", async () => {
+    const oldSource = { kind: "artifact_revision" as const, artifactId: "clip", revisionId: "clip-v1", digest: "old" };
+    const source = { ...oldSource, revisionId: "clip-v2", digest: "current" };
+    const work = workFixture({ id: "work-1", title: "溪流短片", content: { draft: source, approved: oldSource } });
+    const item = work.reviewGroups[0]!.items[0]!;
+    item.role = "clip"; item.label = "流水预览"; item.required = false;
+    let finishAdoption: (() => void) | undefined;
+    const harness = installStageRoutes({ works: [work], artifacts: [artifactFixture("clip", "流水预览", "clip-v2", 2, "video")],
+      onRequest: async (url, call) => {
+        if (url.endsWith("/revisions/clip-v2")) return { status: 200, body: { ...videoRevisionFixture("clip", "clip-v2", "original-run", "original-blob"), revisionNumber: 2, baseRevisionId: "clip-v1" } };
+        if (url.endsWith("/revisions/clip-v1")) return { status: 200, body: videoRevisionFixture("clip", "clip-v1", "old-run", "old-blob") };
+        if (call.method === "POST" && url.endsWith("/messages")) {
+          const confirmation = (call.body as MessageInput).reviewConfirmation;
+          if (confirmation && "kind" in confirmation && confirmation.kind === "adopt_preview") {
+            await new Promise<void>(resolve => { finishAdoption = resolve; });
+            return { status: 202, body: { requestId: "adopt-preview", messageId: "adopted-preview", state: "completed", replayed: false, runId: null } };
+          }
+        }
+        return null;
+      } });
+    renderAt("/agent/conv-w");
+    const draft = within(await screen.findByRole("region", { name: "草稿与修改" }));
+    await draft.findByLabelText("视频预览");
+    await userEvent.click(draft.getByRole("button", { name: "看上一版" }));
+    await waitFor(() => expect(draft.getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/old-blob/content"));
+    expect(draft.queryByRole("button", { name: "以这版「流水预览」定稿并入库" })).toBeNull();
+    await userEvent.click(draft.getByRole("button", { name: "查看最新稿" }));
+    await waitFor(() => expect(draft.getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/original-blob/content"));
+    await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "保留这段没发送的想法");
+    const adopt = draft.getByRole("button", { name: "以这版「流水预览」定稿并入库" });
+    await userEvent.click(adopt);
+    expect(adopt).toBeDisabled();
+    await userEvent.click(adopt);
+    const posts = harness.calls.filter(call => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect((posts[0]!.body as MessageInput).reviewConfirmation).toEqual({ kind: "adopt_preview", workId: "work-1", groupId: "group-content", itemId: "item-content",
+      source: { artifactId: "clip", revisionId: "clip-v2" }, action: "finalize_video" });
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("保留这段没发送的想法");
+    expect(screen.queryByText(/后台制作中|等待制作|正在处理/)).toBeNull();
+    finishAdoption!();
+    await waitFor(() => expect(adopt).toBeEnabled());
+    expect(work.reviewGroups[0]!.items[0]!.approved).toEqual(oldSource);
+    await userEvent.click(draft.getByRole("button", { name: "认可「流水预览」" }));
+    const approval = harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput;
+    expect(approval.reviewConfirmation).toEqual({ workId: "work-1", groupId: "group-content", action: "approve", items: [{ itemId: "item-content", source }] });
+  });
+
   it("组页签呈现当前稿与组级认可；认可走 reviewConfirmation 且不动聊天草稿", async () => {
     const work = workFixture({
       id: "work-1", title: "城市短片", stage: "content",
@@ -659,8 +793,7 @@ describe("R2 组审阅工作台", () => {
     expect(await within(result).findByText("plan 正文 plan-rev-1")).toBeInTheDocument();
     const commands = harness.calls.filter(call => call.method === "POST").map(call => call.body as MessageInput);
     expect(commands).toHaveLength(1);
-    expect(commands[0]!.reviewConfirmation?.action).toBe("approve");
-    expect(commands[0]!.reviewConfirmation?.groupId).toBe("group-plan");
+    expect(commands[0]!.reviewConfirmation).toMatchObject({ action: "approve", groupId: "group-plan" });
     expect(commands[0]!.target).toBeNull();
     expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("这句先不发送");
 

@@ -24,10 +24,10 @@ import {
   defaultTextBindingOf, initializeTextModelSettings, textRegistrationOf,
 } from "../src/server/agent/text-model-settings.js";
 import { readProviderConnections, saveProviderConnection } from "../src/server/agent/provider-connections.js";
-import { attemptsFor, runRow, specFor } from "../src/server/agent/production-store.js";
+import { attemptsFor, runRow, snapshotFor } from "../src/server/agent/production-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
-import { toolIntentOf } from "./helpers/tool-args.js";
+import { admitLocalIntent, toolIntentOf } from "./helpers/tool-args.js";
 import { FakeRealtimeHub } from "./helpers/agent-openai-media.js";
 import type { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import type { MediaExecutionPort } from "../src/shared/agent/ports.js";
@@ -397,8 +397,9 @@ it("T7-05 场景③：制作进行中另聊热点并切默认模型，旧制作�
         inputs: [{ kind: "artifact_revision", artifactId: material.artifactId, revisionId: material.revisionId, digest: material.digest }],
         maxCreateAttempts: 1, parameters: { assembly: "ordered_concat", format: "mp4", width: 1280, height: 720, fps: 24 } }],
       finalOutput: { operationId: "render", outputSlot: "final" }, outputTarget: finalVideoTarget(), maxSpend: { currency: "CNY", amountMinor: 0 } };
-    const { proposal } = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: cmd(), spec: intent });
-    const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+    const admitted = await admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, intent);
+    assert.equal(admitted.run.finance, null);
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0);
     pending = runtime.worker!.pollOnce();
     for (let i = 0; i < 500 && !existsSync(startedFile); i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(existsSync(startedFile), true, "制作子进程已启动");
@@ -419,6 +420,8 @@ it("T7-05 场景③：制作进行中另聊热点并切默认模型，旧制作�
     const result = await drive(runtime, admitted.run.id, 2);
     assert.equal(result.state, "succeeded", "旧制作按原快照完成，不受默认切换影响");
     assert.equal(snapshotDigest(), digestBefore, "快照摘要不变（原绑定未动）");
-    assert.equal(specFor(db, runRow(db, admitted.run.id)).operations.length, 1);
+    const frozen = snapshotFor(db, runRow(db, admitted.run.id));
+    assert.equal(frozen.kind, "local");
+    assert.equal(frozen.spec.operations.length, 1);
   } finally { writeFileSync(continueFile, "continue"); await pending; await runtime.close(); stub.server.close(); await rm(directory, { recursive: true, force: true }); }
 });

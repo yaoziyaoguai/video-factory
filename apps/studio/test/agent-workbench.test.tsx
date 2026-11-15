@@ -1029,6 +1029,64 @@ it("§11.7 来源8/10 输入框“从作品库选择”：勾选并入草稿可�
   expect(loadDraft("conv-lib")).toBeNull();
 });
 
+it("DG-R1 库中 3 个 raw 视频与旧修订可分别预览下载选择，刷新草稿后仅发送才携带准确来源", async () => {
+  const conversation = conversationFixture("conv-raw", "素材讨论");
+  const entry = libraryVideoFixture({ project: null, projectFiles: [], materials: [
+    { label: "原始片段一", kind: "video", source: { kind: "run_input", runId: "source-run", operationId: "assemble", inputIndex: 0, blobId: "raw-one" }, provenance: [] },
+    { label: "原始片段二", kind: "video", source: { kind: "run_input", runId: "source-run", operationId: "assemble", inputIndex: 1, blobId: "raw-two" }, provenance: [] },
+    { label: "原始片段三", kind: "video", source: { kind: "run_input", runId: "source-run", operationId: "assemble", inputIndex: 2, blobId: "raw-three" }, provenance: [] },
+    { label: "留存视频", kind: "video", source: { artifactId: "retained-video", revisionId: "used-v1" }, provenance: [] },
+    { label: "原始文稿", kind: "script", source: { artifactId: "retained-script", revisionId: "text-v1" }, provenance: [] },
+  ] });
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshotFixture(conversation) },
+    onRequest: (url, call) => {
+      if (url.endsWith("/library/videos")) return { status: 200, body: { items: [entry], nextCursor: null } };
+      if (url.endsWith("/artifacts/retained-video/revisions/used-v1")) return { status: 200, body: { ...REVISION_FIXTURE, artifactId: "retained-video", revisionId: "used-v1",
+        content: { format: "media", blobId: "used-video-v1", mimeType: "video/mp4", durationMs: 3000 } } };
+      if (call.method === "POST" && url.endsWith("/messages")) return { status: 202, body: { requestId: "discuss-raw", messageId: "sent-raw", state: "completed", replayed: false, runId: null } };
+      return null;
+    } });
+  let page = renderAt("/agent/conv-raw?page=library");
+  await userEvent.click(await screen.findByRole("button", { name: /山路定稿/ }));
+  expect(screen.getAllByRole("checkbox")).toHaveLength(5);
+  for (const [label, blob] of [["原始片段一", "raw-one"], ["原始片段二", "raw-two"], ["原始片段三", "raw-three"], ["留存视频", "used-video-v1"]]) {
+    const row = within(screen.getByRole("checkbox", { name: new RegExp(label!) }).closest("li")!);
+    await userEvent.click(row.getByText("预览与下载"));
+    await waitFor(() => expect(row.getByLabelText("视频预览")).toHaveAttribute("src", `/api/agent/v1/blobs/${blob}/content`));
+    expect(row.getByRole("link", { name: "下载文件" })).toHaveAttribute("href", `/api/agent/v1/blobs/${blob}/content`);
+  }
+  await userEvent.click(screen.getByRole("checkbox", { name: /原始片段二/ }));
+  expect(screen.getByRole("checkbox", { name: /原始片段一/ })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /原始片段三/ })).not.toBeChecked();
+  await userEvent.click(screen.getByRole("checkbox", { name: /留存视频/ }));
+  await userEvent.click(screen.getByRole("button", { name: "带入当前对话（2）" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先看看素材，暂不制作");
+  expect(calls.filter(call => call.method === "POST")).toEqual([]);
+  page.unmount();
+  page = renderAt("/agent/conv-raw");
+  expect(await screen.findByText("作品库 · 原始片段二（视频）")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先看看素材，暂不制作");
+  await userEvent.click(screen.getByRole("button", { name: "从作品库选择" }));
+  await userEvent.click(await screen.findByRole("button", { name: /山路定稿/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /原始片段二/ }));
+  await userEvent.click(screen.getByRole("checkbox", { name: /原始片段三/ }));
+  await userEvent.click(screen.getByRole("button", { name: "加入输入框（2）" }));
+  expect(screen.getAllByText("作品库 · 原始片段二（视频）")).toHaveLength(1);
+  expect(screen.getByText("作品库 · 原始片段三（视频）")).toBeInTheDocument();
+  expect(calls.filter(call => call.method === "POST")).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(calls.filter(call => call.method === "POST")).toHaveLength(1));
+  const sent = calls.find(call => call.method === "POST")!.body as MessageInput;
+  expect(sent.librarySelections).toEqual([
+    { sourceVideo: { artifactId: "art-lib-video", revisionId: "rev-lib-video" }, source: { kind: "run_input", runId: "source-run", operationId: "assemble", inputIndex: 1, blobId: "raw-two" } },
+    { sourceVideo: { artifactId: "art-lib-video", revisionId: "rev-lib-video" }, source: { kind: "artifact_revision", artifactId: "retained-video", revisionId: "used-v1" } },
+    { sourceVideo: { artifactId: "art-lib-video", revisionId: "rev-lib-video" }, source: { kind: "run_input", runId: "source-run", operationId: "assemble", inputIndex: 2, blobId: "raw-three" } },
+  ]);
+  expect(sent).toMatchObject({ text: "先看看素材，暂不制作", target: null, proposalRef: null });
+  expect(sent.reviewConfirmation).toBeUndefined();
+  expect(calls.some(call => call.url.endsWith("/artifacts/retained-video"))).toBe(false);
+});
+
 it("§11.7 来源9 库详情带入当前对话：并入该会话草稿回到输入框，来源对话保持独立入口", async () => {
   const conversation = conversationFixture("conv-lib9", "正在改编");
   const source = conversationFixture("conv-lib-src", "原片会话");

@@ -2,7 +2,7 @@ import type { AgentDatabase } from "./db.js";
 import type { BillingFact, ExecutionObservation, Finance, LocalCreationSpec, MediaContent, OperationSpec, ProductionSpec, Run, RunOrigin, RunSegment } from "../../shared/agent/generated/contracts.js";
 import { canonicalJson } from "./util.js";
 import { AgentError } from "./errors.js";
-import { productionAudioFacts } from "./artifact-store.js";
+import { productionAudioFacts, type ArtifactRevisionRow } from "./artifact-store.js";
 
 export interface RunRow {
   id: string; owner_id: string; conversation_id: string; work_id: string; snapshot_id: string;
@@ -14,6 +14,7 @@ export interface RunRow {
 export interface OperationRow {
   run_id: string; id: string; spec_json: string; state: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   output_blob_id: string | null;
+  output_revision_id: string | null;
 }
 export interface AttemptRow {
   id: string; run_id: string; operation_id: string; ordinal: number; request_identity: string;
@@ -43,6 +44,11 @@ export function specFor(db: AgentDatabase, run: RunRow): ProductionSpec {
 }
 export function operationsFor(db: AgentDatabase, runId: string): OperationRow[] {
   return db.prepare("SELECT * FROM production_operations WHERE run_id=? ORDER BY rowid").all(runId) as OperationRow[];
+}
+// 输出字节可被多操作复用，来源只沿发布事务记录的准确修订，不按 blob 或当前 head 反查。
+export function operationOutputRevision(db: AgentDatabase, runId: string, operationId: string): ArtifactRevisionRow | undefined {
+  return db.prepare(`SELECT r.* FROM production_operations o JOIN artifact_revisions r ON r.id=o.output_revision_id
+    WHERE o.run_id=? AND o.id=?`).get(runId, operationId) as ArtifactRevisionRow | undefined;
 }
 export function attemptsFor(db: AgentDatabase, runId: string): AttemptRow[] {
   return db.prepare("SELECT * FROM production_attempts WHERE run_id=? ORDER BY ordinal, rowid").all(runId) as AttemptRow[];

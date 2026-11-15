@@ -13,7 +13,10 @@ import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assem
 import { CreativeRunner, creativeWorkspaceId, editingWorkspace } from "../src/server/agent/creative-runner.js";
 import { parseCreationState, writeWorkState, type WorkRow } from "../src/server/agent/creative-work.js";
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
+import { mixedRenderCatalogEntry } from "../src/server/agent/media-config.js";
+import type { QuoteCatalog } from "../src/server/agent/artifact-store.js";
 import { probeImageFile } from "../src/server/agent/media-probe.js";
+import { retainedVideoMaterials } from "../src/server/agent/library-materials.js";
 import type { ProductionService } from "../src/server/agent/production-service.js";
 import { newAgentId, systemClock } from "../src/server/agent/util.js";
 import { FAUX_PROVIDER, FAUX_TEXT_MODEL } from "../src/server/agent/offline.js";
@@ -67,6 +70,7 @@ interface HostExecution { workspaceId: string; command: string; argv: string[] |
 class LocalCreativeHost {
   private readonly server: http.Server;
   readonly executions: HostExecution[] = [];
+  fileFailure: { action: "write" | "read"; path: string; message: string } | null = null;
   private constructor(readonly socketPath: string, private readonly root: string) {
     this.server = http.createServer((request, response) => { void this.handle(request, response); });
   }
@@ -83,13 +87,15 @@ class LocalCreativeHost {
     for await (const chunk of request) chunks.push(chunk as Buffer);
     const reply = (payload: Record<string, unknown>) => { response.end(`${JSON.stringify(payload)}\n`); };
     try {
-      reply(await this.dispatch(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+      reply(await this.dispatch(JSON.parse(Buffer.concat(chunks).toString("utf8")), output => {
+        response.write(`${JSON.stringify({ output: Buffer.from(output).toString("base64") })}\n`);
+      }));
     } catch (error) {
       reply({ error: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  private async dispatch(frame: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async dispatch(frame: Record<string, unknown>, onOutput: (output: string) => void): Promise<Record<string, unknown>> {
     const workspaceId = frame.workspaceId as string;
     const workspaceDir = path.join(this.root, workspaceId, "workspace");
     const map = (file: string): string => {
@@ -97,6 +103,11 @@ class LocalCreativeHost {
       if (file.startsWith("/skills/")) return path.join(this.root, workspaceId, "skills", file.slice("/skills/".length));
       throw new Error(`宿主替身只接受容器内路径：${file}`);
     };
+    const failure = this.fileFailure;
+    if (failure && failure.action === frame.action && failure.path === frame.path) {
+      this.fileFailure = null;
+      throw new Error(failure.message);
+    }
     switch (frame.action) {
       case "image": return { imageId: "local-test-host:node" };
       case "skills": {
@@ -145,11 +156,14 @@ class LocalCreativeHost {
         const input = path.join(workspaceDir, "inputs", "0.png");
         this.executions.push({ workspaceId, command: command ?? JSON.stringify(argv), argv, inputBytes: await stat(input).then(s => s.size, () => null) });
         try {
-          if (argv) await run(argv[0]!, argv.slice(1), { cwd: workspaceDir, timeout: (typeof frame.timeout === "number" ? frame.timeout : 60) * 1000 });
-          else await run("/bin/sh", ["-c", command!], { cwd: workspaceDir, timeout: (typeof frame.timeout === "number" ? frame.timeout : 60) * 1000 });
+          const executed = argv
+            ? await run(argv[0]!, argv.slice(1), { cwd: workspaceDir, timeout: (typeof frame.timeout === "number" ? frame.timeout : 60) * 1000 })
+            : await run("/bin/sh", ["-c", command!], { cwd: workspaceDir, timeout: (typeof frame.timeout === "number" ? frame.timeout : 60) * 1000 });
+          onOutput(executed.stdout); onOutput(executed.stderr);
           return { exitCode: 0 };
         } catch (error) {
-          const failure = error as { code?: unknown; killed?: boolean; signal?: unknown };
+          const failure = error as { code?: unknown; killed?: boolean; signal?: unknown; stdout?: string; stderr?: string };
+          onOutput(failure.stdout ?? ""); onOutput(failure.stderr ?? "");
           if (typeof failure.code === "number") return { exitCode: failure.code };
           if (failure.killed || typeof failure.signal === "string") return { exitCode: null };
           throw error;
@@ -175,7 +189,7 @@ interface World {
   close(): Promise<void>;
 }
 
-async function setup(): Promise<World> {
+async function setup(catalog: QuoteCatalog = {}): Promise<World> {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-g23-"));
   const host = await LocalCreativeHost.start(path.join(directory, "creative-host"));
   const runner = new CreativeRunner({ socketPath: host.socketPath });
@@ -183,11 +197,11 @@ async function setup(): Promise<World> {
   const runtime = await createAgentRuntime({
     dataDir: path.join(directory, "app"), skillsRoot: path.join(directory, "skills"),
     host: { faux: { provider: FAUX_PROVIDER, modelIds: [FAUX_TEXT_MODEL] } },
-    models: [FAUX_TEXT_ENTRY], defaultModelId: FAUX_TEXT_MODEL, catalog: () => ({}),
+    models: [FAUX_TEXT_ENTRY], defaultModelId: FAUX_TEXT_MODEL, catalog: () => catalog,
     creative: { runner },
     media: { autoStart: false, factory: (db, blobs) => ({
       port: new LocalRenderPort(db, blobs, systemClock, { workRoot: path.join(directory, "media-work") }, runner),
-      catalog: () => ({}), models: () => [],
+      catalog: () => catalog, models: () => [],
     }) },
   });
   const conversationId = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "本地创作" }).conversation.id;
@@ -286,6 +300,172 @@ const draftImageOperation = (project: { artifactId: string; revisionId: string }
     expectedMediaKind: "image" as const, format: "png" as const, width: 160, height: 90 },
   target: { group: { mode: "create" as const, key: "visual", title: "画面", nextIntent: null },
     item: { mode: "create" as const, key: "first-frame", label: "首帧图", role: "storyboard" as const, required: true } },
+});
+
+it("DGR-02 失败运行保留有界真实执行输出，新工程修订成功且不改旧稿", async () => {
+  const world = await setup(); try {
+    const project = await authorProject(world);
+    const failureSource = 'process.stderr.write("start-of-output\\n" + "x".repeat(12000)); throw new Error("Background bytes differ from the bound original revision.");';
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("write", { path: "main.cjs", content: failureSource })]),
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId: project.workId, title: "动画工程", files: ["main.cjs"],
+        entrypoint: { argv: ["node", "main.cjs"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+      fauxAssistantMessage("失败样例已封存。"),
+    ]);
+    const failedProject = latestProjectRevision(world);
+    const before = world.runtime.service.readRevision("local-owner", failedProject.artifactId, failedProject.revisionId);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId: project.workId, title: "错误样例", scope: "错误输出验证", purpose: "draft",
+        inputSources: [], reviewInputs: [], operations: [draftImageOperation(failedProject)] })]),
+      fauxAssistantMessage("已受理。"),
+    ]);
+    const failedRunId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+    const failed = await drive(world, failedRunId);
+    assert.equal(failed.state, "failed");
+    assert.match(failed.issue?.message ?? "", /exit=1/);
+    assert.match(failed.issue?.message ?? "", /Background bytes differ from the bound original revision/);
+    assert.doesNotMatch(failed.issue?.message ?? "", /^start-of-output$/m);
+    assert.ok(Buffer.byteLength(failed.issue?.message ?? "") < 9000, "只保留约8KiB执行输出尾部");
+    assert.equal(failed.outputRevisions.length, 0);
+
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("write", { path: "main.cjs", content: pngScript })]),
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId: project.workId, title: "动画工程", files: ["main.cjs"],
+        entrypoint: { argv: ["node", "main.cjs"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+      fauxAssistantMessage("正确新稿已封存。"),
+    ]);
+    const corrected = latestProjectRevision(world);
+    assert.notEqual(corrected.revisionId, failedProject.revisionId);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId: project.workId, title: "正确新稿", scope: "新稿验证", purpose: "draft",
+        inputSources: [], reviewInputs: [], operations: [draftImageOperation(corrected)] })]),
+      fauxAssistantMessage("已受理。"),
+    ]);
+    const correctedRunId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+    const correctedRun = await drive(world, correctedRunId);
+    assert.equal(correctedRun.state, "succeeded");
+    const correctedMedia = jsonField(world, "SELECT content_json FROM artifact_revisions WHERE id=?", "content_json", correctedRun.outputRevisions[0]!.revisionId) as { blobId: string };
+    const facts = await probeImageFile(world.blobs.filePath(world.blobs.get("local-owner", correctedMedia.blobId).digest));
+    assert.equal(facts.width, 160); assert.equal(facts.height, 90);
+    assert.deepEqual(world.runtime.service.readRevision("local-owner", failedProject.artifactId, failedProject.revisionId), before);
+    assert.equal(world.runtime.service.getRun("local-owner", failedRunId).state, "failed");
+  } finally { await world.close(); }
+});
+
+it("DGR-R1.1 执行诊断：恢复文件和读取输出失败保留阶段与原因，不猜测未生成", async () => {
+  const world = await setup(); try {
+    const project = await authorProject(world);
+    for (const [index, failure] of [
+      { action: "write" as const, path: "/workspace/main.cjs", message: "restore channel interrupted", phase: /恢复文件 main\.cjs/ },
+      { action: "read" as const, path: "/workspace/out.png", message: "output channel interrupted", phase: /读取声明输出 out\.png/ },
+    ].entries()) {
+      await send(world, [
+        fauxAssistantMessage([fauxToolCall("render_project", { workId: project.workId, title: "阶段诊断", scope: "读写边界", purpose: "draft",
+          inputSources: [], reviewInputs: [], operations: [{ ...draftImageOperation(project), operationId: `diagnostic-${index}` }] })]),
+        fauxAssistantMessage("已受理。"),
+      ]);
+      const runId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+      const executionsBefore = world.host.executions.length;
+      world.host.fileFailure = failure;
+      const failed = await drive(world, runId);
+      assert.equal(failed.state, "failed");
+      assert.equal(failed.outputRevisions.length, 0);
+      assert.match(failed.issue?.message ?? "", failure.phase);
+      assert.match(failed.issue?.message ?? "", new RegExp(failure.message));
+      assert.doesNotMatch(failed.issue?.message ?? "", /没有产生声明的输出|没有生成输出/);
+      assert.equal(world.host.executions.length - executionsBefore, failure.action === "write" ? 0 : 1);
+      if (failure.action === "read") {
+        const runner = new CreativeRunner({ socketPath: world.host.socketPath });
+        const bytes = await runner.readFile({ conversationId: world.conversationId, workId: project.workId,
+          executionId: `${runId}:diagnostic-${index}` }, "out.png");
+        assert.ok(bytes.equals(makePng(46, 128, 110)), "读取通道失败时输出其实已存在，不能反推工程没有生成它");
+      }
+    }
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId: project.workId, title: "正常执行", scope: "不影响成功路径", purpose: "draft",
+        inputSources: [], reviewInputs: [], operations: [draftImageOperation(project)] })]),
+      fauxAssistantMessage("已受理。"),
+    ]);
+    const runId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+    const succeeded = await drive(world, runId);
+    assert.equal(succeeded.state, "succeeded");
+    assert.ok(outputBytes(world, succeeded.outputRevisions[0]!.revisionId).equals(makePng(46, 128, 110)));
+  } finally { await world.close(); }
+});
+
+it("DGR-R1.1 零增益工程音轨：合法混合不留未采用音轨的工程和独有依据", async () => {
+  const world = await setup({ "render:mixed_concat": mixedRenderCatalogEntry() }); try {
+    const { workId } = await authorProject(world);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "仅供音乐工程的依据", kind: "script",
+        content: { format: "markdown", text: "这份说明只属于音轨工程，不是画面或最终混合的依据。" } }] })]),
+      fauxAssistantMessage("已交付独立依据。"),
+    ]);
+    const uniqueSource = world.runtime.service.snapshot("local-owner", world.conversationId).artifacts.items.find(item => item.kind === "script")!;
+    const musicScript = `require("node:child_process").execFileSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-ar", "48000", "-ac", "1", "out.wav"]);`;
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("write", { path: "music.cjs", content: musicScript })]),
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "未采用的音轨工程", files: ["music.cjs"],
+        entrypoint: { argv: ["node", "music.cjs"] }, dependencyLocks: [], timelineFiles: [],
+        sourceRevisions: [{ artifactId: uniqueSource.id, revisionId: uniqueSource.revisionId }] })]),
+      fauxAssistantMessage("音轨工程已封存。"),
+    ]);
+    const musicProject = latestProjectRevision(world);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId, title: "备选音乐", scope: "程序音轨", purpose: "draft",
+        inputSources: [], reviewInputs: [], operations: [{ operationId: "unused-music", outputSlot: "music", inputs: [],
+          parameters: { assembly: "code_project", projectRevision: musicProject, entrypoint: { argv: ["node", "music.cjs"] },
+            outputPath: "out.wav", expectedMediaKind: "audio", format: "wav", sampleRate: 48000, channels: 1 },
+          target: { group: { mode: "create", key: "music", title: "音乐", nextIntent: null },
+            item: { mode: "create", key: "audio", label: "备选音乐", role: "music", required: false } } }] })]),
+      fauxAssistantMessage("音轨已受理。"),
+    ]);
+    const musicRunId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+    const musicRun = await drive(world, musicRunId);
+    assert.equal(musicRun.state, "succeeded", musicRun.issue?.message);
+    const musicRef = musicRun.outputRevisions[0]!;
+    const musicRevision = world.runtime.service.readRevision("local-owner", musicRef.artifactId, musicRef.revisionId);
+    const videoPath = path.join(world.directory, "red.mp4");
+    await run("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=1280x720:r=24:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", videoPath]);
+    const rawVideo = world.blobs.persist("local-owner", world.conversationId, readFileSync(videoPath), "video/mp4", 1000);
+    let toolError: string | undefined;
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId, title: "静音音乐混合", scope: "零增益音轨合法但不采用", purpose: "draft",
+        inputSources: [{ kind: "artifact_revision", ...musicRef, digest: musicRevision.digest }], reviewInputs: [], operations: [
+          { operationId: "mixed", outputSlot: "final", inputs: [
+              { kind: "blob", blobId: rawVideo.id, digest: rawVideo.digest },
+              { kind: "artifact_revision", ...musicRef, digest: musicRevision.digest } ],
+            parameters: { assembly: "mixed_concat", format: "mp4", width: 1280, height: 720, fps: 24, segmentIds: ["red"],
+              segments: [{ inputSlot: 0, kind: "video", startMs: 0, durationMs: 1000, originalGain: 0 }],
+              music: { inputSlot: 1, sourceStartMs: 0, sourceDurationMs: 1000, repeat: false,
+                timelineStartMs: 0, playDurationMs: 1000, gain: 0, fadeInMs: 0, fadeOutMs: 0, duckUnderNarration: false } },
+            target: { group: { mode: "create", key: "mixed", title: "混合", nextIntent: null },
+              item: { mode: "create", key: "clip", label: "混合草稿", role: "clip", required: false } } },
+        ] })]),
+      context => {
+        const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+        if (result.isError) toolError = JSON.stringify(result.content);
+        return fauxAssistantMessage("已核对受理结果。");
+      },
+    ]);
+    assert.equal(toolError, undefined, toolError);
+    const acceptedRun = world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string } | undefined;
+    assert.ok(acceptedRun, JSON.stringify(world.runtime.service.snapshot("local-owner", world.conversationId).messages.items));
+    const result = await drive(world, acceptedRun.id);
+    assert.equal(result.state, "succeeded", result.issue?.message);
+    const video = result.outputRevisions.find(ref => {
+      const content = world.runtime.service.readRevision("local-owner", ref.artifactId, ref.revisionId).content;
+      return content.format === "media" && content.mimeType === "video/mp4";
+    });
+    assert.ok(video);
+    const retained = retainedVideoMaterials(world.runtime.database, "local-owner", video);
+    assert.equal(retained.producer?.operationId, "mixed");
+    assert.equal(retained.projects.some(project => project.revisionId === musicProject.revisionId), false,
+      `gain=0 的工程不应随扁平绑定混入：${JSON.stringify(retained.projects)}`);
+    assert.equal(retained.materials.some(material => "revisionId" in material.source && material.source.revisionId === uniqueSource.revisionId), false);
+    assert.equal(retained.materials.length, 1, "只留真实采用的 raw 画面");
+    assert.ok("kind" in retained.materials[0]!.source && retained.materials[0]!.source.kind === "run_input");
+  } finally { await world.close(); }
 });
 
 it("G2-3 受理事实：免费本地渲染不建提案/授权/账单，正式视频需组认可", async () => {
@@ -1613,6 +1793,11 @@ if (fs.existsSync("inputs/0.mp4")) {
     assert.ok(finalItem.draft?.kind === "artifact_revision");
     const finalDraft = finalItem.draft as { kind: "artifact_revision"; artifactId: string; revisionId: string };
     const finalRevision = world.runtime.service.readRevision("local-owner", finalDraft.artifactId, finalDraft.revisionId);
+    // 草稿渲染不代认其必选画面依据；定稿仍需用户明确认可实际采用的准确版本。
+    await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("认可实际采用的画面依据", {
+      reviewConfirmation: { workId, groupId: basisGroup.id,
+        items: [{ itemId: basisGroup.items[0]!.id, source: basis }], action: "approve" },
+    }));
     await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("这版定稿", {
       reviewConfirmation: { workId, groupId: finalTarget.groupId,
         items: [{ itemId: finalTarget.itemId, source: { kind: "artifact_revision", artifactId: finalDraft.artifactId, revisionId: finalDraft.revisionId, digest: finalRevision.digest } }],
@@ -1625,8 +1810,11 @@ if (fs.existsSync("inputs/0.mp4")) {
       { project: projectB, relativePath: "main.cjs", mimeType: "text/javascript" },
       { project: projectA, relativePath: "main.cjs", mimeType: "text/javascript" },
     ], "多工程清单按行 project 归属，主工程分组在前；同名 main.cjs 各自指向所属工程");
-    assert.deepEqual(entry.materials, [{ source: { artifactId: basisDraft.artifactId, revisionId: basisDraft.revisionId },
-      label: "画面依据", kind: "script", provenance: [] }], "采用素材 = 最终视频来源链上的工程声明资源；未采用候选不混入");
+    assert.deepEqual(entry.materials, [
+      { source: result.outputRevisions[0]!, label: "多工程成片 · 合成视频 1", kind: "video", provenance: [] },
+      { source: { artifactId: basisDraft.artifactId, revisionId: basisDraft.revisionId },
+        label: "画面依据（提供给工程）", kind: "script", provenance: [] },
+    ], "采用的生成片段本身与其工程依据均留存；未采用候选不混入，也不追加认可");
 
     // 跨会话选材：两个同名 main.cjs 按所属工程各自物化不同字节；链外工程引用被拒。
     const other = world.runtime.service.createConversation("local-owner", { commandId: cmd(), title: "选材会话" }).conversation;
@@ -1686,7 +1874,8 @@ it("S3 执行边界：正常退出无输出不交付旧文件、镜像不匹配�
     ], "渲染静默工程。");
     const silentRun = await drive(world, runOf());
     assert.equal(silentRun.state, "failed", "正常退出但没有声明输出必须失败");
-    assert.match(silentRun.issue?.message ?? "", /没有产生声明的输出 out\.png/);
+    assert.match(silentRun.issue?.message ?? "", /读取声明输出 out\.png失败：.*ENOENT/);
+    assert.doesNotMatch(silentRun.issue?.message ?? "", /没有产生声明的输出/);
     assert.equal(silentRun.outputRevisions.length, 0);
     assert.ok(world.host.executions.some(e => e.argv?.[1] === "silent.cjs"), "入口确实被执行过，不是被入口校验挡下");
     assert.equal(count(world, "FROM artifacts WHERE kind='image'"), 0, "不产出媒体产物，也不得交付旧文件");

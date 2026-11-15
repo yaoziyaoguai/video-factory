@@ -15,7 +15,7 @@ import {
 import type { MessageInput, Run, AcceptProposal, CancelRun, SkillPackageMutation, Work, ReviewGroup, ReviewConfirmation, MaterialBatch, MaterialBatchIndexItem, ContentSource } from "../../shared/agent/generated/contracts.js";
 import { FilePreview, MediaPreview, ProjectPreview, ProposalCard, RunCard, runEnded } from "./ProductionCards.js";
 export { ProposalCard } from "./ProductionCards.js";
-import { WorkStagePanel, MaterialBatchCard, type ReviewAction, type ReviewEntry } from "./WorkStagePanel.js";
+import { WorkStagePanel, MaterialBatchCard, StandaloneScriptApproval, type AdoptPreview, type ReviewAction, type ReviewEntry } from "./WorkStagePanel.js";
 import { ArrowLeft, ArrowUp, ChevronRight, Clock3, Cpu, Film, FolderOpen, Maximize2, MessageSquare, PanelLeft, Pencil, Plus, Sparkles, X } from "lucide-react";
 import { ArtifactIcon, stageOwnedLabel, FrameEmptyPreview, FrameWelcome } from "./FramePresentation.js";
 import { FrameSettings, framePageTitle, type FramePage } from "./FrameSettings.js";
@@ -166,7 +166,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
 
   // windowMode：undefined=沿用该会话已有窗口（事件/动作后的刷新）；"latest"=回到最新窗口；
   // 其他字符串=以该消息为锚点的定位窗口（作品库“回到对话”入口）。
-  const refreshSnapshot = useCallback(async (id: string, resetStream = false, windowMode: "latest" | string | undefined = undefined) => {
+  const refreshSnapshot = useCallback(async (id: string, resetStream = false, windowMode: "latest" | string | undefined = undefined, changedArtifactIds: readonly string[] = []) => {
     const generation = viewGeneration.current.token;
     const sequence = (reads.current.get(id) ?? 0) + 1;
     reads.current.set(id, sequence);
@@ -182,7 +182,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       const known = cache.current.get(id);
       const changedMessages = snapshot.messages.items.filter(message => !known?.messages.some(old => old.id === message.id && old.revision >= message.revision));
       const refresh = {
-        artifacts: [...new Set([...changedMessages.flatMap(message => message.references.artifacts.map(ref => ref.artifactId)), ...(resetStream ? known?.artifacts.map(item => item.id) ?? [] : [])])].filter(itemId => !snapshot.artifacts.items.some(item => item.id === itemId)),
+        artifacts: [...new Set([...changedArtifactIds, ...changedMessages.flatMap(message => message.references.artifacts.map(ref => ref.artifactId)), ...(resetStream ? known?.artifacts.map(item => item.id) ?? [] : [])])].filter(itemId => !snapshot.artifacts.items.some(item => item.id === itemId)),
         proposals: [...new Set([...changedMessages.flatMap(message => message.references.proposalIds), ...(resetStream ? known?.proposals.map(item => item.id) ?? [] : [])])].filter(itemId => !snapshot.proposals.items.some(item => item.id === itemId)),
         runs: [...new Set([...changedMessages.flatMap(message => message.references.runIds), ...(known?.runs.filter(run => resetStream || !runEnded(run.state) || (run.finance != null && run.finance.state !== "settled")).map(run => run.id) ?? [])])].filter(itemId => !snapshot.runs.items.some(item => item.id === itemId)),
       };
@@ -286,8 +286,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       if (entity && event.kind === "work.changed") next.works = mergeWorks(prior.works, [entity as Work]);
       cache.current.set(id, next);
       if (activeId.current === id) setView(next);
-      // activeRequestId 等会话状态从快照更新；实体读取不会被首屏页的范围限制。
-      void refreshSnapshot(id);
+      // 消息已合入缓存，仍显式重读其引用的 head；独立稿认可可能只发 message.changed，且产物不在快照首页。
+      void refreshSnapshot(id, false, undefined, event.kind === "message.changed" && entity
+        ? (entity as Message).references.artifacts.map(ref => ref.artifactId) : []);
     } catch { if (activeId.current === id && viewGeneration.current.token === generation) setConnectionState("最新状态尚未同步，请重新连接。当前阅读和草稿已保留。"); }
   }, [refreshSnapshot]);
 
@@ -519,13 +520,12 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       await refreshSnapshot(run.conversationId);
     }
   };
-  // 组审阅认可与普通继续共用一条面板命令通道：每个（组, 命令）一个持久 commandId，
-  // 结果未知时原请求重试可回放；按钮独立构造请求，不动用户未发送的聊天草稿。
-  const sendPanelCommand = async (work: Work, group: ReviewGroup, label: string, keySuffix: string,
+  // 面板命令按组或独立稿保存 commandId，结果未知时原请求重试；不动未发送的聊天草稿。
+  const sendPanelCommand = async (scope: { workId: string; groupId: string } | { artifactId: string }, label: string, keySuffix: string,
     reviewConfirmation: ReviewConfirmation | null, failureHint: string): Promise<boolean> => {
     const id = view.conversation.id;
-    // 组内任一认可在途时整组禁用：并发确认会互相覆盖彼此读取的条目状态。
-    const busy = `${work.id}:${group.id}`;
+    // 组内任一认可在途时整组禁用；独立稿各自拥有忙态。
+    const busy = "workId" in scope ? `${scope.workId}:${scope.groupId}` : `standalone:${scope.artifactId}`;
     if (!id || reviewBusyKeys.includes(busy)) return false;
     const storageKey = `vf:agent-review:${id}:${busy}:${keySuffix}`;
     const buildCommand = (): MessageInput => ({
@@ -533,7 +533,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       reviewConfirmation,
       // 普通继续附本条消息指向的组（F05）：不带确认时不靠服务端猜当前作品；
       // 与 reviewConfirmation/proposalRef/target 互斥；已有缓存保持原 body，缺目标的旧继续命令提示核对。
-      reviewContext: reviewConfirmation ? null : { workId: work.id, groupId: group.id },
+      reviewContext: !reviewConfirmation && "workId" in scope ? scope : null,
     });
     let command: MessageInput;
     try {
@@ -564,13 +564,21 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     const subjectKey = entries.map(entry => entry.source.kind === "artifact_revision"
       ? `${entry.source.artifactId}:${entry.source.revisionId}` : `msg:${entry.source.messageId}`).join("|");
     const confirmationItems = entries.map(entry => ({ itemId: entry.itemId, source: entry.source }));
-    return sendPanelCommand(work, group, label, `${action}:${subjectKey}`,
+    return sendPanelCommand({ workId: work.id, groupId: group.id }, label, `${action}:${subjectKey}`,
       { workId: work.id, groupId: group.id, action, items: [confirmationItems[0]!, ...confirmationItems.slice(1)] },
       "认可结果未确认，可重试。");
   };
   // 必选项全部认可后的普通继续：一条不带 reviewConfirmation 的普通消息，不补确认、不定稿。
   const continueReview = (work: Work, group: ReviewGroup, label: string): Promise<boolean> =>
-    sendPanelCommand(work, group, label, "continue", null, "继续结果未确认，可重试。");
+    sendPanelCommand({ workId: work.id, groupId: group.id }, label, "continue", null, "继续结果未确认，可重试。");
+  const adoptPreview: AdoptPreview = (work, group, item, source) =>
+    sendPanelCommand({ workId: work.id, groupId: group.id }, `以这版「${item.label}」定稿并入库。`, `adopt_preview:${item.id}:${source.artifactId}:${source.revisionId}`,
+      { kind: "adopt_preview", workId: work.id, groupId: group.id, itemId: item.id, source, action: "finalize_video" },
+      "定稿结果未确认，可重试。");
+  const approveStandalone = (artifact: ArtifactHead, revision: ArtifactRevision): Promise<boolean> =>
+    sendPanelCommand({ artifactId: artifact.id }, `认可「${artifact.title}」这一版。`, `approve:${revision.revisionId}`,
+      { kind: "standalone_artifact", artifactId: artifact.id, revisionId: revision.revisionId, action: "approve" },
+      "认可结果未确认，可重试。");
 
   const sendMessage = async (mode: "new" | "steer" = "new", retry = false) => {
     if (sendingNow || sending.current.has(conversationId ?? "new")) return;
@@ -867,6 +875,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const openRevision = selection ? revisionCache[`${selection.artifactId}:${selection.revisionId}`] ?? null : null;
   // 独立查看器与阶段面板一致：历史修订只读，意见/修改只针对最新稿（服务端合同只接受 head）。
   const viewingOldRevision = Boolean(selection && openArtifactHead && openArtifactHead.revisionId !== selection.revisionId);
+  const standaloneScript = openArtifactHead?.kind === "script" && openArtifactHead.workId === null;
   useEffect(() => {
     if (!conversationId || !selection || !openRevision || page !== "chat" || inspectedRun || openArtifactHead?.revisionId !== selection.revisionId) return;
     setNotices(current => {
@@ -1010,8 +1019,15 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 <header className="agent-preview-header"><h2>{openArtifactHead.title}</h2><div className="agent-paper-tools">{view.works.length ? <button className="agent-text-link" type="button" onClick={backToWork}>回到创作</button> : null}<details className="agent-version-picker"><summary>{stageOwnedLabel(view.works, openArtifactHead)} v{openRevision?.revisionNumber ?? "…"}</summary><div>{openRevision?.baseRevisionId ? <button type="button" onClick={() => openArtifact(openArtifactHead.id, openRevision.baseRevisionId!)}>上一版</button> : null}{selection?.revisionId !== openArtifactHead.revisionId ? <button type="button" onClick={() => openArtifact(openArtifactHead.id)}>查看最新 v{openArtifactHead.revisionNumber}</button> : <span>当前最新版本</span>}</div></details>{viewingOldRevision
                   ? <span className="agent-stage-muted">历史版本仅阅读</span>
                   : <button className="agent-feedback-trigger" type="button" disabled={lockedArtifacts.has(openArtifactHead.id)} onClick={discussArtifact}><Pencil />{lockedArtifacts.has(openArtifactHead.id) ? "制作中 · 输入已锁定" : "提意见"}</button>}</div></header>
+                <div className={standaloneScript ? "agent-standalone-script" : undefined}>
+                <section aria-label={standaloneScript ? "草稿与修改" : undefined}>
+                {standaloneScript ? <div className="agent-work-pane-title"><h3>草稿与修改</h3>{openRevision ? <span>v{openRevision.revisionNumber}</span> : null}</div> : null}
                 <div className="agent-preview-body">{openRevision ? openRevision.content.format === "markdown" ? <MarkdownBody content={openRevision.content} /> : openRevision.content.format === "media" ? <MediaPreview content={openRevision.content} simulated={isSimulated} /> : openRevision.content.format === "file" ? <FilePreview content={openRevision.content} /> : <ProjectPreview content={openRevision.content} /> : <div className="agent-preview-loading">正在读取…</div>}</div>
                 <footer className="agent-preview-actions">
+                  {standaloneScript && !viewingOldRevision && openRevision ? openArtifactHead.standaloneApproval?.revisionId === openRevision.revisionId
+                    ? <span className="agent-stage-muted">这一版已认可。</span>
+                    : <button type="button" className="agent-stage-secondary" disabled={reviewBusyKeys.includes(`standalone:${openArtifactHead.id}`)}
+                        onClick={() => void approveStandalone(openArtifactHead, openRevision)}>认可这一版</button> : null}
                   {viewingOldRevision ? <><span className="agent-stage-muted">正在看历史版本，意见和修改请回到最新稿。</span>{feedbackDraft ? <label>旧稿的未发送意见<textarea aria-label="意见" readOnly value={feedbackDraft} /></label> : null}</> : <>
                     <button className="agent-text-link" type="button" onClick={() => setFeedbackOpen(value => !value)}>{lockedArtifacts.has(openArtifactHead.id) ? "留下下一版意见" : "只记录意见"}</button>
                     {isSimulated && openRevision?.content.format === "markdown" ? <button className="agent-text-link" type="button" disabled={lockedArtifacts.has(openArtifactHead.id)} onClick={() => { if (currentDraft.text.trim()) { setActionError("输入框还有草稿，请先处理这条消息，再准备制作提案。"); return; } updateDraft({ text: "按这份准备制作提案，先不要开始", targetArtifactId: openArtifactHead.id, targetRevisionId: selection!.revisionId, proposalId: null, proposalDigest: null }); composerInput.current?.focus(); }}>准备模拟提案</button> : null}
@@ -1019,6 +1035,10 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                   </>}
                   {feedbackSaved ? <span role="status" className="agent-feedback-saved">{feedbackSaved}</span> : null}
                 </footer>
+                </section>
+                {standaloneScript ? <StandaloneScriptApproval artifact={openArtifactHead} revisions={revisionCache}
+                  onRevisionLoaded={revision => setRevisionCache(current => ({ ...current, [`${revision.artifactId}:${revision.revisionId}`]: revision }))} /> : null}
+                </div>
               </article>
               : openBatchId && !view.works.length ? <article className="agent-paper" data-testid="standalone-batch">
                 <header className="agent-preview-header"><h2>素材批次</h2><button type="button" className="agent-text-link" onClick={() => { openIntent.current++; setOpenBatchId(null); }}>返回</button></header>
@@ -1037,6 +1057,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 onAdoptMaterial={adoptMaterial} adoptDisabled={materialAdoptDisabled}
                 onConfirmReview={(work, group, action, entries, label) => confirmReview(work, group, action, entries, label)}
                 onContinueReview={(work, group, label) => continueReview(work, group, label)}
+                onAdoptPreview={adoptPreview}
                 reviewBusyKeys={reviewBusyKeys} canContinueText={canSend}
                 onOpenRun={runId => void openRun(runId)}
                 onEnsureRun={runId => void ensureRun(runId)} referenceErrors={referenceErrors}

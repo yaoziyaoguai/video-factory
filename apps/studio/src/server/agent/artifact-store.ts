@@ -6,11 +6,12 @@ import { canonicalJson, digestOf, newAgentId } from "./util.js";
 import type {
   AcceptanceBlocker, ArtifactHead, ArtifactRevision, AudioSummary, ContentSource, ContentSourceInput, CreationBinding, CreationPurpose,
   CreativeProjectContent, CodeProjectParameters, DeliveryItem, DeliveryReceipt, FeedbackNote, LegacyProductionSpec, LocalCreationSpec, MarkdownContent, MediaContent, MediaProvenance,
-  ModelBinding, OperationRequest, OperationSpec, ProductionIntent, ProductionSpec, Proposal, RequestSource, ReviewGroupDelivery, ReviewInput, ReviewInputInput,
+  ModelBinding, OperationRequest, OperationSpec, ProductionIntent, ProductionSpec, Proposal, RequestSource, ReviewGroupDelivery, ReviewInput, ReviewInputInput, RenderParameters,
   Target, ToolDelivery, ToolProductionIntent, VideoParameters, RevisionRef, ProposalRef, InputRef,
 } from "../../shared/agent/generated/contracts.js";
 import { blobSources, mergeSources, resolveMediaReference, readAdoptedAudioSource } from "./material-store.js";
 import { CODE_PROJECT_INPUT_EXTENSIONS } from "./creative-runner.js";
+import { operationOutputRevision } from "./production-store.js";
 import { speechText, markdownSectionMap, markdownTotalLength } from "../../shared/agent/markdown.js";
 import {
   artifactWorkOwnership, getWorkRow, legacyRevisionStageBinding, parseCreationState, requireWork,
@@ -509,6 +510,7 @@ export function applyDelivery(
   // 前者必须来自同会话已采用的素材，后者必须指向已登记落盘的执行输出或冻结工程修订；
   // 再交给同一 insertRevision；模型不能上交任意媒体或 URL 冒充生成。
   const resolvedContents = new Map<number, MarkdownContent | MediaContent>();
+  const resolvedSources = new Map<number, RevisionRef>();
   for (let index = 0; index < items.length; index++) {
     const item = items[index]!;
     const content = item.content;
@@ -522,7 +524,9 @@ export function applyDelivery(
       resolvedContents.set(index, resolved);
       continue;
     }
-    resolvedContents.set(index, resolveLocalOutput(db, scope, item.kind as "image" | "video" | "audio", content.source));
+    const resolved = resolveLocalOutput(db, scope, item.kind as "image" | "video" | "audio", content.source);
+    resolvedContents.set(index, resolved.content);
+    if (resolved.sourceRevision) resolvedSources.set(index, resolved.sourceRevision);
   }
 
   const newRevisions: (ArtifactRevisionRow | undefined)[] = new Array(items.length);
@@ -539,7 +543,8 @@ export function applyDelivery(
          VALUES (?, ?, ?, ?, ?, NULL, NULL, 0, ?, ?, ?)`,
       ).run(artifactId, request.conversation_id, request.owner_id, item.title, item.kind, seq, now, now);
       const artifact = getArtifactRow(db, request.owner_id, artifactId)!;
-      const binding = bound ? bound.binding : null;
+      const source = resolvedSources.get(index);
+      const binding = bound ? source ? adoptedCreationBinding(db, source, bound.binding) : bound.binding : null;
       const revision = insertRevision(db, now, artifact, null, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, binding);
       if (binding) db.prepare("UPDATE artifacts SET work_id = ? WHERE id = ?").run(binding.workId, artifactId);
       newRevisions[index] = revision;
@@ -575,9 +580,11 @@ export function applyDelivery(
       plans.set(previousBinding.workId, plan);
       implicitDrafts.push({ workId: previousBinding.workId, groupId: previousBinding.groupId, itemId: previousBinding.itemId, itemIndex: index });
     }
-    const binding = bound ? bound.binding
+    const targetBinding = bound ? bound.binding
       : previousBinding ? previousBinding
       : inheritedBinding(db, artifact, scope);
+    const source = resolvedSources.get(index);
+    const binding = targetBinding && source ? adoptedCreationBinding(db, source, targetBinding) : targetBinding;
     const revision = insertRevision(db, now, artifact, item.baseRevisionId, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, binding);
     newRevisions[index] = revision;
   }
@@ -625,14 +632,15 @@ export function applyDelivery(
 }
 
 // 已登记落盘的真实执行输出或冻结工程产物才可作为正式媒体来源（§3.5）。
-function resolveLocalOutput(
+export function resolveLocalOutput(
   db: AgentDatabase,
   scope: { ownerId: string; conversationId: string },
   kind: "image" | "video" | "audio",
   source: { kind: "run_output"; runId: string; operationId: string; outputSlot: string } | { kind: "artifact_revision"; artifactId: string; revisionId: string },
-): MediaContent {
+): { content: MediaContent; sourceRevision: RevisionRef | null } {
   let blobId: string;
   let sourceMedia: MediaContent | undefined;
+  let sourceRevision: RevisionRef | null = null;
   if (source.kind === "artifact_revision") {
     const artifact = getArtifactRow(db, scope.ownerId, source.artifactId);
     const revision = artifact ? getRevisionRow(db, artifact.id, source.revisionId) : undefined;
@@ -642,12 +650,21 @@ function resolveLocalOutput(
     const content = JSON.parse(revision.content_json) as ArtifactRevision["content"];
     if (content.format !== "media") throw new AgentError("INVALID_INPUT", "引用的修订不是媒体产物。");
     sourceMedia = content;
+    sourceRevision = { artifactId: artifact.id, revisionId: revision.id };
     blobId = content.blobId;
   } else {
     const run = db.prepare("SELECT conversation_id FROM production_runs WHERE id = ? AND owner_id = ?").get(source.runId, scope.ownerId) as { conversation_id: string } | undefined;
-    const operation = run ? db.prepare("SELECT output_blob_id FROM production_operations WHERE run_id = ? AND id = ?").get(source.runId, source.operationId) as { output_blob_id: string | null } | undefined : undefined;
+    const operation = run ? db.prepare("SELECT output_blob_id,spec_json FROM production_operations WHERE run_id = ? AND id = ?").get(source.runId, source.operationId) as { output_blob_id: string | null; spec_json: string } | undefined : undefined;
     if (!run || run.conversation_id !== scope.conversationId || !operation?.output_blob_id) {
       throw new AgentError("INVALID_INPUT", "引用的运行输出尚未登记落盘，不能作为正式媒体交付。");
+    }
+    if ((JSON.parse(operation.spec_json) as OperationSpec).outputSlot !== source.outputSlot) {
+      throw new AgentError("INVALID_INPUT", "引用的输出槽位与运行冻结记录不一致。");
+    }
+    const revision = operationOutputRevision(db, source.runId, source.operationId);
+    if (revision) {
+      sourceRevision = { artifactId: revision.artifact_id, revisionId: revision.id };
+      sourceMedia = JSON.parse(revision.content_json) as MediaContent;
     }
     blobId = operation.output_blob_id;
   }
@@ -664,9 +681,27 @@ function resolveLocalOutput(
   if (!expected.includes(blob.mime_type)) {
     throw new AgentError("INVALID_INPUT", `输出媒体类型 ${blob.mime_type} 与交付类型不一致。`);
   }
-  return { format: "media", blobId, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms,
+  return { content: { format: "media", blobId, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms,
     ...(sourceMedia?.dub ? { dub: sourceMedia.dub } : {}),
     ...(sourceMedia?.sources ? { sources: sourceMedia.sources } : {}),
+  }, sourceRevision };
+}
+
+// 候选采用与一步定稿共用：只变目标角色，原字节对应的制作/工程/素材来源仍取准确旧修订。
+export function adoptedCreationBinding(
+  db: AgentDatabase, source: RevisionRef,
+  target: Pick<CreationBinding, "workId" | "groupId" | "itemId" | "purpose">,
+): CreationBinding {
+  const revision = getRevisionRow(db, source.artifactId, source.revisionId);
+  if (!revision) throw new AgentError("NOT_FOUND", "采用的预览修订不存在。");
+  const parsed = revision.creation_binding_json ? JSON.parse(revision.creation_binding_json) as CreationBinding : null;
+  const binding = parsed && Array.isArray(parsed.inputSources) ? parsed : null;
+  return {
+    ...binding, workId: target.workId, groupId: target.groupId, itemId: target.itemId, purpose: target.purpose,
+    inputSources: binding?.inputSources ?? [],
+    reviewInputs: binding?.workId === target.workId ? binding.reviewInputs : [],
+    ...(revision.run_id ? { runId: revision.run_id } : {}),
+    adoptedFrom: { artifactId: source.artifactId, revisionId: source.revisionId },
   };
 }
 
@@ -1080,7 +1115,7 @@ export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, ru
     const music = parameters.music && parameters.music.gain > 0
       ? readInput(operation.inputs[parameters.music.inputSlot]!, source, beforeRun) : null;
     if (music?.hasSpeech) speechInMusic = true;
-    const musicSource = (operation as Extract<OperationSpec, { kind: "render" }>).musicSource;
+    const musicSource = "musicSource" in operation ? operation.musicSource : undefined;
     if (source === spec && id === spec.finalOutput.operationId) {
       audioSummary = {
         original: originals,
@@ -1112,7 +1147,7 @@ export function productionNarrationText(db: AgentDatabase, spec: ProductionInten
 
 // 两个合法绑定点共用：首次报价与先交付，均不得把新台词绑到旧方案。
 // 旧修订仅沿自身已有的唯一冻结输入继承，多个不同台词不能按时间猜一个。
-export function validatePlanNarration(db: AgentDatabase, plan: ContentSource, spec: ProductionSpec): void {
+export function validatePlanNarration(db: AgentDatabase, plan: ContentSource, spec: ProductionSpec | LocalCreationSpec): void {
   const actual = productionAudioFacts(db, spec).knownNarrationText;
   if (actual === null || plan.kind !== "artifact_revision") return;
   const content = JSON.parse(getRevisionRow(db, plan.artifactId, plan.revisionId)!.content_json) as MarkdownContent;
@@ -1126,6 +1161,21 @@ export function validatePlanNarration(db: AgentDatabase, plan: ContentSource, sp
   if (actual !== expected) throw new AgentError("PROPOSAL_STALE", "实际配音与方案旁白原文不一致；换词请交付新方案，再关联本次报价。");
 }
 
+// 两种受理共享声音约束：采用准确旧配音不能变词，也不能把已知配音或已混旧曲伪装成新音乐。
+export function validateProductionAudio(db: AgentDatabase, spec: ProductionSpec | LocalCreationSpec): void {
+  for (const operation of spec.operations) {
+    if (operation.kind !== "render" || operation.parameters.assembly !== "mixed_concat") continue;
+    const audio = productionAudioFacts(db, { ...spec, finalOutput: { operationId: operation.operationId, outputSlot: operation.outputSlot } });
+    if (audio.speechInMusic) throw new AgentError("INVALID_INPUT", "已知配音不能放进音乐槽；请作为独立配音使用并核对方案原文。");
+    if (audio.stackedMusic) throw new AgentError("INVALID_INPUT", "该片段已混入旧音乐；换音乐请读回原运行，复用原始视觉片段和既有配音，不叠加旧曲。");
+  }
+  for (const reviewInput of spec.reviewInputs) {
+    if (reviewInput.source.kind !== "artifact_revision") continue;
+    const content = JSON.parse(getRevisionRow(db, reviewInput.source.artifactId, reviewInput.source.revisionId)!.content_json) as MarkdownContent;
+    if (content.format === "markdown" && content.narrationText !== undefined) validatePlanNarration(db, reviewInput.source, spec);
+  }
+}
+
 export const PROPOSAL_TTL_MS = 30 * 60 * 1000;
 
 // Pi 工具 intent 不带 maxCreateAttempts：按目录通道补齐为内部完整 intent。
@@ -1137,6 +1187,12 @@ export function normalizeToolIntent(intent: ToolProductionIntent, catalog: Quote
       maxCreateAttempts: catalog[`${op.kind}:${op.model === null ? op.parameters.assembly : op.model.modelId}`]?.maxCreateAttempts ?? 1,
     })) as ProductionIntent["operations"],
   };
+}
+
+export function requirePaidProduction(intent: Pick<ProductionIntent | ToolProductionIntent, "operations">): void {
+  if (intent.operations.every(operation => operation.kind === "render" && operation.model === null)) {
+    throw new AgentError("INVALID_INPUT", "纯本地合成请使用 render_project；prepare_production 只准备含付费媒体操作的整批提案。");
+  }
 }
 
 // S3：code_project 受理边界的一次性核对（付费/本地共用）。entrypoint 以冻结工程为权威，
@@ -1161,24 +1217,22 @@ export function validateCodeProjectExecution(parameters: CodeProjectParameters, 
   }
 }
 
-// prepare_production 单事务：校验输入来源与认可 → 服务端解析报价 → 落库提案 → 事件。
-// 供 Pi 工具与 HTTP prepareProposal 共用；调用方负责自己的幂等键与真实 requestSource 注入。
-// probes 由调用方在事务外用 ffprobe 预先取得（付费前探测已有渲染输入文件）。
-export function applyPrepareProposal(
+// 付费与本地受理共用冻结输入事实和 render 参数规范化；不产生提案、授权或写库。
+export function normalizeOperationInputs(
   db: AgentDatabase,
-  now: string,
   scope: { ownerId: string; conversationId: string },
-  intent: ProductionIntent,
+  inputSources: readonly ContentSource[],
+  operationRequests: readonly OperationRequest[],
   catalog: QuoteCatalog,
-  requestSource: RequestSource,
   probes?: Map<string, RenderFileProbe>,
-  replacesProposal?: ProposalRef,
-): { proposal: ProposalRow; replayed: boolean } {
-  const work = intent.workId === null ? null : requireWork(db, scope.ownerId, scope.conversationId, intent.workId);
-  // 实际输入与必要认可分开解析（§4.2.1）：inputSources 是执行输入清单，reviewInputs 是受理依据。
-  const inputSources = intent.inputSources.map(source => resolveContentSource(db, scope, source));
-  const reviewInputs = intent.reviewInputs.map(input =>
-    verifyReviewInput(db, scope, input, intent.workId === null ? undefined : { workId: intent.workId }));
+): {
+  validation: CatalogValidationContext;
+  renderParameters: Map<string, RenderParameters>;
+  musicSources: Map<string, MediaProvenance>;
+  durationBounds: Map<string, number>;
+  durationVerified: Map<string, boolean>;
+  hasUnusedRevisions: boolean;
+} {
   const revisions = new Map<string, string>();
   for (const source of inputSources) {
     if (source.kind !== "artifact_revision") continue;
@@ -1186,9 +1240,9 @@ export function applyPrepareProposal(
     if (!artifact || artifact.conversation_id !== scope.conversationId) throw new AgentError("INVALID_INPUT", "输入来源不存在或不属于当前会话。");
     revisions.set(`${source.artifactId}:${source.revisionId}`, source.digest);
   }
-  const operations = new Map(intent.operations.map(op => [op.operationId, op]));
-  if (operations.size !== intent.operations.length) throw new AgentError("INVALID_INPUT", "操作 ID 不能重复。");
-  if (new Set(intent.operations.map(op => op.outputSlot)).size !== intent.operations.length) throw new AgentError("INVALID_INPUT", "输出槽位不能重复。");
+  const operations = new Map(operationRequests.map(op => [op.operationId, op]));
+  if (operations.size !== operationRequests.length) throw new AgentError("INVALID_INPUT", "操作 ID 不能重复。");
+  if (new Set(operationRequests.map(op => op.outputSlot)).size !== operationRequests.length) throw new AgentError("INVALID_INPUT", "输出槽位不能重复。");
   const used = new Set<string>();
   const visited = new Set<string>();
   const visiting = new Set<string>();
@@ -1196,7 +1250,7 @@ export function applyPrepareProposal(
   const textCodepoints = new Map<string, number>();
   const operationSources = new Map<string, MediaProvenance[]>();
   const musicSources = new Map<string, MediaProvenance>();
-  const mixedParametersById = new Map<string, Extract<OperationSpec, { kind: "render" }>["parameters"]>();
+  const renderParameters = new Map<string, RenderParameters>();
   // 同 run 的 code_project 操作各用 run+operation 独立工作区执行（local-render），
   // 不限制输出路径同名；输出与自身封存输入/输入槽的分离由执行边界保证。
   // 自底向上的输出时长上界（ms）：已有文件取真实时长，待生成输出取通道冻结上界；narrated 据此拒绝已知超限。
@@ -1420,7 +1474,7 @@ export function applyPrepareProposal(
           sources[music.inputSlot] = music.gain > 0 ? sources[music.inputSlot]! : [];
         }
       }
-      mixedParametersById.set(id, { ...mixedParameters,
+      renderParameters.set(id, { ...mixedParameters,
         segments: mixedParameters.segments.map(segment => {
           if (segment.kind === "image") return segment;
           const fact = facts[segment.inputSlot]!;
@@ -1476,11 +1530,36 @@ export function applyPrepareProposal(
         ? timelineParameters.segments.every(segment => slotVerified[segment.inputSlot] === true)
         : allSlotsVerified);
     }
+    if (parameters && !mixedParameters) renderParameters.set(id, parameters);
     trusted.set(id, facts);
     visiting.delete(id); visited.add(id);
   };
-  for (const op of intent.operations) visit(op.operationId);
-  if (used.size !== revisions.size) throw new AgentError("INVALID_INPUT", "输入来源中存在未被使用的修订。");
+  for (const op of operationRequests) visit(op.operationId);
+  return { validation: { trusted, textCodepoints, ...(probes ? { renderFileProbes: probes } : {}) }, renderParameters, musicSources,
+    durationBounds, durationVerified, hasUnusedRevisions: used.size !== revisions.size };
+}
+
+// prepare_production 单事务：校验输入来源与认可 → 服务端解析报价 → 落库提案 → 事件。
+// 供 Pi 工具与 HTTP prepareProposal 共用；调用方负责自己的幂等键与真实 requestSource 注入。
+// probes 由调用方在事务外用 ffprobe 预先取得（付费前探测已有渲染输入文件）。
+export function applyPrepareProposal(
+  db: AgentDatabase,
+  now: string,
+  scope: { ownerId: string; conversationId: string },
+  intent: ProductionIntent,
+  catalog: QuoteCatalog,
+  requestSource: RequestSource,
+  probes?: Map<string, RenderFileProbe>,
+  replacesProposal?: ProposalRef,
+): { proposal: ProposalRow; replayed: boolean } {
+  const work = intent.workId === null ? null : requireWork(db, scope.ownerId, scope.conversationId, intent.workId);
+  // 实际输入与必要认可分开解析（§4.2.1）：inputSources 是执行输入清单，reviewInputs 是受理依据。
+  const inputSources = intent.inputSources.map(source => resolveContentSource(db, scope, source));
+  const reviewInputs = intent.reviewInputs.map(input =>
+    verifyReviewInput(db, scope, input, intent.workId === null ? undefined : { workId: intent.workId }));
+  const { validation, renderParameters, musicSources, durationBounds, durationVerified, hasUnusedRevisions } = normalizeOperationInputs(db, scope, inputSources, intent.operations, catalog, probes);
+  if (hasUnusedRevisions) throw new AgentError("INVALID_INPUT", "输入来源中存在未被使用的修订。");
+  const operations = new Map(intent.operations.map(op => [op.operationId, op]));
   const final = operations.get(intent.finalOutput.operationId);
   if (!final || final.outputSlot !== intent.finalOutput.outputSlot) throw new AgentError("INVALID_INPUT", "最终输出不存在。");
   const finalIsVideo = finalOutputIsVideo(final);
@@ -1511,22 +1590,14 @@ export function applyPrepareProposal(
   } else if (intent.outputTarget != null) {
     throw new AgentError("INVALID_INPUT", "只有最终视频制作才声明输出目标。");
   }
-  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, { trusted, textCodepoints, ...(probes ? { renderFileProbes: probes } : {}) });
+  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, validation);
   for (const operation of spec.operations) {
     if (operation.kind !== "render" || operation.parameters.assembly !== "mixed_concat") continue;
-    operation.parameters = mixedParametersById.get(operation.operationId)!;
+    operation.parameters = renderParameters.get(operation.operationId)!;
     const musicSource = musicSources.get(operation.operationId);
     if (musicSource) operation.musicSource = musicSource;
-    const audio = productionAudioFacts(db, { ...spec, finalOutput: { operationId: operation.operationId, outputSlot: operation.outputSlot } });
-    if (audio.speechInMusic) throw new AgentError("INVALID_INPUT", "已知配音不能放进音乐槽；请作为独立配音使用并核对方案原文。");
-    if (audio.stackedMusic) throw new AgentError("INVALID_INPUT", "该片段已混入旧音乐；换音乐请读回原运行，复用原始视觉片段和既有配音，不叠加旧曲。");
   }
-  // 认可依据中的方案若已冻结逐字旁白，实际配音不得偏离（沿用旧 validatePlanNarration 口径，依据换成 reviewInputs）。
-  for (const reviewInput of reviewInputs) {
-    if (reviewInput.source.kind !== "artifact_revision") continue;
-    const content = JSON.parse(getRevisionRow(db, reviewInput.source.artifactId, reviewInput.source.revisionId)!.content_json) as MarkdownContent;
-    if (content.format === "markdown" && content.narrationText !== undefined) validatePlanNarration(db, reviewInput.source, spec);
-  }
+  validateProductionAudio(db, spec);
   let replaced: ProposalRow | undefined;
   if (replacesProposal) {
     replaced = getProposalRow(db, scope.ownerId, replacesProposal.proposalId);

@@ -15,9 +15,10 @@ import { validatorFor } from "../src/server/agent/validate.js";
 import { invalidateLegacyNarrationProposals, productionAudioFacts, productionNarrationText } from "../src/server/agent/artifact-store.js";
 import { recordReviewConfirmation } from "../src/server/agent/creative-work.js";
 import { persistSearchBatch } from "../src/server/agent/material-store.js";
-import { canonicalJson, digestOf } from "../src/server/agent/util.js";
+import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
+import { emptyReferences, insertMessage, nextSeq } from "../src/server/agent/conversation-store.js";
 import { deliverReviewDrafts, finalVideoTarget, seedConfirmedWork, type ConfirmedReviewWork } from "./helpers/creative-work-fixture.js";
-import { toolIntentOf } from "./helpers/tool-args.js";
+import { admitLocalIntent, toolIntentOf } from "./helpers/tool-args.js";
 import type { BillingFact, CreationBinding, ExecutionObservation, OperationRequest, ProductionIntent, Proposal, Run } from "../src/shared/agent/generated/contracts.js";
 
 const origin = "http://127.0.0.1:4399";
@@ -59,6 +60,14 @@ async function setup(media: OfflineAgentOptions["media"] = {}) {
 }
 async function tick(f: Awaited<ReturnType<typeof setup>>, count = 1) { for (let i = 0; i < count; i++) { await f.app.worker!.pollOnce(); f.advance(); } }
 function count(f: Awaited<ReturnType<typeof setup>>, table: string) { return (f.app.database.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n; }
+
+function approvalMessage(f: Awaited<ReturnType<typeof setup>>, text: string): string {
+  const id = newAgentId("msg");
+  insertMessage(f.app.database, f.clock(), { id, ownerId: "local-owner", conversationId: f.conversation.id, requestId: null,
+    role: "user", kind: "chat", state: "completed", text, target: null,
+    createdSeq: nextSeq(f.app.database, "messages", f.conversation.id), references: emptyReferences() });
+  return id;
+}
 
 type StoredItem = { id: string; role: string; draft: { kind: string; artifactId?: string; revisionId?: string } | null; approved: unknown };
 type StoredState = { groups: { id: string; items: StoredItem[] }[] };
@@ -121,7 +130,7 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
       const source = { kind: "artifact_revision" as const, artifactId: revision.artifactId, revisionId: revision.revisionId, digest };
       const [recorded] = recordReviewConfirmation(f.app.database, f.clock(), scope, {
         workId: confirmed.workId, groupId: confirmed.groupId, items: [{ itemId: confirmed.itemId, source }], action: "approve",
-      }, { kind: "user_message", messageId: seeded.messageId }).items;
+      }, { kind: "user_message", messageId: approvalMessage(f, "认可刚交付的这版雨天方案。") }).items;
       confirmed = { ...confirmed, content: source,
         reviewInput: { groupId: confirmed.groupId, itemId: confirmed.itemId, source, confirmationId: recorded!.confirmationId } };
       return revision;
@@ -213,19 +222,21 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
     assert.equal(productionAudioFacts(f.app.database, mixed).knownNarrationText, l1, "未知原声和歌曲不清空已知独立L1");
     // 换稿：脚本推进到 l2 并重新认可后，引用 l2 认可的报价与 l1 复用配音不一致，必须在准备时拒绝。
     const second = confirmScript(l2);
-    await assert.rejects(() => f.app.service.prepareProposal(scope.ownerId, scope.conversationId,
-      { commandId: cmd(), spec: { ...mixed, reviewInputs: [confirmed.reviewInput] } }), /旁白.*不一致/);
-    const musicProposal = (await f.app.service.prepareProposal(scope.ownerId, scope.conversationId, { commandId: cmd(), spec: mixed })).proposal;
-    assert.equal(musicProposal.audioSummary?.narration?.text, l1);
-    assert.equal(musicProposal.audioSummary?.music?.source.title, "本地音乐夹具");
-    assert.equal(musicProposal.audioSummary?.original[0]?.textCoverage, "unknown");
-    assert.ok(validatorFor("Proposal")(musicProposal).ok);
+    await assert.rejects(() => admitLocalIntent(f.app, scope, { ...mixed, reviewInputs: [confirmed.reviewInput] }, false), /旁白.*不一致/);
+    const musicRun = (await admitLocalIntent(f.app, scope, mixed, false)).run;
+    assert.equal(musicRun.audioSummary?.narration?.text, l1);
+    assert.equal(musicRun.audioSummary?.music?.source.title, "本地音乐夹具");
+    assert.equal(musicRun.audioSummary?.original[0]?.textCoverage, "unknown");
+    assert.equal(musicRun.finance, null);
+    assert.ok(validatorFor("Run")(musicRun).ok);
+    await tick(f, 2);
+    assert.equal(f.app.service.getRun(scope.ownerId, musicRun.id).state, "succeeded");
     const disguised = structuredClone(mixed);
     const disguisedRender = disguised.operations[0]!;
     if (disguisedRender.kind !== "render" || disguisedRender.parameters.assembly !== "mixed_concat") throw new Error("expected mixed render");
     disguisedRender.inputs[2] = { kind: "artifact_revision", artifactId: oldAudio.artifactId, revisionId: oldAudio.revisionId, digest: oldAudio.digest };
     disguisedRender.parameters.music = { ...disguisedRender.parameters.music!, candidateId: "fixture-disguised-speech", sourceStartMs: 0, sourceDurationMs: 1, playDurationMs: 1, fadeInMs: 0, fadeOutMs: 0 };
-    await assert.rejects(() => f.app.service.prepareProposal(scope.ownerId, scope.conversationId, { commandId: cmd(), spec: disguised }), /已知配音不能放进音乐槽/);
+    await assert.rejects(() => admitLocalIntent(f.app, scope, disguised, false), /已知配音不能放进音乐槽/);
     const noNarration = structuredClone(mixed);
     const noNarrationRender = noNarration.operations[0]!;
     if (noNarrationRender.kind !== "render" || noNarrationRender.parameters.assembly !== "mixed_concat") throw new Error("expected mixed render");
@@ -233,8 +244,10 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
     noNarrationRender.inputs.splice(1, 1);
     noNarrationRender.parameters.music!.inputSlot = 1;
     noNarration.inputSources = [];
-    const noVoice = (await f.app.service.prepareProposal(scope.ownerId, scope.conversationId, { commandId: cmd(), spec: noNarration })).proposal;
+    const noVoice = (await admitLocalIntent(f.app, scope, noNarration, false)).run;
     assert.equal(noVoice.audioSummary?.music?.duckUnderNarration, false, "没有独立配音时在digest前展开不避让");
+    await tick(f, 2);
+    assert.equal(f.app.service.getRun(scope.ownerId, noVoice.id).state, "succeeded");
     const nested = makeSpec(l1);
     nested.operations.push({ kind: "render", operationId: "join", outputSlot: "joined", model: null,
       inputs: [{ kind: "operation_output", producerOperationId: "film", outputSlot: "film" }],
@@ -744,18 +757,13 @@ it("G3-3 混音音乐槽接受本地 WAV：无 candidateId 不伪造来源，旁
           segmentIds: ["walk-a"], music: { inputSlot: 1, sourceStartMs: 1000, sourceDurationMs: 6000,
             timelineStartMs: 0, playDurationMs: 6000, repeat: false, gain: 0.2, fadeInMs: 200, fadeOutMs: 400, duckUnderNarration: false } } }],
       finalOutput: { operationId: "mix", outputSlot: "mixed" } };
-    const proposal = (await f.app.service.prepareProposal("local-owner", f.conversation.id, { commandId: cmd(), spec: mixed })).proposal;
-    assert.ok(proposal.audioSummary, "报价带声音事实摘要");
-    assert.equal(proposal.audioSummary!.music, null, "本地音频无外部采用来源，不伪造 music 来源卡片");
-    assert.ok(proposal.audioSummary!.original[0]!, "画面原声摘要仍在");
-    assert.ok(validatorFor("Proposal")(proposal).ok);
-
     // 伪造外部候选 ID：候选不存在，如实拒绝（不静默放行）。
     const forged = structuredClone(mixed);
     const forgedRender = forged.operations[0]!;
     if (forgedRender.kind !== "render" || forgedRender.parameters.assembly !== "mixed_concat") throw new Error("expected mixed render");
     forgedRender.parameters.music = { ...forgedRender.parameters.music!, candidateId: "nonexistent-candidate" };
-    await assert.rejects(() => f.app.service.prepareProposal("local-owner", f.conversation.id, { commandId: cmd(), spec: forged }), /没有找到这个会话里的音乐候选/);
+    const scope = { ownerId: "local-owner", conversationId: f.conversation.id };
+    await assert.rejects(() => admitLocalIntent(f.app, scope, forged, false), /没有找到这个会话里的音乐候选/);
 
     // 旁白槽仍是供应商 MP3 契约：本地 WAV 放旁白槽被拒（音乐槽与旁白槽分开构造，避免槽位重叠先触发）。
     const wavNarration = structuredClone(mixed);
@@ -764,10 +772,17 @@ it("G3-3 混音音乐槽接受本地 WAV：无 candidateId 不伪造来源，旁
     const narrationWav = f.app.production!.blobs.persist("local-owner", f.conversation.id, Buffer.from("local-narration-wav-fixture"), "audio/wav", 5000);
     narrationRender.inputs.push({ kind: "blob", blobId: narrationWav.id, digest: narrationWav.digest });
     narrationRender.parameters.narration = { inputSlot: 2, timelineStartMs: 0, gain: 1 };
-    await assert.rejects(() => f.app.service.prepareProposal("local-owner", f.conversation.id, { commandId: cmd(), spec: wavNarration }), /旁白槽只接受音频素材/);
+    await assert.rejects(() => admitLocalIntent(f.app, scope, wavNarration, false), /旁白槽只接受音频素材/);
 
-    // 报价的运行范围与来源事实保持一致：spec 内没有伪造的 musicSource。
-    const mixedOperation = proposal.spec.operations[0]!;
+    const local = (await admitLocalIntent(f.app, scope, mixed, false)).run;
+    assert.ok(local.audioSummary, "免费运行带声音事实摘要");
+    assert.equal(local.audioSummary.music, null, "本地音频无外部采用来源，不伪造 music 来源卡片");
+    assert.ok(local.audioSummary.original[0]!, "画面原声摘要仍在");
+    assert.equal(local.finance, null);
+    assert.ok(validatorFor("Run")(local).ok);
+    // 本地快照的运行范围与来源事实保持一致：没有伪造的 musicSource。
+    const frozen = JSON.parse((f.app.database.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(local.snapshotId) as { spec_json: string }).spec_json);
+    const mixedOperation = frozen.operations[0]!;
     assert.ok(mixedOperation.kind === "render" && mixedOperation.parameters.assembly === "mixed_concat");
     assert.equal(mixedOperation.musicSource, undefined, "无 candidateId 时 spec 不带外部音乐来源");
   } finally { await f.close(); }
@@ -831,7 +846,7 @@ it("A1 混合批次认可门：video+image 未认可不落 run；认可实际版
     recordReviewConfirmation(f.app.database, f.clock(), scope, {
       workId: f.confirmed.workId, groupId: f.confirmed.groupId,
       items: [{ itemId: f.confirmed.itemId, source: v2 }], action: "approve",
-    }, { kind: "user_message", messageId: seeded.messageId });
+    }, { kind: "user_message", messageId: approvalMessage(f, "认可刚交付的 v2 内容。") });
     for (const order of ["video-first", "image-first"] as const) {
       const admitted = (await f.app.service.prepareProposal("local-owner", f.conversation.id,
         { commandId: cmd(), spec: mixed(order, [f.confirmed.reviewInput]) })).proposal;

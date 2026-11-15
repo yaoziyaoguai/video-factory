@@ -1,5 +1,642 @@
 [
   {
+    "name": "standalone script confirmation pins its exact revision without a work",
+    "schema": "ReviewConfirmation",
+    "valid": true,
+    "value": {
+      "kind": "standalone_artifact",
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "approve"
+    }
+  },
+  {
+    "name": "confirm review accepts exact standalone approval",
+    "schema": "ToolConfirmReview",
+    "valid": true,
+    "value": {
+      "kind": "standalone_artifact",
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "approve"
+    }
+  },
+  {
+    "name": "preview adoption confirms one exact existing preview",
+    "schema": "ReviewConfirmation",
+    "valid": true,
+    "value": {
+      "kind": "adopt_preview",
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "walk_preview",
+      "source": {
+        "artifactId": "preview_1",
+        "revisionId": "preview_v1"
+      },
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "confirm review accepts explicit same byte preview finalization",
+    "schema": "ToolConfirmReview",
+    "valid": true,
+    "value": {
+      "kind": "adopt_preview",
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "walk_preview",
+      "source": {
+        "artifactId": "preview_1",
+        "revisionId": "preview_v1"
+      },
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "standalone approval cannot request finalization",
+    "schema": "ToolConfirmReview",
+    "valid": false,
+    "value": {
+      "kind": "standalone_artifact",
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "standalone confirmation cannot mix in work identity",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "kind": "standalone_artifact",
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "approve",
+      "workId": "work_creation"
+    }
+  },
+  {
+    "name": "preview adoption cannot mix in old work items",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "kind": "adopt_preview",
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "walk_preview",
+      "source": {
+        "artifactId": "preview_1",
+        "revisionId": "preview_v1"
+      },
+      "action": "finalize_video",
+      "items": []
+    }
+  },
+  {
+    "name": "preview adoption source remains a plain RevisionRef",
+    "schema": "ToolConfirmReview",
+    "valid": false,
+    "value": {
+      "kind": "adopt_preview",
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "walk_preview",
+      "source": {
+        "kind": "artifact_revision",
+        "artifactId": "preview_1",
+        "revisionId": "preview_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "action": "finalize_video"
+    }
+  },
+  {
+    "name": "standalone confirmation requires its explicit kind",
+    "schema": "ReviewConfirmation",
+    "valid": false,
+    "value": {
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "approve"
+    }
+  },
+  {
+    "name": "standalone tool cannot forge the source user message",
+    "schema": "ToolConfirmReview",
+    "valid": false,
+    "value": {
+      "kind": "standalone_artifact",
+      "artifactId": "script_standalone",
+      "revisionId": "script_v1",
+      "action": "approve",
+      "sourceMessageId": "message_forged"
+    }
+  },
+  {
+    "name": "standalone approval uses the existing message entry",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_standalone",
+      "text": "认可这一版脚本",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "kind": "standalone_artifact",
+        "artifactId": "script_standalone",
+        "revisionId": "script_v1",
+        "action": "approve"
+      },
+      "librarySelections": []
+    }
+  },
+  {
+    "name": "preview finalization uses the existing message entry",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "command_adopt",
+      "text": "以这版定稿并入库",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewConfirmation": {
+        "kind": "adopt_preview",
+        "workId": "work_creation",
+        "groupId": "visual_1",
+        "itemId": "walk_preview",
+        "source": {
+          "artifactId": "preview_1",
+          "revisionId": "preview_v1"
+        },
+        "action": "finalize_video"
+      },
+      "librarySelections": []
+    }
+  },
+  {
+    "name": "standalone head keeps the approved old revision after editing",
+    "schema": "ArtifactHead",
+    "valid": true,
+    "value": {
+      "id": "script_standalone",
+      "title": "独立脚本新版",
+      "kind": "script",
+      "revisionId": "script_v2",
+      "revisionNumber": 2,
+      "workId": null,
+      "updatedAt": "2026-11-14T08:01:00Z",
+      "standaloneApproval": {
+        "confirmationId": "confirmation_script_1",
+        "revisionId": "script_v1",
+        "approvedAt": "2026-11-14T08:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "same byte adoption preserves the original preview binding",
+    "schema": "CreationBinding",
+    "valid": true,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "video_item",
+      "inputSources": [],
+      "reviewInputs": [],
+      "purpose": "production",
+      "projectRevision": {
+        "artifactId": "project_1",
+        "revisionId": "project_v1"
+      },
+      "projectRevisions": [
+        {
+          "artifactId": "project_1",
+          "revisionId": "project_v1"
+        }
+      ],
+      "runId": "run_preview",
+      "adoptedFrom": {
+        "artifactId": "preview_1",
+        "revisionId": "preview_v1"
+      }
+    }
+  },
+  {
+    "name": "adoption binding cannot omit its original preview revision",
+    "schema": "CreationBinding",
+    "valid": false,
+    "value": {
+      "workId": "work_creation",
+      "groupId": "visual_1",
+      "itemId": "video_item",
+      "inputSources": [],
+      "reviewInputs": [],
+      "purpose": "production",
+      "adoptedFrom": {
+        "artifactId": "preview_1"
+      }
+    }
+  },
+  {
+    "name": "library material preserves the original plain revision source",
+    "schema": "LibraryMaterial",
+    "valid": true,
+    "value": {
+      "source": {
+        "artifactId": "character_1",
+        "revisionId": "character_v1"
+      },
+      "label": "人物",
+      "kind": "image",
+      "provenance": []
+    }
+  },
+  {
+    "name": "library raw material points to one exact frozen input",
+    "schema": "LibraryMaterial",
+    "valid": true,
+    "value": {
+      "source": {
+        "kind": "run_input",
+        "runId": "run_preview",
+        "operationId": "concat",
+        "inputIndex": 0,
+        "blobId": "blob_raw_video"
+      },
+      "label": "原始片段",
+      "kind": "video",
+      "provenance": []
+    }
+  },
+  {
+    "name": "raw library selection keeps the exact finalized source video",
+    "schema": "LibrarySelection",
+    "valid": true,
+    "value": {
+      "sourceVideo": {
+        "artifactId": "video_1",
+        "revisionId": "video_v1"
+      },
+      "source": {
+        "kind": "run_input",
+        "runId": "run_preview",
+        "operationId": "concat",
+        "inputIndex": 0,
+        "blobId": "blob_raw_video"
+      }
+    }
+  },
+  {
+    "name": "raw library coordinates alone do not replace source video",
+    "schema": "LibrarySelection",
+    "valid": false,
+    "value": {
+      "source": {
+        "kind": "run_input",
+        "runId": "run_preview",
+        "operationId": "concat",
+        "inputIndex": 0,
+        "blobId": "blob_raw_video"
+      }
+    }
+  },
+  {
+    "name": "library material cannot mix revision and raw coordinate branches",
+    "schema": "LibraryMaterial",
+    "valid": false,
+    "value": {
+      "source": {
+        "kind": "run_input",
+        "runId": "run_preview",
+        "operationId": "concat",
+        "inputIndex": 0,
+        "blobId": "blob_raw_video",
+        "artifactId": "character_1",
+        "revisionId": "character_v1"
+      },
+      "label": "原始片段",
+      "kind": "video",
+      "provenance": []
+    }
+  },
+  {
+    "name": "raw library input position cannot be negative",
+    "schema": "LibrarySelectionSource",
+    "valid": false,
+    "value": {
+      "kind": "run_input",
+      "runId": "run_preview",
+      "operationId": "concat",
+      "inputIndex": -1,
+      "blobId": "blob_raw_video"
+    }
+  },
+  {
+    "name": "raw library input position must be an integer",
+    "schema": "LibrarySelectionSource",
+    "valid": false,
+    "value": {
+      "kind": "run_input",
+      "runId": "run_preview",
+      "operationId": "concat",
+      "inputIndex": 0.5,
+      "blobId": "blob_raw_video"
+    }
+  },
+  {
+    "name": "raw library input position follows the existing 24 input cap",
+    "schema": "LibrarySelectionSource",
+    "valid": false,
+    "value": {
+      "kind": "run_input",
+      "runId": "run_preview",
+      "operationId": "concat",
+      "inputIndex": 24,
+      "blobId": "blob_raw_video"
+    }
+  },
+  {
+    "name": "local render request accepts native ordered concat",
+    "schema": "ProjectRenderRequestOperation",
+    "valid": true,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_raw_video",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "parameters": {
+        "assembly": "ordered_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24,
+        "audioMode": "preserve"
+      },
+      "target": {
+        "group": {
+          "mode": "existing",
+          "groupId": "visual_1"
+        },
+        "item": {
+          "mode": "existing",
+          "itemId": "video_item"
+        }
+      }
+    }
+  },
+  {
+    "name": "local render request accepts native narrated concat",
+    "schema": "ProjectRenderRequestOperation",
+    "valid": true,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_raw_video",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "blob",
+          "blobId": "blob_narration",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "parameters": {
+        "assembly": "narrated_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24,
+        "videoInputSlots": [
+          0
+        ],
+        "narrationInputSlot": 1,
+        "durationPolicy": "preserve_all"
+      },
+      "target": {
+        "group": {
+          "mode": "existing",
+          "groupId": "visual_1"
+        },
+        "item": {
+          "mode": "existing",
+          "itemId": "video_item"
+        }
+      }
+    }
+  },
+  {
+    "name": "local render request accepts native timed narrated concat",
+    "schema": "ProjectRenderRequestOperation",
+    "valid": true,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_raw_video",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "blob",
+          "blobId": "blob_narration",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "parameters": {
+        "assembly": "timed_narrated_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24,
+        "segments": [
+          {
+            "kind": "video",
+            "inputSlot": 0,
+            "startMs": 0,
+            "durationMs": 3000
+          }
+        ],
+        "narrationInputSlot": 1
+      },
+      "target": {
+        "group": {
+          "mode": "existing",
+          "groupId": "visual_1"
+        },
+        "item": {
+          "mode": "existing",
+          "itemId": "video_item"
+        }
+      }
+    }
+  },
+  {
+    "name": "local render request accepts native mixed concat",
+    "schema": "ProjectRenderRequestOperation",
+    "valid": true,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_raw_video",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "parameters": {
+        "assembly": "mixed_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24,
+        "segments": [
+          {
+            "kind": "video",
+            "inputSlot": 0,
+            "startMs": 0,
+            "durationMs": 3000,
+            "originalGain": 0.4
+          }
+        ],
+        "segmentIds": [
+          "opening"
+        ]
+      },
+      "target": {
+        "group": {
+          "mode": "existing",
+          "groupId": "visual_1"
+        },
+        "item": {
+          "mode": "existing",
+          "itemId": "video_item"
+        }
+      }
+    }
+  },
+  {
+    "name": "local operation freezes host resolved music provenance",
+    "schema": "LocalRenderOperation",
+    "valid": true,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [
+        {
+          "kind": "blob",
+          "blobId": "blob_raw_video",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "kind": "blob",
+          "blobId": "blob_music",
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "kind": "render",
+      "model": null,
+      "parameters": {
+        "assembly": "mixed_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24,
+        "segments": [
+          {
+            "kind": "video",
+            "inputSlot": 0,
+            "startMs": 0,
+            "durationMs": 3000,
+            "originalGain": 0.4
+          }
+        ],
+        "segmentIds": [
+          "opening"
+        ],
+        "music": {
+          "inputSlot": 1,
+          "candidateId": "candidate_music",
+          "sourceStartMs": 0,
+          "sourceDurationMs": 3000,
+          "timelineStartMs": 0,
+          "playDurationMs": 3000,
+          "repeat": false,
+          "gain": 0.2,
+          "fadeInMs": 0,
+          "fadeOutMs": 0,
+          "duckUnderNarration": false
+        }
+      },
+      "target": {
+        "groupId": "visual_1",
+        "itemId": "video_item",
+        "baseRevisionId": null
+      },
+      "musicSource": {
+        "provider": "freetouse",
+        "assetId": "music_1",
+        "sourceUrl": "https://example.invalid/music/1",
+        "creatorName": "Example Artist",
+        "creatorUrl": null,
+        "licenseUrl": "https://example.invalid/license",
+        "acquiredAt": "2026-11-14T08:00:00Z",
+        "attributionText": "Example music attribution"
+      }
+    }
+  },
+  {
+    "name": "render request cannot supply read only music provenance",
+    "schema": "ProjectRenderRequestOperation",
+    "valid": false,
+    "value": {
+      "operationId": "concat",
+      "outputSlot": "video",
+      "inputs": [],
+      "parameters": {
+        "assembly": "ordered_concat",
+        "format": "mp4",
+        "width": 1280,
+        "height": 720,
+        "fps": 24
+      },
+      "target": {
+        "group": {
+          "mode": "existing",
+          "groupId": "visual_1"
+        },
+        "item": {
+          "mode": "existing",
+          "itemId": "video_item"
+        }
+      },
+      "musicSource": {
+        "provider": "freetouse",
+        "assetId": "music_1",
+        "sourceUrl": "https://example.invalid/music/1",
+        "creatorName": "Example Artist",
+        "creatorUrl": null,
+        "licenseUrl": "https://example.invalid/license",
+        "acquiredAt": "2026-11-14T08:00:00Z"
+      }
+    }
+  },
+  {
     "name": "mixed three fixed audio roles with exact segments",
     "schema": "RenderParameters",
     "valid": true,
@@ -5336,6 +5973,75 @@
     "valid": true,
     "value": {
       "title": "去山里，慢下来"
+    }
+  },
+  {
+    "name": "start work explicitly adopts an existing exact script revision",
+    "schema": "ToolStartWork",
+    "valid": true,
+    "value": {
+      "title": "从独立文稿开始视频",
+      "adoptContent": {
+        "kind": "artifact_revision",
+        "artifactId": "script_standalone",
+        "revisionId": "script_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "start work explicitly adopts existing message text",
+    "schema": "ToolStartWork",
+    "valid": true,
+    "value": {
+      "title": "从消息内容开始视频",
+      "adoptContent": {
+        "kind": "message_text",
+        "messageId": "message_content",
+        "text": "清晨沿着山路出发。"
+      }
+    }
+  },
+  {
+    "name": "start work adoption needs a full content source rather than a bare revision ref",
+    "schema": "ToolStartWork",
+    "valid": false,
+    "value": {
+      "title": "从独立文稿开始视频",
+      "adoptContent": {
+        "kind": "artifact_revision",
+        "artifactId": "script_standalone",
+        "revisionId": "script_v1"
+      }
+    }
+  },
+  {
+    "name": "start work cannot submit a standalone confirmation identity",
+    "schema": "ToolStartWork",
+    "valid": false,
+    "value": {
+      "title": "从独立文稿开始视频",
+      "adoptContent": {
+        "kind": "artifact_revision",
+        "artifactId": "script_standalone",
+        "revisionId": "script_v1",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "confirmationId": "confirmation_script_1"
+    }
+  },
+  {
+    "name": "start work adoption cannot self report message author",
+    "schema": "ToolStartWork",
+    "valid": false,
+    "value": {
+      "title": "从消息内容开始视频",
+      "adoptContent": {
+        "kind": "message_text",
+        "messageId": "message_content",
+        "text": "清晨沿着山路出发。",
+        "author": "user"
+      }
     }
   },
   {

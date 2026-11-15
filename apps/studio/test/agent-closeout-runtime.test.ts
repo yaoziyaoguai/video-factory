@@ -4,6 +4,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import { assembleOfflineAgent, FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
 import { createAgentRuntime } from "../src/server/agent/assembly.js";
 import { projectDraftItems } from "../src/server/agent/artifact-drafts.js";
@@ -213,22 +214,36 @@ test("S1-04 未核实身份的文本目录可读但不能发送；绑定解析�
 
 // 错误发生在交付之后：一次原生恢复更换 toolCallId，仍只有一批正式成果。
 test("S1-06 原生 overflow 只恢复一次，新 toolCallId 不重复交付，最终失败如实结束", async t => {
-  // 窗口只放大到不被首轮工具清单撑破 threshold：本测验证的是显式超窗错误的恢复语义，
-  // 不是容量逼近；threshold 先行会把可压缩内容耗尽，显式 overflow 恢复被静默跳过。
-  const { app, id } = await fixture(t, { fauxContextWindow: 40_000, compaction: { reserveTokens: 3000, keepRecentTokens: 200 } });
+  // 工具 schema 已增至约 75k 字符，Faux 首轮用量同时包含 input/cacheWrite，超过旧 37k threshold。
+  // 使用离线宿主的 64k 窗口，让本测先进入显式 overflow；threshold 有独立用例覆盖。
+  const contextWindow = 64_000, reserveTokens = 3000;
+  const { app, id, dataDir } = await fixture(t, { fauxContextWindow: contextWindow, compaction: { reserveTokens, keepRecentTokens: 200 } });
   const statuses: ContextStatus[] = []; app.service.hub().subscribeContextStatus(id, s => statuses.push(s));
+  const contexts: { summary: boolean; estimatedTokens: number; toolSchemaChars: number; imageBlocks: number }[] = [];
   let summaries = 0;
   const overflow = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" });
   // 响应按消费时新建：预建消息的时间戳早于前置压缩，会被 SDK 当作压缩前旧错误跳过恢复。
   const steps = [() => deliver("first"), overflow, () => deliver("second"), () => fauxAssistantMessage("恢复后的最终答复")];
   const factory: FauxResponseStep = ctx => {
     app.faux!.appendResponses([factory]);
+    contexts.push({ summary: isSummary(ctx), estimatedTokens: ctx.messages.reduce((sum, message) => sum + estimateTokens(message), 0),
+      toolSchemaChars: ctx.messages.reduce((sum, message) => sum + (message.role === "system" ? JSON.stringify(message.toolsAdded ?? []).length : 0), 0),
+      imageBlocks: ctx.messages.reduce((sum, message) => sum + (Array.isArray(message.content) ? message.content.filter(block => block.type === "image").length : 0), 0) });
     if (isSummary(ctx)) { summaries++; return fauxAssistantMessage("保留已提交的批次与等待用户的规则。"); }
     assert.ok(steps.length, "不得无界继续"); return steps.shift()!();
   };
   app.faux!.setResponses([factory]);
   await send(app, id, "交付之后遇到超窗"); await idle(app, id);
-  assert.ok(statuses.some(s => s.reason === "overflow" && s.phase === "compacted" && s.willRetry));
+  const sessionDir = path.join(dataDir, "pi-sessions", id, "s1");
+  const sessionFile = (await readdir(sessionDir)).find(file => file.endsWith(".jsonl"))!;
+  const entries = (await readFile(path.join(sessionDir, sessionFile), "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line) as {
+    message?: { role: string; usage: { input: number; cacheRead: number; cacheWrite: number; totalTokens: number } };
+  });
+  const providerUsage = entries.flatMap(entry => entry.message?.role === "assistant" ? [entry.message.usage] : []);
+  t.diagnostic(JSON.stringify({ contextWindow, threshold: contextWindow - reserveTokens, statuses, summaries, remainingSteps: steps.length, contexts, providerUsage }));
+  assert.ok(providerUsage[0] && providerUsage[0].totalTokens < contextWindow - reserveTokens, "fixture 首轮应能容纳完整工具声明");
+  assert.equal(statuses.some(s => s.reason === "threshold"), false, "显式 overflow 前不能先触发 threshold");
+  assert.ok(statuses.some(s => s.reason === "overflow" && s.phase === "compacted" && s.willRetry), JSON.stringify({ statuses, summaries, contexts }));
   assert.ok(summaries > 0, JSON.stringify({ summaries, statuses }));
   assert.equal(app.service.snapshot("local-owner", id).artifacts.items.length, 2);
   assert.equal((app.database.prepare("SELECT COUNT(*) AS n FROM request_deliveries").get() as { n: number }).n, 1);

@@ -83,9 +83,16 @@ export function seedConfirmedWork(
   const item = parseCreationState(db.prepare("SELECT * FROM works WHERE id = ?").get(work.id) as WorkRow)
     .groups.flatMap(group => group.items.map(entry => ({ group, entry })))
     .find(({ entry }) => entry.draft?.kind === "artifact_revision" && entry.draft.revisionId === revision.revisionId)!;
+  // 认可必须来自交付后的真实用户消息；交稿请求本身不能预先认可尚未出现的修订。
+  const approvalMessageId = newAgentId("msg");
+  insertMessage(db, now, {
+    id: approvalMessageId, conversationId: scope.conversationId, ownerId: scope.ownerId, requestId: null,
+    role: "user", kind: "chat", state: "completed", text: "认可这版脚本。", target: null,
+    createdSeq: nextSeq(db, "messages", scope.conversationId), references: { ...emptyReferences(), artifacts: [revision] },
+  });
   const [recorded] = recordReviewConfirmation(db, now, scope, {
     workId: work.id, groupId: item.group.id, items: [{ itemId: item.entry.id, source }], action: "approve",
-  }, { kind: "user_message", messageId: seeded.messageId }).items;
+  }, { kind: "user_message", messageId: approvalMessageId }).items;
   return {
     workId: work.id, groupId: item.group.id, itemId: item.entry.id, content: source,
     reviewInput: { groupId: item.group.id, itemId: item.entry.id, source, confirmationId: recorded!.confirmationId },

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.42",
+    "version": "0.1.43",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [
@@ -2420,15 +2420,17 @@
     }
   },
   "x-review-policy": {
-    "confirmation": "Exact item sources; host supplies real user action source. No whole-group revision lock.",
-    "continue": "Only approve_and_continue queues one ordinary request; confirm_review only records the current user fact.",
-    "finalization": "Only finalize_video of the current final video; preview clips and ordinary approve never enter the library.",
-    "librarySelections": "Persist exact sourceVideo and source on messages. A confirmation command cannot also carry selections."
+    "startWork": "title-only start_work is unchanged; optional adoptContent:ContentSourceInput pins an existing exact text revision or message explicitly adopted by the current user. Host atomically creates the work, its content review item and a new work confirmation, without copying the text artifact, reusing a standalone confirmation identity or starting production. User action source and identity are host supplied.",
+    "confirmation": "Exclusive unchanged work shape, kind=standalone_artifact approval, or kind=adopt_preview finalization; host supplies real user action source and preserves the exact structured action and target.",
+    "continue": "Only approve_and_continue queues one ordinary request; standalone_artifact only approves an exact independent script revision without creating a work or run.",
+    "finalization": "finalize_video targets the current final video, or atomically adopts an existing exact preview into a same-byte final video through adopt_preview; ordinary approval never finalizes or changes the source clip.",
+    "librarySelections": "Persist exact finalized sourceVideo and artifact_revision, project_file, or run_input source. run_input pins runId/operationId/inputIndex/blobId in the video's actual consumed inputs; coordinates alone grant no access. A confirmation command cannot also carry selections."
   },
   "x-local-creation-policy": {
     "origin": "local_request requestId; finance=null; no proposal, authorization or fictional bill.",
     "snapshots": "New snapshots are typed paid_production/local_creation; preserve old untyped paid JSON/digest.",
     "project": "Freeze and persist before render; project files are never public uploads or executable same-origin previews.",
-    "execution": "Reuse render/Worker and existing per-work admission; image/audio/video from declaration plus actual media probe."
+    "execution": "render_project accepts existing RenderParameters: code_project and all four native concat branches, through the same render/Worker and per-work admission. Native outputs are video; code outputs follow declaration plus actual probe. Host-resolved musicSource is read-only and frozen before digest.",
+    "diagnostics": "ExecutionObservation.message and Run.issue.message allow at most 9600 characters for bounded local execution output tails and exit context; no new log or event protocol."
   }
 }

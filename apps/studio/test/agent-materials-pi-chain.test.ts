@@ -14,9 +14,9 @@ import { FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot } from "../src/server
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { realRenderValidator } from "../src/server/agent/media-config.js";
 import { saveKeyedServiceSettings, saveKeylessServiceSettings, saveNewsNowServiceSettings, savePexelsServiceSettings } from "../src/server/agent/free-service-settings.js";
-import { systemClock } from "../src/server/agent/util.js";
+import { canonicalJson, systemClock } from "../src/server/agent/util.js";
 import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
-import { toolIntentOf } from "./helpers/tool-args.js";
+import { localRenderIntentOf } from "./helpers/tool-args.js";
 import type { ArtifactRevision, MaterialBatch, MaterialImportResult, MaterialSearchResult, ProductionIntent, TrendReadResult } from "../src/shared/agent/generated/contracts.js";
 
 // §0.3 完整 Pi 链验收：Faux 模型经真实 Pi SDK 队列调用素材/资讯/交付/提案工具，
@@ -92,16 +92,15 @@ const toolJson = <T>(message: ToolMessage): T => JSON.parse(message.content.find
 const lastToolJson = <T>(context: { messages: unknown[] }): T => toolJson<T>(lastToolResult(context));
 const toolJsons = <T>(context: { messages: unknown[] }, toolName: string): T[] => toolResults(context, toolName).map(message => toolJson<T>(message));
 
-// prepare_production 的结果是带前缀的人读摘要；提案本体用 readProposal 按 id 读取。
-function preparedSummary(context: { messages: unknown[] }): { proposalId: string; state: string } {
+// render_project 立即返回后台运行摘要；纯本地行为不再准备 ¥0 提案卡。
+function localRenderSummary(context: { messages: unknown[] }): { runId: string; state: string } {
   const text = lastToolResult(context).content.find(part => part.type === "text")!.text!;
-  const prefix = "提案已准备：";
-  assert.ok(text.startsWith(prefix), "prepare 结果应带提案摘要");
-  return JSON.parse(text.slice(prefix.length)) as { proposalId: string; state: string };
+  const prefix = "本地渲染已受理：";
+  assert.ok(text.startsWith(prefix), "render_project 应返回本地受理摘要");
+  return JSON.parse(text.slice(prefix.length)) as { runId: string; state: string };
 }
 
-// ToolCall 参数按 JSON 值约束；类型化的 spec 剥掉服务端定价字段后按契约形状传入，严格校验仍在工具边界执行。
-const prepareProductionArgs = (spec: ProductionIntent) => ({ spec: toolIntentOf(spec) }) as unknown as Parameters<typeof fauxToolCall>[1];
+const renderProjectArgs = (spec: ProductionIntent) => JSON.parse(canonicalJson(localRenderIntentOf(spec)));
 
 function count(db: OfflineAgentAssembly["database"] | AgentRuntime["database"], table: string, where = "1=1"): number {
   return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`).get() as { n: number }).n;
@@ -495,7 +494,7 @@ test("T3-13b Pi 链：短 turnMs 截止挂起下载，不登记采用、不正�
   assert.equal((a.database.prepare("SELECT state FROM requests WHERE id=?").get(next.receipt.requestId) as { state: string }).state, "completed");
 });
 
-test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已有 blob；合法交付写 revision_blob_links", async t => {
+test("T3-14 Pi 链：未采用媒体整批拒绝；免费 render_project 复用已有 blob；合法交付写 revision_blob_links", async t => {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-pi-t314-"));
   await makeClip(path.join(directory, "a.mp4"), "red", 12, 1.2);
   await makeClip(path.join(directory, "b.mp4"), "blue", 30, 0.8);
@@ -540,9 +539,9 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
 
   // 请求 2：伪造“交付从未采用的媒体”→ 整批拒绝（S2-04 决定已采用 blob 跨轮可交付，
   // 原“上一请求未交付 blob 不能再交付”反例由该决定替换，见 DOGFOOD-STAGES-1-3-EXECUTION.md S2-04）；
-  // 再走明确入口 prepare_production 复用同 owner/conversation 的已有 blob 与已交付修订 → ready 且零制作。
+  // 再走 render_project 复用同 owner/conversation 的已有 blob 与已交付修订；只排队，worker 尚未领取。
   let deliveryError = "";
-  let prepared!: { proposalId: string; state: string };
+  let prepared!: { runId: string; state: string };
   // 组审阅模型：正式成片提案引用真实认可事实（reviewInputs）；夹具为此多交付 1 条脚本产物与 1 条交付事务。
   const confirmed = seedConfirmedWork(a.database, systemClock(), { ownerId: "local-owner", conversationId }, "片段成片");
   const spec: ProductionIntent = {
@@ -570,9 +569,9 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
       const last = results.at(-1)!;
       assert.equal(last.isError, true, "引用未采用媒体的交付应整体失败");
       deliveryError = JSON.stringify(last.content);
-      return fauxAssistantMessage([fauxToolCall("prepare_production", prepareProductionArgs(spec))]);
+      return fauxAssistantMessage([fauxToolCall("render_project", renderProjectArgs(spec))]);
     },
-    context => { prepared = preparedSummary(context); return fauxAssistantMessage("提案已备好，等你确认。"); },
+    context => { prepared = localRenderSummary(context); return fauxAssistantMessage("已有片段已受理，后台等待制作。"); },
   ]);
   await a.service.sendMessage("local-owner", conversationId, input("把 B 也交付，再准备成片"));
   await done(a, conversationId);
@@ -580,12 +579,15 @@ test("T3-14 Pi 链：未采用媒体整批拒绝；明确 prepare 可复用已�
   assert.match(deliveryError, /不能作为产物交付/, "模型看到整批拒绝的真实原因");
   assert.equal(count(a.database, "artifacts", "kind!='script'"), 2, "整批回滚，无部分交付");
   assert.equal(count(a.database, "request_deliveries"), 2, "只有请求 1 与认可夹具的合法交付");
-  assert.equal(prepared.state, "ready", "明确提案可复用同会话已有 blob 与已交付修订");
-  assert.equal(a.service.readProposal("local-owner", prepared.proposalId).state, "ready");
-  assert.equal(count(a.database, "production_runs"), 0, "确认前零制作");
+  assert.equal(prepared.state, "queued", "免费受理复用同会话已有 blob 与已交付修订");
+  assert.equal(a.service.getRun("local-owner", prepared.runId).finance, null);
+  assert.equal(count(a.database, "production_runs"), 1);
+  assert.equal(count(a.database, "production_attempts"), 0, "worker 领取前零制作");
+  assert.equal(count(a.database, "proposals"), 0);
+  assert.equal(count(a.database, "authorizations"), 0);
 });
 
-test("T3-15 Pi 链+真实 FFmpeg：正式交付后明确请求 ordered_concat A/B/A，一次确认生成，来源只 A/B 首现序且刷新保持", async t => {
+test("T3-15 Pi 链+真实 FFmpeg：正式交付后免费受理 ordered_concat A/B/A，来源只 A/B 首现序且刷新保持", async t => {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-pi-t315-"));
   await makeClip(path.join(directory, "a.mp4"), "red", 12, 1.2);
   await makeClip(path.join(directory, "b.mp4"), "blue", 30, 0.8);
@@ -641,7 +643,7 @@ test("T3-15 Pi 链+真实 FFmpeg：正式交付后明确请求 ordered_concat A/
   const clipBRevision = runtime.service.readRevision("local-owner", clipBArtifact.id, clipBArtifact.revisionId);
   assert.deepEqual((clipARevision.content as { sources?: Array<{ assetId: string }> }).sources?.map(source => source.assetId), ["101"]);
 
-  // 请求 2：明确准备 ordered_concat A/B/A，等待用户确认。
+  // 请求 2：明确免费受理 ordered_concat A/B/A，已有认可不重复确认费用。
   const confirmed = seedConfirmedWork(runtime.database, clock(), { ownerId: "local-owner", conversationId }, "A/B/A 成片");
   const renderSpec = (order: Array<{ artifactId: string; revisionId: string; digest: string }>): ProductionIntent => {
     const sources = order.map(ref => ({ kind: "artifact_revision" as const, artifactId: ref.artifactId, revisionId: ref.revisionId, digest: ref.digest }));
@@ -658,27 +660,28 @@ test("T3-15 Pi 链+真实 FFmpeg：正式交付后明确请求 ordered_concat A/
       maxSpend: { currency: "CNY", amountMinor: 0 },
     };
   };
-  let prepared!: { proposalId: string; state: string };
+  let prepared!: { runId: string; state: string };
   runtime.host.faux!.setResponses([
-    fauxAssistantMessage([fauxToolCall("prepare_production", prepareProductionArgs(renderSpec([
+    fauxAssistantMessage([fauxToolCall("render_project", renderProjectArgs(renderSpec([
       { artifactId: clipAArtifact.id, revisionId: clipAArtifact.revisionId, digest: clipARevision.digest },
       { artifactId: clipBArtifact.id, revisionId: clipBArtifact.revisionId, digest: clipBRevision.digest },
       { artifactId: clipAArtifact.id, revisionId: clipAArtifact.revisionId, digest: clipARevision.digest },
     ])))]),
-    context => { prepared = preparedSummary(context); return fauxAssistantMessage("成片提案已备好。"); },
+    context => { prepared = localRenderSummary(context); return fauxAssistantMessage("成片已受理。"); },
   ]);
   await runtime.service.sendMessage("local-owner", conversationId, input("按 A/B/A 准备成片"));
   await waitFor(() => count(runtime.database, "requests", `conversation_id='${conversationId}' AND state IN ('queued','running')`) === 0);
-  assert.equal(prepared.state, "ready");
+  assert.equal(prepared.state, "queued");
 
-  // 一次确认 → 唯一 run → 真实 FFmpeg 渲染。
-  const proposal = runtime.service.readProposal("local-owner", prepared.proposalId);
-  const accepted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+  // 唯一免费 run → 真实 FFmpeg 渲染；不新增提案、授权或费用。
   assert.equal(count(runtime.database, "production_runs"), 1);
-  let finished = runtime.service.getRun("local-owner", accepted.run.id);
+  assert.equal(count(runtime.database, "proposals"), 0);
+  assert.equal(count(runtime.database, "authorizations"), 0);
+  let finished = runtime.service.getRun("local-owner", prepared.runId);
+  assert.equal(finished.finance, null);
   for (let i = 0; i < 40 && !["succeeded", "failed", "cancelled"].includes(finished.state); i++) {
     await runtime.worker!.pollOnce();
-    finished = runtime.service.getRun("local-owner", accepted.run.id);
+    finished = runtime.service.getRun("local-owner", prepared.runId);
   }
   assert.equal(finished.state, "succeeded");
   const output = finished.outputRevisions.at(-1)!;

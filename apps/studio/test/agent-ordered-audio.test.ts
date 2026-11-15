@@ -17,6 +17,7 @@ import { ProductionBlobs, type BlobRow } from "../src/server/agent/production-bl
 import { issueSubmitPermit } from "../src/server/agent/submit-permit.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import { ensureConfirmedWork, finalVideoTarget } from "./helpers/creative-work-fixture.js";
+import { admitLocalIntent } from "./helpers/tool-args.js";
 import type { ExecutionInput, ProductionIntent, RecoveryQuery, RenderParameters, Run } from "../src/shared/agent/generated/contracts.js";
 
 // M3 ordered_concat audioMode 验收（§11.4）：preserve 按画面时段保留可识别原声并可调序、
@@ -112,16 +113,18 @@ function chainedIntent(first: Ref[], tail: Ref): ProductionIntent {
 
 const scopeOf = (conversationId: string) => ({ ownerId: "local-owner", conversationId });
 
-async function acceptIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<{ runId: string; disclosure: string }> {
+async function acceptIntent(runtime: AgentRuntime, conversationId: string, intent: ProductionIntent): Promise<{ runId: string; audioMode: "none" | "preserve" }> {
   // 正式成片落在已开始的创作内，受理依据来自真实组审阅认可（reviewInputs）；
   // 最终视频按 F02 声明交付目标（新组成片事项）。
   const work = ensureConfirmedWork(runtime.database, staticClock(), scopeOf(conversationId), intent.title);
   intent.workId = work.workId;
   intent.reviewInputs = [work.reviewInput];
   intent.outputTarget = finalVideoTarget();
-  const prepared = await runtime.service.prepareProposal("local-owner", conversationId, { commandId: cmd(), spec: intent });
-  const admitted = runtime.service.acceptProposal("local-owner", prepared.proposal.id, { commandId: cmd(), proposalDigest: prepared.proposal.digest });
-  return { runId: admitted.run.id, disclosure: prepared.proposal.priceDisclosure };
+  const admitted = await admitLocalIntent(runtime, scopeOf(conversationId), intent);
+  assert.equal(admitted.run.finance, null);
+  const frozen = JSON.parse((runtime.database.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(admitted.run.snapshotId) as { spec_json: string }).spec_json) as
+    { operations: { parameters: Extract<RenderParameters, { assembly: "ordered_concat" }> }[] };
+  return { runId: admitted.run.id, audioMode: frozen.operations.at(-1)!.parameters.audioMode ?? "none" };
 }
 
 const terminal = (state: Run["state"]) => state === "succeeded" || state === "failed" || state === "cancelled";
@@ -189,7 +192,7 @@ it("M3-01：preserve 保留各镜头原声且顺序跟随画面，调序后声�
     const xyAccepted = await acceptIntent(runtime, conversation.id, orderedIntent([clipX, clipY], "preserve"));
     const xy = await drive(runtime, xyAccepted.runId);
     assert.equal(xy.state, "succeeded");
-    assert.match(xyAccepted.disclosure, /保留各镜头原声/);
+    assert.equal(xyAccepted.audioMode, "preserve", "免费快照仍冻结保留各镜头原声的选择");
     const xyFile = await outputFileOf(runtime, xy.id, workRootOf(assets.directory));
     const xyFacts = await probeVideoFile(xyFile);
     assert.equal(xyFacts.hasAudio, true);
@@ -255,7 +258,7 @@ it("M3-03：audioMode none 接受有声输入，输出整条无声", async () =>
     const noneAccepted = await acceptIntent(runtime, conversation.id, orderedIntent([clipX, clipY], "none"));
     const result = await drive(runtime, noneAccepted.runId);
     assert.equal(result.state, "succeeded");
-    assert.match(noneAccepted.disclosure, /全片静音/);
+    assert.equal(noneAccepted.audioMode, "none", "免费快照仍冻结全片静音选择");
     const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, false, "none 输出不得带音轨");
@@ -518,7 +521,7 @@ it("M2 V3/V4/V6/V7：真实三路混音的裁切、立体声、选区循环、�
 
 // —— M3-E2：WebM 轨级时长写在流标签 DURATION，有声 WebM 不再被“视频轨时长不可读”拒绝 ——
 
-it("M3-E2：音轨长于画面的有声 WebM 经 prepare→worker 真实拼接，原声按画面时段保留", async () => {
+it("M3-E2：音轨长于画面的有声 WebM 经本地受理→worker 真实拼接，原声按画面时段保留", async () => {
   const assets = await prepareToneAssets();
   const webmFile = path.join(assets.directory, "tone.webm");
   // 画面 2s、700Hz 音轨 3.2s：容器时长≈3.2s，画面时段 2s 只在视频轨标签里。

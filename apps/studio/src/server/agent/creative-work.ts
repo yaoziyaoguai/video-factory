@@ -1,11 +1,13 @@
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent } from "./event-log.js";
-import type { MessageRow } from "./conversation-store.js";
+import { missingRequiredApprovals } from "./artifact-store.js";
+import { getMessageRow, type MessageRow } from "./conversation-store.js";
 import { canonicalJson, newAgentId } from "./util.js";
 import type { WorkFeedbackView } from "../../shared/agent/ports.js";
 import type {
-  ContentSource, ContentSourceInput, ReviewRole, Target, Work,
+  ArtifactHead, ContentSource, ContentSourceInput, CreationBinding, ReviewConfirmation, ReviewRole, RevisionRef,
+  StandaloneArtifactConfirmation, Target, Work, WorkReviewConfirmation,
 } from "../../shared/agent/generated/contracts.js";
 
 // 视频创作事项：审阅组（角色/背景/分镜…）与组内事项的最小持久事实。
@@ -46,8 +48,6 @@ export interface StoredReviewGroup {
 export interface CreationState {
   groups: StoredReviewGroup[];
 }
-
-export type ReviewAction = "approve" | "approve_and_continue" | "finalize_video";
 
 export function emptyCreationState(): CreationState {
   return { groups: [] };
@@ -151,13 +151,6 @@ export function legacyRevisionStageBinding(db: AgentDatabase, artifactId: string
   return binding as { workId: string; stage: string; source: ContentSource | null };
 }
 
-export interface ReviewConfirmationInput {
-  workId: string;
-  groupId: string;
-  items: { itemId: string; source: ContentSourceInput }[];
-  action: ReviewAction;
-}
-
 export type ConfirmationOrigin =
   | { kind: "user_message"; messageId: string }
   | { kind: "pi_tool"; sourceId: string };
@@ -168,14 +161,137 @@ export interface RecordedReviewItem {
   duplicate: boolean;
 }
 
+// 只限制这条结构化用户消息授权的认可动作；普通自然语言没有 metadata，仍可表达复合意图。
+export function assertReviewActionSource(
+  db: AgentDatabase,
+  scope: { ownerId: string; conversationId: string },
+  input: ReviewConfirmation,
+  origin: ConfirmationOrigin,
+): void {
+  if (origin.kind !== "user_message") return;
+  const message = getMessageRow(db, scope.ownerId, origin.messageId);
+  if (!message || message.conversation_id !== scope.conversationId || message.role !== "user") {
+    throw new AgentError("NOT_FOUND", "没有找到本次用户认可消息。");
+  }
+  if (!message.review_confirmation_json) return;
+  const original = JSON.parse(message.review_confirmation_json) as ReviewConfirmation;
+  let matches = false;
+  if ("kind" in original) {
+    if (original.kind === "standalone_artifact") {
+      matches = "kind" in input && input.kind === "standalone_artifact" && input.action === original.action
+        && input.artifactId === original.artifactId && input.revisionId === original.revisionId;
+    } else {
+      matches = "kind" in input && input.kind === "adopt_preview" && input.action === original.action
+        && input.workId === original.workId && input.groupId === original.groupId && input.itemId === original.itemId
+        && canonicalJson(input.source) === canonicalJson(original.source);
+    }
+  } else if (!("kind" in input)) {
+    matches = input.action === original.action && input.workId === original.workId && input.groupId === original.groupId
+      && input.items.every(entry => original.items.some(allowed => allowed.itemId === entry.itemId
+        && canonicalJson(allowed.source) === canonicalJson(entry.source)));
+  }
+  if (!matches) throw new AgentError("INVALID_INPUT", "本次用户消息的认可动作、目标或版本与原始动作不一致。");
+}
+
+// 精确修订必须在本次用户表达前已交付。两个顺序都来自 events；消息领取/完成的后续事件不代表新授权。
+export function assertReviewSourceAvailable(
+  db: AgentDatabase,
+  scope: { ownerId: string; conversationId: string },
+  source: RevisionRef,
+  origin: ConfirmationOrigin,
+): void {
+  if (origin.kind !== "user_message") return;
+  const facts = db.prepare(`SELECT
+      (SELECT MIN(e.seq) FROM events e WHERE e.conversation_id = a.conversation_id AND e.owner_id = a.owner_id
+        AND e.kind = 'message.changed' AND e.entity_id = ?) AS message_seq,
+      (SELECT MIN(e.seq) FROM events e WHERE e.conversation_id = a.conversation_id AND e.owner_id = a.owner_id
+        AND e.kind = 'artifact.delivered' AND e.entity_id = a.id AND e.entity_version = r.revision_number) AS delivered_seq
+    FROM artifact_revisions r JOIN artifacts a ON a.id = r.artifact_id
+    WHERE a.id = ? AND r.id = ? AND a.owner_id = ? AND a.conversation_id = ?`)
+    .get(origin.messageId, source.artifactId, source.revisionId, scope.ownerId, scope.conversationId) as
+      { message_seq: number | null; delivered_seq: number | null } | undefined;
+  if (!facts) throw new AgentError("NOT_FOUND", "引用的产物修订不存在或不属于当前会话。");
+  if (facts.message_seq === null || facts.delivered_seq === null || facts.delivered_seq >= facts.message_seq) {
+    throw new AgentError("INVALID_INPUT", "这份修订在本次用户消息发出前尚未交付，不能提前认可未来产物。");
+  }
+}
+
 // 按钮与 Pi confirm_review 工具共用的认可内核：只记录用户已经表达的认可，
 // 不排模型请求、不推进未明确要求的下一组工作，也不产生制作运行。
 // 在途制作不阻塞认可（§4.2.1）；新制作受理由 production_runs 的在途唯一索引约束。
 export function recordReviewConfirmation(
+  db: AgentDatabase, now: string, scope: { ownerId: string; conversationId: string },
+  input: WorkReviewConfirmation, origin: ConfirmationOrigin,
+): { items: RecordedReviewItem[]; work: WorkRow };
+export function recordReviewConfirmation(
+  db: AgentDatabase, now: string, scope: { ownerId: string; conversationId: string },
+  input: StandaloneArtifactConfirmation, origin: ConfirmationOrigin,
+): { kind: "standalone_artifact"; confirmationId: string };
+export function recordReviewConfirmation(
   db: AgentDatabase,
   now: string,
   scope: { ownerId: string; conversationId: string },
-  input: ReviewConfirmationInput,
+  input: WorkReviewConfirmation | StandaloneArtifactConfirmation,
+  origin: ConfirmationOrigin,
+): { items: RecordedReviewItem[]; work: WorkRow } | { kind: "standalone_artifact"; confirmationId: string } {
+  assertReviewActionSource(db, scope, input, origin);
+  if ("kind" in input) {
+    const artifact = db.prepare("SELECT * FROM artifacts WHERE id = ? AND owner_id = ? AND conversation_id = ?")
+      .get(input.artifactId, scope.ownerId, scope.conversationId) as
+        { kind: string; work_id: string | null; head_revision_id: string | null } | undefined;
+    if (!artifact) throw new AgentError("NOT_FOUND", "没有找到这份独立脚本。");
+    if (artifact.kind !== "script" || artifact.work_id !== null) {
+      throw new AgentError("INVALID_INPUT", "独立认可只能作用于不属于视频作品的脚本。");
+    }
+    if (artifact.head_revision_id !== input.revisionId) {
+      throw new AgentError("STALE_REVISION", "这份脚本已更新，请认可当前版本。", { currentRevisionId: artifact.head_revision_id });
+    }
+    assertReviewSourceAvailable(db, scope, input, origin);
+    const revision = db.prepare("SELECT digest FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+      .get(input.artifactId, input.revisionId) as { digest: string };
+    const subject: ContentSource = { kind: "artifact_revision", artifactId: input.artifactId, revisionId: input.revisionId, digest: revision.digest };
+    const existing = db.prepare(`SELECT id FROM work_review_confirmations
+      WHERE owner_id = ? AND conversation_id = ? AND subject_scope = 'standalone_artifact' AND action = 'approve' AND subject_json = ?
+      ORDER BY rowid DESC LIMIT 1`).get(scope.ownerId, scope.conversationId, canonicalJson(subject)) as { id: string } | undefined;
+    const confirmationId = existing?.id ?? newAgentId("confirm");
+    if (!existing) {
+      db.prepare(`INSERT INTO work_review_confirmations(id,owner_id,conversation_id,subject_scope,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
+        VALUES (?,?,?,'standalone_artifact',NULL,NULL,NULL,'approve',?,?,?,?)`)
+        .run(confirmationId, scope.ownerId, scope.conversationId, canonicalJson(subject), origin.kind,
+          origin.kind === "user_message" ? origin.messageId : origin.sourceId, now);
+    }
+    if (origin.kind === "user_message") {
+      const message = getMessageRow(db, scope.ownerId, origin.messageId)!;
+      const references = JSON.parse(message.references_json) as { artifacts: RevisionRef[] };
+      if (!references.artifacts.some(ref => ref.artifactId === input.artifactId && ref.revisionId === input.revisionId)) {
+        references.artifacts.push({ artifactId: input.artifactId, revisionId: input.revisionId });
+        db.prepare("UPDATE messages SET references_json = ?, revision = revision + 1, updated_at = ? WHERE id = ?")
+          .run(canonicalJson(references), now, message.id);
+        insertEvent(db, now, { ...scope, kind: "message.changed", entityId: message.id, entityVersion: message.revision + 1 });
+      }
+    }
+    return { kind: "standalone_artifact", confirmationId };
+  }
+  for (const entry of input.items) {
+    if (entry.source.kind === "artifact_revision") {
+      assertReviewSourceAvailable(db, scope, entry.source, origin);
+    } else if (origin.kind === "user_message") {
+      const sourceMessage = getMessageRow(db, scope.ownerId, entry.source.messageId);
+      const actionMessage = getMessageRow(db, scope.ownerId, origin.messageId)!;
+      if (sourceMessage && sourceMessage.created_seq > actionMessage.created_seq) {
+        throw new AgentError("INVALID_INPUT", "本次用户消息发出后才出现的内容不能提前认可。");
+      }
+    }
+  }
+  return recordWorkReviewConfirmation(db, now, scope, input, origin);
+}
+
+// adopt_preview 已核对原预览及来源后，在同一组合事务中把派生视频交给此内核写定稿事实。
+export function recordWorkReviewConfirmation(
+  db: AgentDatabase,
+  now: string,
+  scope: { ownerId: string; conversationId: string },
+  input: WorkReviewConfirmation,
   origin: ConfirmationOrigin,
 ): { items: RecordedReviewItem[]; work: WorkRow } {
   const work = requireWork(db, scope.ownerId, scope.conversationId, input.workId);
@@ -199,6 +315,14 @@ export function recordReviewConfirmation(
       if (!artifact || artifact.kind !== "video") throw new AgentError("INVALID_INPUT", "定稿只能指向真实视频产物。");
       if (!item.draft) throw new AgentError("INVALID_INPUT", "还没有可定稿的视频初稿。");
       if (!sameContentSource(item.draft, subject)) throw new AgentError("INVALID_INPUT", "定稿只能指向当前视频草稿。");
+      const binding = revisionBindingJson(db, subject.artifactId, subject.revisionId) as CreationBinding | null;
+      if (binding && Array.isArray(binding.inputSources)) {
+        const missing = missingRequiredApprovals(db, scope, work.id, {
+          revisions: binding.inputSources.flatMap(source => source.kind === "artifact_revision" ? [source] : []),
+          projects: [binding.projectRevision, ...(binding.projectRevisions ?? [])].filter(ref => ref != null),
+        });
+        if (missing.length) throw new AgentError("INVALID_INPUT", `定稿前，「${missing.join("」「")}」这一版还未获得认可。`);
+      }
     } else if (item.draft) {
       // 认可作用于事项准确当前稿：旧版本或其他来源一律拒绝，当前引用不倒退。
       if (!sameContentSource(item.draft, subject)) {
@@ -223,7 +347,7 @@ export function recordReviewConfirmation(
     if (input.action === "finalize_video") {
       const existing = db.prepare(
         `SELECT id FROM work_review_confirmations
-         WHERE owner_id = ? AND work_id = ? AND group_id = ? AND item_id = ? AND action = 'finalize_video' AND subject_json = ?
+         WHERE owner_id = ? AND subject_scope = 'work_item' AND work_id = ? AND group_id = ? AND item_id = ? AND action = 'finalize_video' AND subject_json = ?
          ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       ).get(scope.ownerId, work.id, group.id, item.id, canonicalJson(subject)) as { id: string } | undefined;
       duplicateConfirmationId = existing?.id ?? null;
@@ -369,13 +493,25 @@ export function relatedWorkFeedback(
   });
 }
 
+export function withStandaloneApproval(db: AgentDatabase, artifact: ArtifactHead): ArtifactHead {
+  if (artifact.kind !== "script" || artifact.workId !== null) return artifact;
+  const confirmation = db.prepare(`SELECT id, subject_json, created_at FROM work_review_confirmations
+    WHERE subject_scope = 'standalone_artifact' AND action = 'approve' AND json_extract(subject_json, '$.artifactId') = ?
+    ORDER BY rowid DESC LIMIT 1`).get(artifact.id) as { id: string; subject_json: string; created_at: string } | undefined;
+  if (!confirmation) return artifact;
+  const subject = JSON.parse(confirmation.subject_json) as Extract<ContentSource, { kind: "artifact_revision" }>;
+  return { ...artifact, standaloneApproval: {
+    confirmationId: confirmation.id, revisionId: subject.revisionId, approvedAt: confirmation.created_at,
+  } };
+}
+
 export function workProjection(db: AgentDatabase, row: WorkRow): Work {
   const state = parseCreationState(row);
   // finalizedSource 是只读投影：来自确认表里该事项最近的 finalize_video 行。
   // 非 video 事项没有 finalize 行，自然保持 null。
   const finalizeRows = db.prepare(
     `SELECT item_id, subject_json FROM work_review_confirmations
-     WHERE owner_id = ? AND work_id = ? AND action = 'finalize_video'
+     WHERE owner_id = ? AND subject_scope = 'work_item' AND work_id = ? AND action = 'finalize_video'
      ORDER BY created_at ASC, rowid ASC`,
   ).all(row.owner_id, row.id) as { item_id: string; subject_json: string }[];
   const finalizedByItem = new Map<string, ContentSource>();

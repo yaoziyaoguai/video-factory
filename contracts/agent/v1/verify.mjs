@@ -56,8 +56,20 @@ checkReferences(api, api);
 const validators = new Map(Object.keys(schema.$defs).map(name => [name,
   ajv.compile({ $ref: `${schema.$id}#/$defs/${name}` }),
 ]));
+// 长诊断复用已有有效载荷与同一校验循环，避免在 JSON 示例中重复存放整段输出。
+const diagnosticMessageExamples = [];
+for (const name of ["Run", "ExecutionObservation"]) {
+  const fixture = examples.find(example => example.schema === name && example.valid);
+  for (const length of [9600, 9601]) {
+    const value = structuredClone(fixture.value);
+    const message = "x".repeat(length);
+    if (name === "Run") value.issue = { code: "PROVIDER_FAILED", message };
+    else value.message = message;
+    diagnosticMessageExamples.push({ name: `${name} diagnostic length ${length}`, schema: name, valid: length === 9600, value });
+  }
+}
 const failures = [];
-for (const example of examples) {
+for (const example of [...examples, ...diagnosticMessageExamples]) {
   const validate = validators.get(example.schema);
   if (!validate) throw new Error(`Unknown example schema: ${example.schema}`);
   const before = JSON.stringify(example.value);
@@ -186,6 +198,7 @@ const result = {
   status: "passed", scope: "offline schemas, local refs, HTTP wiring, fixtures and derived TypeScript; no implemented provider or end-to-end validation",
   versions, schemaCount: validators.size, httpOperationCount: ids.size, checkedReferences: referenceCount,
   positiveFixtures: examples.filter(x => x.valid).length, negativeFixtures: examples.filter(x => !x.valid).length,
+  diagnosticMessageBounds: diagnosticMessageExamples.length,
   policyChecks,
   providerResponsesValidated: false, realProductModelCalls: 0, realMediaCalls: 0,
   generated: { types: "apps/studio/src/shared/agent/generated/contracts.ts", runtimeSchema: "apps/studio/src/shared/agent/generated/contracts-schema.ts" },
