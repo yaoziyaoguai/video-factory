@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG } from "../src/server/agent/offline.js";
 import { saveEdgeTtsServiceSettings } from "../src/server/agent/free-service-settings.js";
@@ -22,7 +23,7 @@ const cmd = () => `test-${++sequence}`;
 const input = (text: string) => ({ commandId: cmd(), text, target: null, skillId: null, proposalRef: null, mode: "new" as const, steerRequestId: null });
 
 type Fixture = Awaited<ReturnType<typeof setup>>;
-async function setup() {
+async function setup(signal: AbortSignal) {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-lib-"));
   let time = Date.parse("2026-11-08T00:00:00Z");
   const clock = () => new Date(time).toISOString();
@@ -30,7 +31,7 @@ async function setup() {
   const conversation = app.service.createConversation("local-owner", { commandId: cmd(), title: "库验证 A" }).conversation;
   app.faux!.setResponses([fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "山路", kind: "prompt", content: { format: "markdown", text: "清晨沿山路行进的固定镜头。" } }] })]), fauxAssistantMessage("已交付。")]);
   await app.service.sendMessage("local-owner", conversation.id, input("给我 prompt"));
-  for (let i = 0; i < 100 && app.service.snapshot("local-owner", conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  while (app.service.snapshot("local-owner", conversation.id).activeRequestId) await delay(20, undefined, { signal });
   const artifact = app.service.snapshot("local-owner", conversation.id).artifacts.items[0]!;
   assert.ok(artifact);
   const revision = app.service.readRevision("local-owner", artifact.id, artifact.revisionId);
@@ -62,8 +63,9 @@ function videoItemOf(f: Fixture): { group: string; item: StoredItem } {
   return found;
 }
 
-it("G4-2 跨会话库选材：定稿准确音频在 B 读原字节并再次交付，来源认可不变且越权仍拒绝", async () => {
-  const f = await setup(); try {
+it("G4-2 跨会话库选材：定稿准确音频在 B 读原字节并再次交付，来源认可不变且越权仍拒绝", async context => {
+  const signal = context.signal;
+  const f = await setup(signal); try {
     const lastTool = <T,>(context: TranscriptContext): T => {
       const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
       assert.ok(result, `应收到工具结果：${JSON.stringify(context.messages.slice(-3))}`);
@@ -99,7 +101,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       context => { audioDelivery = lastTool<DeliveryReceipt>(context); return fauxAssistantMessage("配音已交付，请确认。"); },
     ]);
     await f.app.service.sendMessage("local-owner", f.conversation.id, input("生成配音并给我审阅"));
-    for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    while (f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId) await delay(20, undefined, { signal });
     assert.ok(audioDelivery, `配音应经正式交付形成草稿：${JSON.stringify(f.app.service.snapshot("local-owner", f.conversation.id).messages.items)}`);
     const audioRef = audioDelivery.revisions[0]!;
     const audioRevision = f.app.service.readRevision("local-owner", audioRef.artifactId, audioRef.revisionId);
@@ -142,7 +144,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       })]), fauxAssistantMessage("成片已交付。"),
     ]);
     await f.app.service.sendMessage("local-owner", f.conversation.id, input("把完成的成片与实际来源一起交付"));
-    for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    while (f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId) await delay(20, undefined, { signal });
     const delivered = videoItemOf(f);
     assert.equal(delivered.item.draft?.kind, "artifact_revision");
     const producer = retainedVideoMaterials(f.app.database, "local-owner", delivered.item.draft as RevisionRef).producer;
@@ -167,7 +169,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       fauxAssistantMessage("准确版本已交付。"),
     ]);
     await f.app.service.sendMessage("local-owner", f.conversation.id, input("沿原成片准确来源更新当前草稿"));
-    for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    while (f.app.service.snapshot("local-owner", f.conversation.id).activeRequestId) await delay(20, undefined, { signal });
     const video = videoItemOf(f);
     assert.equal(video.item.draft?.kind, "artifact_revision");
     const draft = video.item.draft as { kind: "artifact_revision"; artifactId: string; revisionId: string };
@@ -254,7 +256,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       source: { kind: "artifact_revision" as const, ...shotRef },
     }];
     await f.app.service.sendMessage("local-owner", other.id, { ...input("用这条片子的原方案做改编"), librarySelections: selections });
-    for (let i = 0; i < 100 && f.app.service.snapshot("local-owner", other.id).activeRequestId; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    while (f.app.service.snapshot("local-owner", other.id).activeRequestId) await delay(20, undefined, { signal });
 
     // 刷新后仍知所选：消息原样持久化 librarySelections，references 指向物化修订。
     const page = f.app.service.snapshot("local-owner", other.id);
