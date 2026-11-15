@@ -226,3 +226,30 @@ it("G3-1 read_artifact：图片回真实图像，视频无时间点回三个代�
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+it("read_artifact：30fps 视频的末帧毫秒取整不使整次看帧失败", async () => {
+  const { runtime, conversationId, blobs, directory } = await setup();
+  try {
+    const file = path.join(directory, "30fps.mp4");
+    await run("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=3:size=160x90:rate=30",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", file]);
+    const video = await mediaRevision(blobs, runtime, conversationId, file, "video/mp4", 3000);
+    const defaults = await readArtifact(runtime, conversationId, { artifactId: video.artifactId, revisionId: video.revisionId });
+    const explicit = await readArtifact(runtime, conversationId, {
+      artifactId: video.artifactId, revisionId: video.revisionId, frameTimesMs: [0, 1500, 2967],
+    });
+    for (const result of [defaults, explicit]) {
+      assert.equal(result.isError, false, describeParts(result));
+      assert.equal(imagesOf(result.parts).length, 3, describeParts(result));
+      assert.ok(textsOf(result.parts).some(text => text.startsWith("t=2966ms")), "末帧标签说明实际抽帧位置，不声称精确落在 2967ms");
+    }
+    assert.equal(imagesOf(defaults.parts).at(-1)!.data, imagesOf(explicit.parts).at(-1)!.data, "默认和指定末段时间点读到同一真实末帧");
+    const beyond = await readArtifact(runtime, conversationId, {
+      artifactId: video.artifactId, revisionId: video.revisionId, frameTimesMs: [3500],
+    });
+    assert.equal(beyond.isError, true, "超出视频时长的请求不能伪装成末帧成功");
+  } finally {
+    await runtime.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -27,7 +27,7 @@ import {
   NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type ArtifactRow, type ProposalRow, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
-import { extractVideoFrames, probeAudioFile, probeRenderInputs, probeVideoFile, InvalidAudioFile, type VideoFileFacts } from "./media-probe.js";
+import { extractVideoFrames, probeAudioFile, probeRenderInputs, probeVideoFile, InvalidAudioFile } from "./media-probe.js";
 import { captureEdgeTtsConfig, captureNewsNowConfig, captureStockConfigs, FREE_SERVICE_LABELS, readFreeServiceSettings } from "./free-service-settings.js";
 import { insertEvent } from "./event-log.js";
 import { importMaterial, persistSearchBatch, readMaterialBatch } from "./material-store.js";
@@ -716,17 +716,6 @@ async function resizedImageBlocks(bytes: Buffer, mimeType: string, video?: { wid
   ];
 }
 
-// 头/中/尾代表帧时间基于视频轨事实：容器时长可能被更长音轨带偏，固定 0.9×时长也可能
-// 落在最后一帧之后（低帧数视频必然如此），那会让整个读取报"没有可抽取的画面"。
-// 尾点收到最后一帧，头/中点仍按视频轨时长取比例；读不出帧率时保留 0.9 比例。
-function representativeFrameTimes(video: VideoFileFacts): [number, number, number] {
-  const intervalMs = video.frameRate ? Math.round(1000 / video.frameRate) : 0;
-  const tailMs = intervalMs > 0 && video.videoDurationMs > intervalMs
-    ? video.videoDurationMs - intervalMs
-    : Math.round(video.videoDurationMs * 0.9);
-  return [Math.round(video.videoDurationMs * 0.1), Math.round(video.videoDurationMs * 0.5), tailMs];
-}
-
 // read_artifact 的媒体呈现：图片返回真实图像块；视频按 frameTimesMs 抽帧并带时间标注，
 // 未给时间点时退回头/中/尾三个代表帧并写明已看范围；音频返回 null 由调用方回退事实文本——
 // 没有独立听音能力，不假装听过。
@@ -745,7 +734,14 @@ async function presentMedia(
     const explicit = frameTimesMs?.length ? frameTimesMs : undefined;
     const duration = content.durationMs;
     const facts = await probeVideoFile(file, undefined, signal);
-    const times = explicit ?? representativeFrameTimes(facts);
+    // 先从视频轨时长恢复帧数，再向下取整末帧位置；逐帧间隔先取整会让 30fps 尾点越过末帧。
+    const lastFrameMs = facts.frameRate
+      ? Math.max(0, Math.floor((Math.round(facts.videoDurationMs * facts.frameRate / 1000) - 1) * 1000 / facts.frameRate))
+      : null;
+    const times = (explicit ?? [Math.round(facts.videoDurationMs * 0.1), Math.round(facts.videoDurationMs * 0.5),
+      lastFrameMs ?? Math.round(facts.videoDurationMs * 0.9)])
+      // 末帧展示期间仍应看到末帧；超出画面时长的请求不截断，继续按实际抽帧失败返回。
+      .map(time => lastFrameMs !== null && time < facts.videoDurationMs ? Math.min(time, lastFrameMs) : time);
     const frames = await extractVideoFrames(file, times, signal);
     const blocks: ToolContentBlock[] = explicit ? [] : [{
       type: "text", text: `已看范围：头/中/尾 3 个代表帧（总时长 ${duration}ms）；要核对具体画面时用 frameTimesMs 指定毫秒时间点。`,
