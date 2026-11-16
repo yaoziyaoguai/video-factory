@@ -20,3 +20,9 @@
 免费配音的 `rate` 是生成语速，必须完整匹配带符号百分比；边界已对应生成后的准确音频字节。当前 narration 只支持增益、起播与补尾，时间线 cue 等于源边界加 `timelineStartMs`，不再次按 rate 缩放。同字节 `local_output/artifact_revision` 正式交付保留该准确修订已有的 `dub/sources`；跨会话作品库选择按当前修订的既有关联共享同 owner blob，不修改原归属。未记录的元数据不按 blob 全库猜配，普通工程文件没有准确绑定时不补造配音信息。
 
 离线 contracts:generate/check 验证本地引用、外部 JSON 正反例、HTTP 连接和派生 TypeScript；它不证明实现 provider、真实沙盒、数据库迁移、付费服务或端到端旅程已通过。
+
+PC 工作台的继续按钮发送 `ReviewContext.intent=continue`，仅用于 `mode=new` 且不带选材的同组继续。同一 owner、会话、作品、组已有 queued/running 的继续请求时，新 commandId 记录并返回同一个 requestId；请求结束后可再次继续。`approve_and_continue` 只在准确认可 payload 相同时复用，来源变更返回 RUN_BUSY，用户仍可单独认可新稿。普通聊天及未标记 intent 的组内修改指令保留各自请求。消息读取将原 approve_and_continue 的组投影为带 intent 的 reviewContext，以便刷新后恢复按钮状态；该只读投影不改变原认可事实。
+
+SSE `request.progress` 是不带业务游标的暂态真实进展：requestId、单调 sequence、phase、面向用户的 label、updatedAt，不含工具参数、工具结果或思考内容。重连仅重放仍在执行的最新进展；进程重启可能无历史步骤，前端回退到真实请求状态。`text.delta.replace=true` 开始一段新的 assistant 答复，前端应先清除上一段流式文字再追加。最终持久消息保留最后一段非空答复，空错误收尾不覆盖已生成文字。正在执行 submit 的 worker 对外显示 running；持久 submit_started 仍保留未知结果保护，崩溃恢复或真实观测不确定时才显示 unknown，不猜测重发。
+
+0.1.45 进展细节：`request.progress` 的可选 `workId` 仅在工具明确指向且核对属于当前会话时提供，原生文件工具沿已激活作品归属；`start_work` 完成后使用真实返回的作品 ID。`steps` 保留最近八次真实工具执行的当前状态，后续阶段和重连帧继续携带，终态随当前请求暂态进展一起清除。没有可证实的作品归属时省略，不从工具正文推测。

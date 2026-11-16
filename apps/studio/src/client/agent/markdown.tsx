@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, memo, type ReactNode } from "react";
 import type { MarkdownContent } from "../../shared/agent/generated/contracts.js";
 
 // 极小 Markdown 渲染：只输出 React 文本节点，不经过 innerHTML，结构上排除脚本注入。
@@ -128,7 +128,7 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-export function MarkdownText({ text }: { text: string }): ReactNode {
+export const MarkdownText = memo(function MarkdownText({ text }: { text: string }): ReactNode {
   const blocks = parseBlocks(text);
   return (
     <>
@@ -160,7 +160,7 @@ export function MarkdownText({ text }: { text: string }): ReactNode {
       })}
     </>
   );
-}
+});
 
 // 分段主稿的阅读形态：全局说明在前，各段按播放顺序以自身标题成段；与 markdownFullText
 // 同一事实，不重排、不合并段落。无 sections 的旧稿就是 text 本身。

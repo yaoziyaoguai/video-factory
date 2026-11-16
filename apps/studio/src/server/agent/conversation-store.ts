@@ -68,6 +68,7 @@ export function rowToConversation(row: ConversationRow): Conversation {
 }
 
 export function rowToMessage(row: MessageRow): Message {
+  const confirmation = row.review_confirmation_json ? JSON.parse(row.review_confirmation_json) as ReviewConfirmation : null;
   return {
     id: row.id,
     requestId: row.request_id,
@@ -82,7 +83,9 @@ export function rowToMessage(row: MessageRow): Message {
     kind: row.kind,
     feedback: row.feedback_json ? (JSON.parse(row.feedback_json) as Message["feedback"]) : null,
     librarySelections: row.library_selections_json ? (JSON.parse(row.library_selections_json) as Message["librarySelections"]) : [],
-    reviewContext: row.review_context_json ? (JSON.parse(row.review_context_json) as Exclude<Message["reviewContext"], undefined>) : null,
+    reviewContext: row.review_context_json ? (JSON.parse(row.review_context_json) as Exclude<Message["reviewContext"], undefined>)
+      : confirmation && !("kind" in confirmation) && confirmation.action === "approve_and_continue"
+        ? { workId: confirmation.workId, groupId: confirmation.groupId, intent: "continue" } : null,
   };
 }
 
@@ -165,6 +168,17 @@ export function maxConversationSeq(db: AgentDatabase, ownerId: string): number {
 export function pendingRequestCount(db: AgentDatabase, conversationId: string): number {
   const row = db.prepare("SELECT COUNT(*) AS count FROM requests WHERE conversation_id = ? AND state = 'queued'").get(conversationId) as { count: number };
   return row.count;
+}
+
+// 只合并显式继续意图；带组归属的普通消息仍是独立的新指令。
+export function pendingReviewRequest(db: AgentDatabase, ownerId: string, conversationId: string, workId: string, groupId: string): RequestRow | undefined {
+  return db.prepare(`SELECT r.* FROM requests r JOIN messages m ON m.id=r.message_id
+    WHERE r.owner_id=? AND r.conversation_id=? AND r.state IN ('queued','running') AND (
+      (json_extract(m.review_context_json,'$.intent')='continue'
+        AND json_extract(m.review_context_json,'$.workId')=? AND json_extract(m.review_context_json,'$.groupId')=?)
+      OR (json_extract(m.review_confirmation_json,'$.action')='approve_and_continue'
+        AND json_extract(m.review_confirmation_json,'$.workId')=? AND json_extract(m.review_confirmation_json,'$.groupId')=?))
+    ORDER BY r.queue_seq LIMIT 1`).get(ownerId, conversationId, workId, groupId, workId, groupId) as RequestRow | undefined;
 }
 
 export function nextQueueSeq(db: AgentDatabase, conversationId: string): number {

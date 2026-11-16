@@ -364,6 +364,9 @@ async function streamEvents(
   const unsubscribeContext = hub.subscribeContextStatus(conversationId, status => {
     write(`event: context.status\ndata: ${JSON.stringify(status)}\n\n`);
   });
+  const unsubscribeProgress = hub.subscribeProgress(conversationId, progress => {
+    write(`event: request.progress\ndata: ${JSON.stringify(progress)}\n\n`);
+  });
   const unsubscribe = hub.subscribe(conversationId, pump);
   const poll = setInterval(pump, POLL_MS);
   const heartbeat = setInterval(() => write(`: heartbeat ${Date.now()}\n\n`), HEARTBEAT_MS);
@@ -377,6 +380,7 @@ async function streamEvents(
     unsubscribeDeltas();
     unsubscribeDrafts();
     unsubscribeContext();
+    unsubscribeProgress();
     streams.delete(closeStream);
   };
   const closeStream = (): void => { shutdown(); raw.end(); };

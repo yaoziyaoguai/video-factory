@@ -153,6 +153,96 @@ function snapshotFixture(conversation: Conversation, options: {
   };
 }
 
+it("PC 断线补读失败后，网络恢复自动重连并保留草稿", async () => {
+  const conversation = conversationFixture("reconnect", "连接恢复");
+  let fail = false;
+  installWorkbenchRoutes({ conversations: [conversation], onRequest: url => fail && url.endsWith("/snapshot")
+    ? { status: 503, body: { code: "UNAVAILABLE", message: "离线中", retryAction: "retry" } } : null });
+  const rendered = renderAt("/agent/reconnect");
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "这句还没发");
+  fail = true;
+  act(() => FakeEventSource.instances.find(source => !source.closed)!.onerror?.());
+  await screen.findByText("离线中");
+  expect(FakeEventSource.instances.every(source => source.closed)).toBe(true);
+  fail = false;
+  act(() => window.dispatchEvent(new Event("online")));
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("这句还没发");
+  const count = FakeEventSource.instances.length;
+  rendered.unmount(); act(() => window.dispatchEvent(new Event("online")));
+  expect(FakeEventSource.instances).toHaveLength(count);
+});
+
+it("PC 左侧导航往返设置和当前会话，保留草稿且不新建会话", async () => {
+  const conversation = conversationFixture("sidebar-nav", "已有创作对话");
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshotFixture(conversation) } });
+  renderAt(`/agent/${conversation.id}`);
+  await screen.findByRole("heading", { name: conversation.title });
+  await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先保留这条意见");
+  const navigation = within(screen.getByRole("navigation", { name: "主导航" }));
+  await userEvent.click(navigation.getByRole("button", { name: "打开模型配置" }));
+  await screen.findByRole("region", { name: "模型配置" });
+  await userEvent.click(navigation.getByRole("button", { name: "返回当前对话" }));
+  expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先保留这条意见");
+  await userEvent.click(navigation.getByRole("button", { name: "展开会话列表" }));
+  await userEvent.click(navigation.getByRole("button", { name: "打开个人设置" }));
+  await screen.findByRole("region", { name: "用户页" });
+  await userEvent.click(within(screen.getByRole("navigation", { name: "会话列表" })).getByRole("button", { name: conversation.title }));
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(conversation.title);
+  expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先保留这条意见");
+  expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+it("Oracle P2-01 SSE 仍连接时局部补读失败不禁用停止", async () => {
+  const conversation = conversationFixture("partial-read", "局部同步失败");
+  const request = messageFixture({ id: "active-user", role: "user", text: "仍在制作", requestId: "active-request", state: "running" });
+  const snapshot = snapshotFixture(conversation, { messages: [request] }); snapshot.activeRequestId = request.requestId;
+  let fail = false;
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshot }, onRequest: (url, call) => {
+    if (url.endsWith("/messages/active-user")) return { status: 200, body: request };
+    if (fail && url.endsWith("/snapshot")) return { status: 503, body: { code: "UNAVAILABLE", message: "一次快照读取失败" } };
+    if (call.method === "POST" && url.endsWith("/stop")) { fail = false; request.state = "stopped"; request.revision++; snapshot.activeRequestId = null; return { status: 202, body: { requestId: request.requestId, state: "stopped" } }; }
+    return null;
+  } });
+  renderAt(`/agent/${conversation.id}`);
+  await screen.findByRole("button", { name: "停止本轮" });
+  const stream = FakeEventSource.instances.find(source => !source.closed)!;
+  fail = true;
+  stream.emit("business", { eventId: "partial-read", kind: "message.changed", entityId: request.id, entityVersion: 1 });
+  await screen.findByText("一次快照读取失败");
+  expect(stream.closed).toBe(false);
+  expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  expect(screen.queryByText("进展暂未同步")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "停止本轮" })).toBeNull());
+  expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/stop"))).toHaveLength(1);
+});
+
+it("PC 多个业务事件合并快照，流式新答复替换前文且进展只显示实际步骤", async () => {
+  const conversation = conversationFixture("progress", "制作进展");
+  const message = messageFixture({ id: "progress-user", requestId: "progress-request", role: "user", text: "继续制作", state: "running" });
+  const snapshot = snapshotFixture(conversation, { messages: [message] }); snapshot.activeRequestId = message.requestId;
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { progress: snapshot }, onRequest: url => url.endsWith(`/messages/${message.id}`)
+    ? { status: 200, body: message } : null });
+  renderAt("/agent/progress");
+  await screen.findByText("继续制作");
+  const source = FakeEventSource.instances.find(item => !item.closed)!;
+  const snapshotsBefore = calls.filter(call => call.url.endsWith("/snapshot")).length;
+  for (let index = 0; index < 6; index++) source.emit("business", { eventId: `change-${index}`, kind: "message.changed", entityId: message.id, entityVersion: index + 2 });
+  await waitFor(() => expect(calls.filter(call => call.url.endsWith("/snapshot")).length).toBe(snapshotsBefore + 1));
+  source.emit("request.progress", { requestId: message.requestId, sequence: 1, phase: "tool_running", label: "搜索素材", updatedAt: new Date().toISOString() });
+  expect(await screen.findByText("正在搜索素材")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "排队发送" })).toHaveAttribute("title", "等待当前请求完成后处理");
+  source.emit("text.delta", { requestId: message.requestId, messageId: "answer", sequence: 1, text: "先前说明", replace: true });
+  await within(await screen.findByTestId("streaming-message")).findByText("先前说明");
+  source.emit("text.delta", { requestId: message.requestId, messageId: "answer", sequence: 2, text: "最终答复", replace: true });
+  await within(screen.getByTestId("streaming-message")).findByText("最终答复");
+  expect(screen.queryByText("先前说明")).toBeNull();
+  source.emit("request.progress", { requestId: message.requestId, sequence: 0, phase: "thinking", label: "旧步骤", updatedAt: new Date().toISOString() });
+  expect(screen.queryByText("正在旧步骤")).toBeNull();
+});
+
 const REVISION_FIXTURE: ArtifactRevision = {
   artifactId: "art-1",
   revisionId: "rev-1",
@@ -252,7 +342,7 @@ it("B 回复提案携带精确引用，保留问号；后台新结果不抢预�
   expect(screen.getByText(/制作请发送「确认制作」，也可继续讨论/)).toHaveTextContent("模拟短片");
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("");
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "开始制作？");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await waitFor(() => expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(""));
   const command = calls.find(c => c.method === "POST" && c.url.endsWith("/messages"))!.body as Record<string, unknown>;
   expect(command.proposalRef).toEqual({ proposalId: f.proposal.id, digest: f.proposal.digest });
@@ -350,6 +440,7 @@ it("R45-CLOSE-1 旧继续缓存缺少组目标时不发送，保留原命令并�
     target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null, reviewConfirmation: null }, null, 2);
   localStorage.setItem(storageKey, saved);
   renderAt(`/agent/${conversation.id}`);
+  await userEvent.click(await screen.findByRole("button", { name: `审阅${snapshot.works[0]!.title}` }));
   await screen.findByText("这一组已全部认可；想调整时在对话中提出。");
   await userEvent.click(screen.getByRole("button", { name: "继续" }));
   expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(0);
@@ -465,7 +556,7 @@ describe("AgentWorkbench", () => {
     await userEvent.type(input, "{End}。{Enter}先聊结尾。");
     const draft = example + "。\n先聊结尾。";
     expect(input).toHaveValue(draft);
-    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^(排队)?发送$/ })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "配置文本模型" }));
     expect(await screen.findByText("添加你的第一个模型连接")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "返回对话" }));
@@ -473,7 +564,7 @@ describe("AgentWorkbench", () => {
     page.unmount();
     models = BOOTSTRAP.models;
     renderAt("/agent");
-    await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^(排队)?发送$/ })).toBeEnabled());
     expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(draft);
     expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
   });
@@ -573,7 +664,7 @@ describe("AgentWorkbench", () => {
     renderAt("/agent/conv-1");
     await screen.findByText("再改短一点");
     expect(screen.getByText(/针对：开场脚本/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("绑定的修改目标已过期");
     expect(calls.some(call => call.url.endsWith("/conversations/conv-1/messages"))).toBe(false);
@@ -793,7 +884,7 @@ it("A-10 HTTP 回执丢失重试原 commandId，保留后来输入的草稿", as
   } });
   renderAt("/agent/a"); await screen.findByRole("heading", { name: "重试讨论" });
   const text = screen.getByRole("textbox", { name: "消息输入" });
-  await userEvent.type(text, "原来的要求"); await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.type(text, "原来的要求"); await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   const retry = await screen.findByRole("button", { name: "重试上次发送（保留原请求）" });
   await userEvent.clear(text); await userEvent.type(text, "后来的草稿"); await userEvent.click(retry);
   await waitFor(() => expect(posts).toBe(2));
@@ -839,7 +930,7 @@ it("审计 F7：存储清理失败不能把服务端已成功的发送当作失�
   const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => { throw new Error("storage denied"); });
   try {
     const text = screen.getByRole("textbox", { name: "消息输入" });
-    await userEvent.type(text, "正常发送"); await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    await userEvent.type(text, "正常发送"); await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
     await waitFor(() => expect(text).toHaveValue(""));
     expect(posts).toBe(1); expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", { name: "重试上次发送（保留原请求）" })).toBeNull();
@@ -972,7 +1063,7 @@ it("Frame 首页可直接发送，创建会话后沿用该请求且不自动开�
   renderAt("/agent");
   await waitFor(() => expect(screen.getByRole("textbox", { name: "消息输入" })).toBeEnabled());
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先聊聊想法，暂时不要制作");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await waitFor(() => expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(1));
   expect(calls.find(call => call.url.endsWith("/messages"))?.body).toMatchObject({ text: "先聊聊想法，暂时不要制作", target: null, proposalRef: null });
   await waitFor(() => expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(""));
@@ -1019,7 +1110,7 @@ it("§11.7 来源8/10 输入框“从作品库选择”：勾选并入草稿可�
   await waitFor(() => expect(screen.getByText(/作品库 · 山路（Prompt）/)).toBeInTheDocument());
   // new 请求携带准确 selection（不含展示 label）；发送成功后 chips 消费、已发送消息可回看来源。
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "用这份方案做改编");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await waitFor(() => expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(2));
   command = calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))[1]!.body as Record<string, unknown>;
   expect(command.mode).toBe("new");
@@ -1074,7 +1165,7 @@ it("DG-R1 库中 3 个 raw 视频与旧修订可分别预览下载选择，刷�
   expect(screen.getAllByText("作品库 · 原始片段二（视频）")).toHaveLength(1);
   expect(screen.getByText("作品库 · 原始片段三（视频）")).toBeInTheDocument();
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await waitFor(() => expect(calls.filter(call => call.method === "POST")).toHaveLength(1));
   const sent = calls.find(call => call.method === "POST")!.body as MessageInput;
   expect(sent.librarySelections).toEqual([
@@ -1119,7 +1210,7 @@ it("§11.7 来源9 无当前会话时“带入新对话”：并入新对话草�
   expect(await screen.findByText(/作品库 · main\.cjs/)).toBeInTheDocument();
   expect(loadDraft("new")?.librarySelections).toHaveLength(1);
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "用这个工程文件做参考");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   const sent = await waitFor(() => {
     const call = calls.find(item => item.method === "POST" && item.url.endsWith("/messages"));
     expect(call).toBeTruthy();
@@ -1508,7 +1599,7 @@ it("K1.2 指定 Skill 只用于下一条：结果未知保留选择与原命令�
   const select = await screen.findByRole("combobox", { name: "指定 Skill" });
   await userEvent.selectOptions(select, "travel-prompt-kit");
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "来一份周末城市漫步 Prompt");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await screen.findByRole("alert");
   // 结果未知：不消费指定，原 commandId + 原 skillId 可整体重试。
   expect(select).toHaveValue("travel-prompt-kit");
@@ -1599,7 +1690,7 @@ it("P3c 侧栏与 skills 路由：安装后原对话立即指定，一次性复�
   await waitFor(() => expect(within(select).getByRole("option", { name: "周末 Prompt" })).toBeInTheDocument());
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("接着聊旅行");
   await userEvent.selectOptions(select, "weekend-prompt");
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   await waitFor(() => expect(select).toHaveValue(""));
   expect(calls.find(call => call.url.endsWith("/messages"))?.body).toMatchObject({ skillId: "weekend-prompt", text: "接着聊旅行" });
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "保留下一条想法");
@@ -1764,13 +1855,13 @@ it("P3c 安装中可关闭与离页，目录忙态保留聊天草稿，后台完
   await userEvent.click(screen.getByRole("button", { name: "刷新列表" }));
   await userEvent.click(screen.getByRole("button", { name: conversation.title }));
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("目录更新后再发送");
-  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^(排队)?发送$/ })).toBeDisabled();
   fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Enter" });
   expect(await screen.findByRole("alert")).toHaveTextContent("Skill 目录正在更新");
   expect(calls.filter(call => call.url.endsWith("/messages"))).toHaveLength(0);
   packages = SKILL_PACKAGES;
   await act(async () => finish({ status: 200, body: packages }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: /^(排队)?发送$/ })).toBeEnabled());
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("目录更新后再发送");
   expect(within(screen.getByRole("combobox", { name: "指定 Skill" })).getByRole("option", { name: "周末 Prompt" })).toBeInTheDocument();
   expect(screen.queryByText(/已取消/)).toBeNull();
@@ -1800,7 +1891,7 @@ it("P3c 管理与发送 RUN_BUSY/409/wait：如实显示等待，原来源、消
   expect(screen.getByLabelText("包来源")).toHaveValue("npm:keep-draft");
   await userEvent.keyboard("{Escape}");
   await userEvent.click(screen.getByRole("button", { name: conversation.title }));
-  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await userEvent.click(screen.getByRole("button", { name: /^(排队)?发送$/ }));
   expect(await screen.findByRole("alert")).toHaveTextContent("当前对话还在处理");
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("等目录空闲后发送");
   expect(select).toHaveValue("weekend-script");

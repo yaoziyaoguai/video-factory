@@ -43,7 +43,7 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
   return {
     forTarget(target: Target | null) {
       const key = target ? keyFor(target) : "";
-      return { text: commands[key]?.text ?? "", saved: receipts[key] ?? "", busy: busy[key] ?? false };
+      return { text: commands[key]?.text ?? "", target: commands[key]?.target ?? target, saved: receipts[key] ?? "", busy: busy[key] ?? false };
     },
     edit(target: Target, text: string) {
       const key = keyFor(target);
@@ -72,17 +72,23 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
       if (!id || !stored?.text.trim() || busy[key]) return;
       // 目标一致时沿用原命令（含 commandId，重试保持幂等）；针对变化则按当前目标重建。
       const command = sameTarget(stored.target, target) ? stored : feedbackInput(target, stored.text);
+      // 请求可能已受理但响应丢失：重试必须使用这次真正发送的命令身份和目标。
+      setCommands(current => ({ ...current, [key]: command }));
+      try { localStorage.setItem(`vf:agent-feedback:${key}`, JSON.stringify(command)); }
+      catch { /* 本页仍沿用同一条命令重试。 */ }
       setBusy(current => ({ ...current, [key]: true }));
       try {
         const receipt = await agentApi.addFeedback(id, command);
         // 回执按存储中的命令清理；提交期间新输入的文字是另一条命令，不能被清掉。
         setCommands(current => {
-          if (current[key]?.commandId !== stored.commandId) return current;
+          if (current[key]?.commandId !== command.commandId) return current;
           const next = { ...current }; delete next[key];
           return next;
         });
-        const persisted = localStorage.getItem(`vf:agent-feedback:${key}`);
-        if (persisted === JSON.stringify(stored)) localStorage.removeItem(`vf:agent-feedback:${key}`);
+        try {
+          const persisted = localStorage.getItem(`vf:agent-feedback:${key}`);
+          if (persisted === JSON.stringify(command)) localStorage.removeItem(`vf:agent-feedback:${key}`);
+        } catch { /* 服务端回执不因浏览器存储不可用而变成失败。 */ }
         setReceipts(current => ({ ...current, [key]: receipt.disposition === "next_version"
           ? "已留作下一版意见，本次制作不变。" : "意见已记录。" }));
         await onSaved(id);

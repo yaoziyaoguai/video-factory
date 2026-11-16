@@ -11,7 +11,7 @@
   "start": "node dist/server/server/main.js",
   "test": "vitest run && node --import tsx --test --test-concurrency=4 --test-timeout=300000 test/auth.test.ts test/candidate-inbox.test.ts test/case-source.test.ts test/cost-studio.test.ts test/creator-settings-store.test.ts test/editorial-decision.test.ts test/opportunity-store.test.ts test/reference-video-store.test.ts test/background-music-store.test.ts test/resource-governance-studio.test.ts test/scene-resource-revision.test.ts test/series-planner.test.ts test/series-planning-agent.test.ts test/series-studio-audit.test.ts test/series-store.test.ts test/maintenance-gate.test.ts test/template-catalog.test.ts test/template-store.test.ts test/topic-taxonomy.test.ts test/trend-article-reader.test.ts test/trend-gateway.test.ts test/trend-opportunity-agent.test.ts test/trend-studio.test.ts test/visual-plan.test.ts && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
-  "test:agent": "vitest run test/agent-workbench.test.tsx test/agent-work-stage.test.tsx test/agent-settings-dialog.test.tsx test/agent-text-settings-dialog.test.tsx test/agent-services-dialog.test.tsx && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
+  "test:agent": "vitest run test/agent-workbench.test.tsx test/agent-work-stage.test.tsx test/agent-work-center.test.tsx test/agent-settings-dialog.test.tsx test/agent-text-settings-dialog.test.tsx test/agent-services-dialog.test.tsx && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "agent:offline": "tsx src/server/agent/offline-main.ts"
  },
  "dependencies": {

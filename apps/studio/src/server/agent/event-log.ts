@@ -86,9 +86,10 @@ export function toBusinessEventPayload(row: EventRow, cursor: string): {
   };
 }
 
-export type TransientDelta = { requestId: string; messageId: string; sequence: number; text: string };
+export type TransientDelta = import("../../shared/agent/generated/contracts.js").TextDelta;
+type RequestProgress = import("../../shared/agent/generated/contracts.js").RequestProgress;
 
-// 两种暂态事件（artifact.draft / context.status）：没有持久 ID、不落库、不推进游标，
+// 暂态事件（artifact.draft / context.status / request.progress）没有持久 ID、不落库、不推进游标，
 // 只描述“正在发生的回合内过程”；正式事实仍由业务事务产生的持久事件承载。
 export type TransientDraft = import("../../shared/agent/generated/contracts.js").ArtifactDraft;
 export type TransientContextStatus = import("../../shared/agent/generated/contracts.js").ContextStatus;
@@ -100,6 +101,8 @@ export class EventHub {
   private readonly deltaListeners = new Map<string, Set<(delta: TransientDelta) => void>>();
   private readonly draftListeners = new Map<string, Set<(draft: TransientDraft) => void>>();
   private readonly contextListeners = new Map<string, Set<(status: TransientContextStatus) => void>>();
+  private readonly progressListeners = new Map<string, Set<(progress: RequestProgress) => void>>();
+  private readonly progress = new Map<string, RequestProgress>();
   private closed = false;
 
   subscribe(conversationId: string, notify: () => void): () => void {
@@ -164,11 +167,36 @@ export class EventHub {
     };
   }
 
+  emitProgress(conversationId: string, progress: RequestProgress): void {
+    if (this.closed) return;
+    this.progress.set(conversationId, progress);
+    for (const listener of this.progressListeners.get(conversationId) ?? []) listener(progress);
+  }
+
+  clearProgress(conversationId: string, requestId: string): void {
+    if (this.progress.get(conversationId)?.requestId === requestId) this.progress.delete(conversationId);
+  }
+
+  subscribeProgress(conversationId: string, listener: (progress: RequestProgress) => void): () => void {
+    const set = this.progressListeners.get(conversationId) ?? new Set();
+    set.add(listener);
+    this.progressListeners.set(conversationId, set);
+    // 断线重连先给当前真实步骤；进程重启后没有旧暂态，不伪造恢复后的执行进度。
+    const latest = this.progress.get(conversationId);
+    if (latest) listener(latest);
+    return () => {
+      set.delete(listener);
+      if (!set.size) this.progressListeners.delete(conversationId);
+    };
+  }
+
   close(): void {
     this.closed = true;
     this.subscribers.clear();
     this.deltaListeners.clear();
     this.draftListeners.clear();
     this.contextListeners.clear();
+    this.progressListeners.clear();
+    this.progress.clear();
   }
 }

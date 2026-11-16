@@ -269,12 +269,12 @@ function MediaSources({ sources }: { sources: MediaContent["sources"] }) {
   </div>;
 }
 
-export function MediaPreview({ content, simulated }: { content: MediaContent; simulated: boolean }) {
+export function MediaPreview({ content, simulated, onTimeUpdate }: { content: MediaContent; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined }) {
   const url = `/api/agent/v1/blobs/${encodeURIComponent(content.blobId)}/content`;
   const [dimensions, setDimensions] = useState<{ blobId: string; width: number; height: number } | null>(null);
   return <div className="agent-preview-media">
     {simulated ? <p>模拟样片，仅验证制作流程</p> : null}
-    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" />
+    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)} />
       : content.mimeType.startsWith("image/") ? <img src={url} alt="图片产出" onLoad={event => {
         const image = event.currentTarget;
         setDimensions({ blobId: content.blobId, width: image.naturalWidth, height: image.naturalHeight });
@@ -324,9 +324,9 @@ export function ProjectPreview({ content }: { content: CreativeProjectContent })
 }
 
 // 修订正文按 format 判别渲染；调用方只提供准确修订，不预读内容。
-export function RevisionBody({ content, simulated }: { content: ArtifactRevision["content"]; simulated: boolean }) {
+export function RevisionBody({ content, simulated, onTimeUpdate }: { content: ArtifactRevision["content"]; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined }) {
   if (content.format === "markdown") return <MarkdownBody content={content} />;
-  if (content.format === "media") return <MediaPreview content={content} simulated={simulated} />;
+  if (content.format === "media") return <MediaPreview content={content} simulated={simulated} onTimeUpdate={onTimeUpdate} />;
   if (content.format === "file") return <FilePreview content={content} />;
   return <ProjectPreview content={content} />;
 }

@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Group, Panel, Separator } from "react-resizable-panels";
-import { Check, Film, Pencil, X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Check, Columns2, Pencil, X } from "lucide-react";
 import { agentApi } from "./api.js";
 import { MATERIAL_PROVIDER_LABELS } from "./material-labels.js";
 import { MarkdownText } from "./markdown.js";
@@ -18,12 +17,24 @@ import type {
 // 已确认成果」。只读展示 + 认可按钮；认可/制作事实一律来自服务端投影，
 // 本组件不维护业务状态机，也不自动推进下一组工作。
 
+export interface ReviewNavigation { workId: string; groupId: string; itemId: string; artifactId?: string; revisionId?: string; }
+
 export type ReviewAction = "approve" | "approve_and_continue" | "finalize_video";
 export interface ReviewEntry { itemId: string; source: ContentSourceInput; }
 export type AdoptPreview = (work: Work, group: ReviewGroup, item: ReviewItem, source: RevisionRef) => Promise<boolean>;
 
 const SEGMENT_STATE_LABEL = { pending: "等待中", running: "制作中", succeeded: "已生成", failed: "未完成", cancelled: "已停止" } as const;
 const blobContentUrl = (blobId: string) => `/api/agent/v1/blobs/${encodeURIComponent(blobId)}/content`;
+
+function navigateTabs(event: KeyboardEvent<HTMLDivElement>) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  const index = tabs.indexOf(event.target as HTMLButtonElement);
+  if (index < 0 || !tabs.length) return;
+  const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+    : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  event.preventDefault(); tabs[next]!.focus(); tabs[next]!.click();
+}
 
 // 认可按钮的 subject 只按输入合同组装：消息原文去掉服务端派生的 author 字段。
 export function contentSubjectInput(source: ContentSource): ContentSourceInput {
@@ -55,27 +66,27 @@ export function workReviewLabel(work: Work): string {
 
 // 草稿按准确修订读取；失败有可见重试，不用永久 loading 代替错误。
 // 读到的修订回报父级合入共享缓存，整组认可的阅读守卫据此判断当前稿是否已加载。
-function useStageRevision(source: ContentSource | RevisionRef | null, cache: Record<string, ArtifactRevision>, onLoaded?: ((revision: ArtifactRevision) => void) | undefined) {
+export function useStageRevision(source: ContentSource | RevisionRef | null, cache: Record<string, ArtifactRevision>, onLoaded?: ((revision: ArtifactRevision) => void) | undefined, active = true) {
   const artifactId = source && "artifactId" in source ? source.artifactId : null;
   const revisionId = source && "revisionId" in source ? source.revisionId : null;
   const key = artifactId && revisionId ? `${artifactId}:${revisionId}` : null;
+  const cached = key ? cache[key] : undefined;
   const [result, setResult] = useState<{ key: string; revision: ArtifactRevision | null; error: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const loadedRef = useRef(onLoaded);
   loadedRef.current = onLoaded;
   useEffect(() => {
-    if (!artifactId || !revisionId || !key || cache[key]) return;
+    if (!active || !artifactId || !revisionId || !key || cached) return;
     let disposed = false;
     setResult(null);
     void agentApi.readRevision(artifactId, revisionId).then(revision => {
-      if (disposed) return;
-      setResult({ key, revision, error: false });
       loadedRef.current?.(revision);
+      if (!disposed) setResult({ key, revision, error: false });
     }).catch(() => {
       if (!disposed) setResult({ key, revision: null, error: true });
     });
     return () => { disposed = true; };
-  }, [artifactId, revisionId, key, cache, attempt]);
+  }, [artifactId, revisionId, key, cached, attempt, active]);
   return { revision: key ? cache[key] ?? (result?.key === key ? result.revision : null) : null,
     error: result?.key === key && result.error, retry: () => setAttempt(value => value + 1) };
 }
@@ -107,37 +118,41 @@ interface BatchState {
 // 索引外批次（历史消息点开）直接按所读详情渲染，不重发搜索。组审阅与无事项视图共用。
 type AdoptMaterial = (batch: MaterialBatch, candidate: MaterialBatch["results"][number], index: number) => void;
 
-export function MaterialBatchCard({ batchId, summary, open, onToggle, onAdopt, adoptDisabled = false }: {
+export function MaterialBatchCard({ batchId, summary, open, onToggle, onAdopt, adoptDisabled = false, works, active = true }: {
   batchId: string;
   summary: MaterialBatchIndexItem | null;
   open: boolean;
   onToggle: (open: boolean) => void;
   onAdopt?: AdoptMaterial | undefined;
   adoptDisabled?: boolean | undefined;
+  works?: Work[];
+  active?: boolean;
 }) {
   const [state, setState] = useState<BatchState>({ batch: null, error: null });
   const [attempt, setAttempt] = useState(0);
   const [previewErrors, setPreviewErrors] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    if (!open || (state.batch?.batchId === batchId && !state.error)) return;
+    if (!active || !open || (state.batch?.batchId === batchId && !state.error)) return;
     let disposed = false;
     setState({ batch: null, error: null });
     void agentApi.readMaterialBatch(batchId)
       .then(batch => { if (!disposed) setState({ batch, error: null }); })
       .catch(() => { if (!disposed) setState({ batch: null, error: "读取失败" }); });
     return () => { disposed = true; };
-  }, [batchId, open, attempt]);
+  }, [batchId, open, attempt, active]);
   const detail = state.batch?.batchId === batchId ? state.batch : null;
   const title = summary?.query.query || detail?.query.query || "（无关键词）";
   const kind = summary?.query.kind ?? detail?.query.kind;
   const resultCount = summary?.resultCount ?? detail?.results.length;
   const isOriginal = (summary?.messageId ?? detail?.messageId) != null;
+  const workId = detail?.workId;
   return <details className="agent-batch" open={open}
     onToggle={event => onToggle((event.target as HTMLDetailsElement).open)}>
     <summary>
       <span>{title}</span>
       <small>{{ image: "图片", video: "视频", audio: "音乐" }[kind ?? "video"]} · {resultCount ?? "…"} 项{isOriginal ? " · 原始批次" : ""}</small>
     </summary>
+    {works && detail ? <p className="agent-stage-muted">{workId ? `所属作品：${works.find(work => work.id === workId)?.title ?? "关联作品"}` : "对话独立素材"}</p> : null}
     {state.error ? <div className="agent-batch-error">{state.error}<button type="button" onClick={() => setAttempt(value => value + 1)}>重试</button></div>
       : !detail ? <div className="agent-batch-loading">正在读取…</div>
       : detail.results.length === 0 ? <div className="agent-batch-empty">这次搜索没有结果，批次仍保留在这里。</div>
@@ -169,16 +184,16 @@ export function MaterialBatchCard({ batchId, summary, open, onToggle, onAdopt, a
 }
 
 export function WorkStagePanel({
-  conversationId, works, selectedWorkId, onSelectWork, artifacts, revisions, runs, materialBatches,
-  onConfirmReview, onContinueReview, reviewBusyKeys, canContinueText, onOpenRun, onEnsureRun, referenceErrors, feedback, simulated, openBatchId,
-  navigation, onAdoptMaterial, adoptDisabled, onRevisionLoaded, onAdoptPreview,
+  conversationId, works, selectedWorkId, revisions, runs, materialBatches,
+  onConfirmReview, onContinueReview, reviewBusyKeys, reviewRequests = {}, canContinueText, onOpenRun, onEnsureRun, referenceErrors, feedback, simulated, openBatchId,
+  navigation, onOpenReview, active = true, onAdoptMaterial, adoptDisabled, onRevisionLoaded, onAdoptPreview,
 }: {
   conversationId: string;
   works: Work[];
   selectedWorkId: string | null;
-  navigation: { workId: string; groupId: string; itemId: string; artifactId: string; revisionId: string } | null;
-  onSelectWork: (workId: string) => void;
-  artifacts: ArtifactHead[];
+  navigation: ReviewNavigation | null;
+  onOpenReview: (target: ReviewNavigation) => void;
+  active?: boolean;
   revisions: Record<string, ArtifactRevision>;
   runs: Run[];
   materialBatches: MaterialBatchIndexItem[];
@@ -191,6 +206,7 @@ export function WorkStagePanel({
   onContinueReview: (work: Work, group: ReviewGroup, label: string) => Promise<boolean>;
   // 同一事项任一认可在途时整组禁用，避免并发确认相互覆盖。
   reviewBusyKeys: readonly string[];
+  reviewRequests?: Readonly<Record<string, "queued" | "running">>;
   canContinueText: boolean;
   onOpenRun: (runId: string) => void;
   // 被动补读所看修订的 run（E1）：合入同一会话缓存，不跳页。
@@ -208,27 +224,33 @@ export function WorkStagePanel({
   const [shownGroups, setShownGroups] = useState<Record<string, string>>(storedReading.groupByWork);
   const [shownRevisions, setShownRevisions] = useState<Record<string, StageRevisionRef | null>>(storedReading.revisionByItem);
   useEffect(() => {
+    if (!work || work.reviewGroups.some(group => group.id === shownGroups[work.id])) return;
+    const initial = work.reviewGroups.find(group => group.items.some(item => item.draft && !approvedCurrent(item))) ?? work.reviewGroups[0];
+    if (initial) setShownGroups(current => current[work.id] && work.reviewGroups.some(group => group.id === current[work.id])
+      ? current : { ...current, [work.id]: initial.id });
+  }, [work, shownGroups]);
+  useEffect(() => {
     if (!navigation) return;
     setShownGroups(current => ({ ...current, [navigation.workId]: navigation.groupId }));
-    setShownRevisions(current => ({ ...current, [`${navigation.workId}:${navigation.groupId}:${navigation.itemId}`]: {
+    setShownRevisions(current => ({ ...current, [`${navigation.workId}:${navigation.groupId}:${navigation.itemId}`]: navigation.artifactId && navigation.revisionId ? {
       artifactId: navigation.artifactId, revisionId: navigation.revisionId,
-    } }));
+    } : null }));
   }, [navigation]);
   const [expandedBatch, setExpandedBatch] = useState<string | null>(storedReading.batchId);
   // 意见框按事项开关；片段针对（B1）按事项独立记录，只在各自意见框打开期间生效。
   const [feedbackOpenKeys, setFeedbackOpenKeys] = useState<Record<string, boolean>>({});
   const [feedbackSegments, setFeedbackSegments] = useState<Record<string, { runId: string; segmentId: string } | null>>({});
-  const workspace = useRef<HTMLElement>(null);
-  const [workspaceWidth, setWorkspaceWidth] = useState(850);
+  const locatedNavigation = useRef<ReviewNavigation | null>(null);
   useEffect(() => {
-    if (!workspace.current) return;
-    const observer = new ResizeObserver(entries => {
-      const width = entries[0]?.contentRect.width ?? 0;
-      if (width > 0) setWorkspaceWidth(width);
+    if (!active || !navigation || locatedNavigation.current === navigation) return;
+    const frame = requestAnimationFrame(() => {
+      const item = document.getElementById(`review-item-${navigation.workId}-${navigation.groupId}-${navigation.itemId}`);
+      if (!item) return;
+      item.scrollIntoView?.({ block: "nearest" }); item.focus({ preventScroll: true });
+      locatedNavigation.current = navigation;
     });
-    observer.observe(workspace.current);
-    return () => observer.disconnect();
-  }, []);
+    return () => cancelAnimationFrame(frame);
+  }, [active, navigation]);
   // 片段针对按 work:group:item 命名空间记录，切换事项/组/作品自然互不可见。
   // 阅读引用与意见开关写回本会话存储；无内容时清空，不残留旧视图。
   useEffect(() => {
@@ -244,11 +266,20 @@ export function WorkStagePanel({
   if (!work) return null;
   const groups = work.reviewGroups;
   const groupId = shownGroups[work.id] && groups.some(group => group.id === shownGroups[work.id])
-    ? shownGroups[work.id]! : groups[0]?.id ?? null;
+    ? shownGroups[work.id]! : (groups.find(target => target.items.some(item => item.draft && !approvedCurrent(item))) ?? groups[0])?.id ?? null;
   const group = groups.find(item => item.id === groupId) ?? null;
+  const visibleItems = group?.items.filter(item => {
+    const saved = shownRevisions[`${work.id}:${group.id}:${item.id}`];
+    const historical = saved && item.draft?.kind === "artifact_revision"
+      && (saved.artifactId !== item.draft.artifactId || saved.revisionId !== item.draft.revisionId);
+    return !approvedCurrent(item) || historical || navigation?.workId === work.id && navigation.groupId === group.id && navigation.itemId === item.id || feedbackOpenKeys[`${work.id}:${group.id}:${item.id}`];
+  }) ?? [];
+  const finalItem = group?.items.length === 1 && group.items[0]?.role === "video" ? group.items[0] : null;
   const itemKey = (itemId: string) => `${work.id}:${group?.id ?? ""}:${itemId}`;
   // busy 键是 work:group 两段；按准确值匹配，避免前缀误伤同前缀的其他组。
   const groupBusy = reviewBusyKeys.includes(`${work.id}:${group?.id ?? ""}`);
+  const continuing = reviewRequests[`${work.id}:${group?.id ?? ""}`];
+  const confirmed = groups.flatMap(group => group.items.filter(item => item.approved != null).map(item => ({ group, item })));
   const pendingEntries = (target: ReviewGroup) => target.items
     .filter(item => item.draft != null && !approvedCurrent(item))
     .map(item => ({ itemId: item.id, source: contentSubjectInput(item.draft!) }));
@@ -265,7 +296,7 @@ export function WorkStagePanel({
     }
     return revisions[`${item.draft.artifactId}:${item.draft.revisionId}`] ? [] : [`「${item.label}」的最新稿还没打开`];
   });
-  const requiredComplete = (target: ReviewGroup) => target.items.filter(item => item.required).every(approvedCurrent);
+  const requiredComplete = (target: ReviewGroup) => target.items.length > 0 && target.items.filter(item => item.required).every(approvedCurrent);
 
   const confirmGroup = (action: ReviewAction, label: string) => {
     if (!group) return;
@@ -273,53 +304,54 @@ export function WorkStagePanel({
     if (entries.length && !unreadPendingHints(group).length) void onConfirmReview(work, group, action, entries, label);
   };
 
-  return <section ref={workspace} className="agent-work" data-work-id={work.id} aria-label={`创作：${work.title}`}>
-    {works.length > 1 ? <div className="agent-work-tabs" role="tablist" aria-label="当前对话中的创作">
-      {works.map(item => <button type="button" key={item.id} role="tab" aria-selected={item.id === work.id} onClick={() => onSelectWork(item.id)}>
-        <Film /><span><strong>{item.title}</strong><small>{workReviewLabel(item)}</small></span>
-      </button>)}
-    </div> : null}
+  return <section className="agent-work" data-work-id={work.id} aria-label={`创作：${work.title}`}>
     <header className="agent-work-heading">
-      <div><h2>{work.title}</h2><span className="agent-work-phase">{workReviewLabel(work)}</span></div>
+      <div><h2 tabIndex={-1}>{work.title}</h2><span className="agent-work-phase">{workReviewLabel(work)}</span></div>
     </header>
-    {groups.length ? <div className="agent-stage-tabs" role="tablist" aria-label="审阅组">
+    {groups.length ? <div className="agent-stage-tabs" role="tablist" aria-label="审阅组" onKeyDown={navigateTabs}>
       {groups.map((target, index) => {
         const total = target.items.length;
         const approvedCount = target.items.filter(approvedCurrent).length;
-        const complete = target.items.filter(item => item.required).every(approvedCurrent);
+        const complete = requiredComplete(target);
         return <button type="button" role="tab" key={target.id} aria-selected={target.id === groupId}
+          data-pending={target.id !== groupId && target.items.some(item => item.draft && !approvedCurrent(item)) || undefined}
+          tabIndex={target.id === groupId ? 0 : -1} id={`review-tab-${target.id}`} aria-controls={`review-panel-${work.id}`}
           onClick={() => setShownGroups(current => ({ ...current, [work.id]: target.id }))}>
           <span>{index + 1}</span>{target.title}{total ? <small className="agent-review-count">{approvedCount}/{total}</small> : null}{complete ? <Check /> : null}
         </button>;
       })}
     </div> : null}
-    <Group orientation={workspaceWidth < 640 ? "vertical" : "horizontal"} className="agent-work-split" id="agent-work-split">
-      <Panel id="agent-work-draft" defaultSize="55%" minSize={workspaceWidth < 640 ? "210px" : "280px"}>
+    <div className="agent-work-canvas with-confirmed">
       <section className="agent-work-draft" aria-label="草稿与修改">
-        <div className="agent-work-pane-title"><h3>草稿与修改</h3><span>{group?.title ?? "还没有审阅组"}</span></div>
-        <div className="agent-work-draft-scroll">
-          {!group ? <div className="agent-stage-empty">还没有审阅组。正式开始一条视频后，Frame 会按角色、背景、分镜分组交付。</div>
-            : group.items.length ? group.items.map(item => <ReviewItemCard key={item.id} work={work} group={group} item={item}
-                artifacts={artifacts} revisions={revisions} runs={runs} simulated={simulated} feedback={feedback}
-                feedbackSegment={feedbackSegments[itemKey(item.id)] ?? null}
+        <div className="agent-work-pane-title"><h3>未确认</h3><span>{group ? pendingEntries(group).length : 0}</span></div>
+        {group && visibleItems.length > 1 ? <nav className="agent-item-nav" aria-label="本组内容">{visibleItems.map(item => <button type="button" key={item.id} onClick={() => {
+          const card = document.getElementById(`review-item-${work.id}-${group.id}-${item.id}`);
+          card?.scrollIntoView({ block: "start" }); card?.focus({ preventScroll: true });
+        }}>{approvedCurrent(item) ? <Check /> : null}{item.label}</button>)}</nav> : null}
+        <div className="agent-work-draft-scroll" role="tabpanel" id={`review-panel-${work.id}`} aria-labelledby={group ? `review-tab-${group.id}` : undefined}>
+          {!group ? <div className="agent-stage-empty">这里会显示 Frame 为这件作品交付的审阅内容。</div>
+            : visibleItems.length ? visibleItems.map(item => <ReviewItemCard key={`${group.id}:${item.id}`} active={active} work={work} group={group} item={item}
+                revisions={revisions} runs={runs} simulated={simulated} feedback={feedback}
+                feedbackSegment={feedbackSegments[itemKey(item.id)]}
                 onPickSegment={segment => setFeedbackSegments(current => ({ ...current, [itemKey(item.id)]: segment }))}
                 referenceErrors={referenceErrors} onEnsureRun={onEnsureRun} onOpenRun={onOpenRun}
                 onConfirmReview={onConfirmReview} onAdoptPreview={onAdoptPreview} groupBusy={groupBusy}
+                finalizeInFooter={finalItem !== null}
                 onRevisionLoaded={onRevisionLoaded}
                 viewingRevision={shownRevisions[itemKey(item.id)] ?? null}
                 onViewingRevision={ref => setShownRevisions(current => ({ ...current, [itemKey(item.id)]: ref }))}
                 feedbackOpen={Boolean(feedbackOpenKeys[itemKey(item.id)])}
                 onToggleFeedback={() => setFeedbackOpenKeys(current => ({ ...current, [itemKey(item.id)]: !current[itemKey(item.id)] }))} />)
-              : <div className="agent-stage-empty">这一组还没有交付事项。</div>}
+              : <div className="agent-stage-empty">{group.items.length ? "这一组的当前稿已全部确认。" : "这一组还没有交付事项。"}</div>}
           {materialBatches.length || openBatchId ? <details className="agent-draft-materials" open={Boolean(expandedBatch)}>
-            <summary>参考素材</summary>
+            <summary>会话参考素材</summary>
           {materialBatches.length || (openBatchId && !materialBatches.some(batch => batch.batchId === openBatchId)) ? <>
-            {materialBatches.map(batch => <MaterialBatchCard key={batch.batchId} batchId={batch.batchId} summary={batch}
+            {materialBatches.map(batch => <MaterialBatchCard key={batch.batchId} batchId={batch.batchId} summary={batch} works={works} active={active}
               open={expandedBatch === batch.batchId} onAdopt={onAdoptMaterial} adoptDisabled={adoptDisabled}
               onToggle={open => setExpandedBatch(open ? batch.batchId : null)} />)}
             {/* 被点开的批次不在当前索引（历史批次）时仍按所读详情渲染，不重发搜索。 */}
             {openBatchId && !materialBatches.some(batch => batch.batchId === openBatchId)
-              ? <MaterialBatchCard batchId={openBatchId} summary={null} open onAdopt={onAdoptMaterial} adoptDisabled={adoptDisabled}
+              ? <MaterialBatchCard batchId={openBatchId} summary={null} works={works} active={active} open onAdopt={onAdoptMaterial} adoptDisabled={adoptDisabled}
                   onToggle={open => setExpandedBatch(open ? openBatchId : null)} />
               : null}
           </> : null}
@@ -330,6 +362,24 @@ export function WorkStagePanel({
             const pending = pendingEntries(group);
             const unread = unreadPendingHints(group);
             const complete = requiredComplete(group);
+            const finalRef = finalItem ? shownRevisions[itemKey(finalItem.id)] : null;
+            const finalOld = finalItem?.draft?.kind === "artifact_revision" && finalRef
+              && (finalRef.artifactId !== finalItem.draft.artifactId || finalRef.revisionId !== finalItem.draft.revisionId);
+            const finalUnread = finalItem?.draft?.kind === "artifact_revision" && !revisions[`${finalItem.draft.artifactId}:${finalItem.draft.revisionId}`];
+            if (finalItem) return <>
+              {finalItem.draft && !sameSource(finalItem.finalizedSource, finalItem.draft) ? <>
+                <button type="button" className="agent-stage-primary" disabled={groupBusy || Boolean(finalOld) || Boolean(finalUnread)}
+                  aria-label={`以这版「${finalItem.label}」定稿并入库`}
+                  onClick={() => void onConfirmReview(work, group, "finalize_video", [{ itemId: finalItem.id, source: contentSubjectInput(finalItem.draft!) }], `以这版「${finalItem.label}」定稿。`)}>定稿并入库</button>
+                <span className="agent-stage-muted">{finalOld ? "请回到最新稿后定稿" : finalUnread ? "正在读取当前稿" : "采用这一版，收进作品库"}</span>
+              </> : <span className="agent-stage-muted">{finalItem.finalizedSource ? "已定稿并入库" : "等待视频产出"}</span>}
+              {finalItem.draft ? <details className="agent-review-more"><summary>其他操作</summary><div>
+                {!approvedCurrent(finalItem) ? <button type="button" disabled={groupBusy || Boolean(finalOld) || Boolean(finalUnread)} onClick={() => confirmGroup("approve", `认可「${finalItem.label}」这一版。`)}>只认可这一版</button> : null}
+                <button type="button" disabled={groupBusy || Boolean(continuing) || !canContinueText || Boolean(finalOld) || Boolean(finalUnread)}
+                  onClick={() => approvedCurrent(finalItem) ? void onContinueReview(work, group, `「${group.title}」请继续。`) : confirmGroup("approve_and_continue", `「${group.title}」认可并继续。`)}>{approvedCurrent(finalItem) ? "继续" : "认可并继续"}</button>
+              </div></details> : null}
+              {continuing ? <span className="agent-stage-muted" role="status">{continuing === "queued" ? "已加入队列，等待前面的请求完成。" : "正在继续这一组，完成后会在这里更新。"}</span> : null}
+            </>;
             return <>
               {pending.length ? <>
                 {unread.length ? <span className="agent-stage-muted">{unread.join("；")}。整组认可暂不可用，单项认可仍可用。</span> : null}
@@ -337,18 +387,19 @@ export function WorkStagePanel({
                   <button type="button" className="agent-stage-secondary" disabled={groupBusy || unread.length > 0}
                     onClick={() => confirmGroup("approve", `「${group.title}」这一组我都认可了。`)}>认可整组</button>
                 </span>
-                <span className="agent-stage-action">
-                  <button type="button" className="agent-stage-primary" disabled={groupBusy || !canContinueText || unread.length > 0}
+                {!complete ? <span className="agent-stage-action">
+                  <button type="button" className="agent-stage-primary" disabled={groupBusy || Boolean(continuing) || !canContinueText || unread.length > 0}
                     onClick={() => confirmGroup("approve_and_continue", `「${group.title}」这一组我都认可了，请继续下一步。`)}>认可并继续</button>
                   {!canContinueText ? <small>继续需要可用的文本模型</small> : null}
-                </span>
+                </span> : null}
               </> : null}
               {complete ? <span className="agent-stage-action">
-                <button type="button" className="agent-stage-primary" disabled={groupBusy || !canContinueText}
+                <button type="button" className="agent-stage-primary" disabled={groupBusy || Boolean(continuing) || !canContinueText}
                   onClick={() => void onContinueReview(work, group, `「${group.title}」这一组可以了，请继续。`)}>继续</button>
                 {!canContinueText ? <small>继续需要可用的文本模型</small> : null}
               </span> : null}
-              {!pending.length
+              {continuing ? <span className="agent-stage-muted" role="status">{continuing === "queued" ? "已加入队列，等待前面的请求完成。" : "正在继续这一组，完成后会在这里更新。"}</span> : null}
+              {!pending.length && !continuing
                 ? <span className="agent-stage-muted">{group.items.some(item => item.required && item.draft == null && item.approved == null)
                   ? "还有必选内容等待产出。" : "这一组已全部认可；想调整时在对话中提出。"}</span>
                 : null}
@@ -360,37 +411,34 @@ export function WorkStagePanel({
             ? <span className="agent-stage-muted">{group.nextIntent}</span> : null}
         </div> : null}
       </section>
-      </Panel>
-      <Separator className={`agent-resizer agent-work-divider${workspaceWidth < 640 ? " vertical" : ""}`} aria-label="调整草稿与成果大小" />
-      <Panel id="agent-work-media" minSize={workspaceWidth < 640 ? "170px" : "240px"}>
-      <section className="agent-work-media" aria-label="已确认成果">
-        <div className="agent-work-pane-title"><h3>已确认成果</h3></div>
+      <section className="agent-work-media" id="agent-confirmed-results" aria-label="已确认成果">
+        <div className="agent-work-pane-title"><h3>已确认</h3><span>{confirmed.length}</span></div>
         <div className="agent-work-media-scroll">
-          {(() => {
-            const confirmed = groups.flatMap(target => target.items.filter(item => item.approved != null));
-            return confirmed.length ? confirmed.map(item => <ConfirmedItem key={item.id} item={item}
-                hasNewDraft={!sameSource(item.approved, item.draft)} revisions={revisions} simulated={simulated}
+          {confirmed.length ? confirmed.map(({ group, item }) => <ConfirmedItem key={`${group.id}:${item.id}`} active={active} item={item} groupTitle={group.title}
+                onOpen={() => onOpenReview({ workId: work.id, groupId: group.id, itemId: item.id,
+                  ...(item.approved?.kind === "artifact_revision" ? { artifactId: item.approved.artifactId, revisionId: item.approved.revisionId } : {}) })}
+                hasNewDraft={!sameSource(item.approved, item.draft)} revisions={revisions} simulated={simulated} onRevisionLoaded={onRevisionLoaded}
                 runs={runs} onEnsureRun={onEnsureRun} referenceErrors={referenceErrors} />)
-              : <div className="agent-stage-empty">你认可后的角色、方案和视频会留在这里。</div>;
-          })()}
+              : <div className="agent-stage-empty">确认过的内容会保留在这里，新草稿不会覆盖它。</div>}
         </div>
       </section>
-      </Panel>
-    </Group>
+    </div>
   </section>;
 }
 
-function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulated, feedback,
-  feedbackSegment, onPickSegment, referenceErrors, onEnsureRun, onOpenRun, onConfirmReview, onAdoptPreview, groupBusy,
-  viewingRevision, onViewingRevision, feedbackOpen, onToggleFeedback, onRevisionLoaded }: {
+function ReviewItemCard({ work, group, item, revisions, runs, simulated, feedback, active,
+  feedbackSegment: selectedSegment, onPickSegment, referenceErrors, onEnsureRun, onOpenRun, onConfirmReview, onAdoptPreview, groupBusy,
+  viewingRevision, onViewingRevision, feedbackOpen, onToggleFeedback, onRevisionLoaded, finalizeInFooter }: {
   work: Work; group: ReviewGroup; item: ReviewItem;
-  artifacts: ArtifactHead[]; revisions: Record<string, ArtifactRevision>; runs: Run[]; simulated: boolean;
-  feedback: FeedbackDrafts; feedbackSegment: { runId: string; segmentId: string } | null;
+  active: boolean;
+  revisions: Record<string, ArtifactRevision>; runs: Run[]; simulated: boolean;
+  feedback: FeedbackDrafts; feedbackSegment: { runId: string; segmentId: string } | null | undefined;
   onPickSegment: (segment: { runId: string; segmentId: string } | null) => void;
   referenceErrors: Record<string, string>;
   onEnsureRun: (runId: string) => void; onOpenRun: (runId: string) => void;
   onConfirmReview: (work: Work, group: ReviewGroup, action: ReviewAction, entries: readonly ReviewEntry[], label: string) => Promise<boolean>;
   groupBusy: boolean;
+  finalizeInFooter: boolean;
   onAdoptPreview: AdoptPreview;
   viewingRevision: StageRevisionRef | null;
   onViewingRevision: (ref: StageRevisionRef | null) => void;
@@ -400,14 +448,26 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
   const draft = item.draft;
   // 第一次阅读就保存准确引用；业务更新只用于提示，不决定用户正在看哪版。
   const draftRef = draft?.kind === "artifact_revision" ? { artifactId: draft.artifactId, revisionId: draft.revisionId } : null;
+  const savedFeedback = feedback.forTarget(draftRef ? { ...draftRef, workId: work.id } : null);
+  const feedbackSegment = selectedSegment === undefined ? savedFeedback.target?.segment ?? null : selectedSegment;
   useEffect(() => {
-    if (draftRef && !viewingRevision) onViewingRevision(draftRef);
-  }, [draftRef?.artifactId, draftRef?.revisionId, viewingRevision]);
+    if (active && selectedSegment === undefined && savedFeedback.target?.segment) onPickSegment(savedFeedback.target.segment);
+  }, [active, selectedSegment, savedFeedback.target?.segment]);
+  useEffect(() => {
+    if (active && draftRef && !viewingRevision) onViewingRevision(draftRef);
+  }, [draftRef?.artifactId, draftRef?.revisionId, viewingRevision, active]);
   const displayedSource = draft?.kind === "artifact_revision" && viewingRevision
     ? { ...draft, artifactId: viewingRevision.artifactId, revisionId: viewingRevision.revisionId }
     : draft;
-  const read = useStageRevision(displayedSource, revisions, onRevisionLoaded);
+  const read = useStageRevision(displayedSource, revisions, onRevisionLoaded, active);
   const revision = read.revision;
+  const [compareOpen, setCompareOpen] = useState(false);
+  const compareSource = compareOpen && revision?.baseRevisionId ? { artifactId: revision.artifactId, revisionId: revision.baseRevisionId } : null;
+  const previous = useStageRevision(compareSource, revisions, onRevisionLoaded, active);
+  const playbackTime = useRef(0);
+  const feedbackInput = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { setCompareOpen(false); playbackTime.current = 0; }, [revision?.revisionId]);
+  useEffect(() => { if (feedbackOpen) feedbackInput.current?.focus(); }, [feedbackOpen]);
   const viewingOld = draft?.kind === "artifact_revision" && viewingRevision !== null
     && (viewingRevision.artifactId !== draft.artifactId || viewingRevision.revisionId !== draft.revisionId);
   const draftApproved = approvedCurrent(item);
@@ -423,9 +483,9 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
   ensureRunRef.current = onEnsureRun;
   useEffect(() => {
     // 所看 run 不在已加载列表时按 ID 补读进父级会话缓存；失败一次后等用户手动重试，不自动循环。
-    if (!viewingRunId || viewingRunLoaded || referenceErrors[`run:${viewingRunId}`]) return;
+    if (!active || !viewingRunId || viewingRunLoaded || referenceErrors[`run:${viewingRunId}`]) return;
     ensureRunRef.current(viewingRunId);
-  }, [viewingRunId, viewingRunLoaded, referenceErrors]);
+  }, [viewingRunId, viewingRunLoaded, referenceErrors, active]);
   const videoRun = viewingRunId ? runs.find(run => run.id === viewingRunId) ?? null : null;
   const segments = isVideo ? videoRun?.segments ?? [] : [];
   // 正在针对的片段按 runId+segmentId 找回标题与序号，不依赖当前停在哪个组。
@@ -442,6 +502,11 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
     ? { artifactId: draftRef.artifactId, revisionId: draftRef.revisionId, workId: work.id, segment: feedbackSegment }
     : feedbackTarget;
   const { text: feedbackText, saved: feedbackSaved, busy: feedbackBusy } = feedback.forTarget(feedbackSubmitTarget);
+  const pickFeedbackSegment = (segment: { runId: string; segmentId: string } | null) => {
+    const target = segment && draftRef ? { ...draftRef, workId: work.id, segment } : feedbackTarget;
+    if (target) feedback.edit(target, feedbackText);
+    onPickSegment(segment);
+  };
   const feedbackReadOnly = viewingOld && !segmentLive;
   // 事项草稿前进时，同一打开的片段意见把未发送文字带到新稿键（E1）：仅同事项同片段，
   // 不跨事项、不动整稿意见；已提交的意见不在草稿里，自然不迁移。
@@ -457,30 +522,43 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
       { artifactId: prior.artifactId, revisionId: prior.revisionId, workId: work.id, segment: prior.segment },
       { artifactId: draftRef.artifactId, revisionId, workId: work.id, segment: feedbackSegment });
   }, [draftRef?.artifactId, draftRef?.revisionId, feedbackSegment, feedback, work]);
-  const viewingArtifact = displayedSource?.kind === "artifact_revision"
-    ? artifacts.find(candidate => candidate.id === displayedSource.artifactId) ?? null : null;
-  const statusLabel = !draft ? (item.approved ? "已认可" : "等待产出")
+  const statusLabel = viewingOld ? "历史版本 · 只读" : !draft ? (item.approved ? "已认可" : "等待产出")
     : item.role === "video" ? finalizedCurrent ? "已定稿"
       : draftApproved ? "已认可，可定稿"
       : item.approved ? "新稿待确认" : "待认可"
     : draftApproved ? "已认可"
     : item.approved ? "新稿待确认" : "待认可";
   const confirmEntry = draft ? [{ itemId: item.id, source: contentSubjectInput(draft) }] : null;
+  const currentRead = draft?.kind === "message_text" || Boolean(!viewingOld && revision);
+  const confirmItem = async (action: ReviewAction, label: string) => {
+    if (!currentRead || !confirmEntry) return;
+    const trigger = document.activeElement as HTMLElement | null;
+    const pane = trigger?.closest(".agent-work-draft");
+    if (!await onConfirmReview(work, group, action, confirmEntry, label)) return;
+    requestAnimationFrame(() => {
+      // 卡片移入已确认区时交接键盘位置；用户已转去聊天则不抢焦点。
+      if (trigger && !trigger.isConnected && document.activeElement === document.body && pane?.isConnected) {
+        pane.querySelector<HTMLElement>(".agent-review-item, .agent-stage-actions button:not(:disabled)")?.focus({ preventScroll: true });
+      }
+    });
+  };
 
-  return <article className="agent-review-item" data-approved={draftApproved || undefined} data-pending={!draftApproved && draft != null || undefined}>
+  return <article className="agent-review-item" id={`review-item-${work.id}-${group.id}-${item.id}`} tabIndex={-1} data-feedback-open={feedbackOpen || undefined} data-approved={draftApproved || undefined} data-pending={!draftApproved && draft != null || undefined}>
     <header>
       <h4>{item.label}</h4>
       <span className="agent-review-role">{REVIEW_ROLE_LABELS[item.role]}</span>
+      {draft?.kind === "artifact_revision" ? <span className="agent-review-version">v{revision?.revisionNumber ?? "…"}</span> : null}
       <span className="agent-stage-state">{statusLabel}</span>
+      {revision?.baseRevisionId ? <button type="button" className="agent-version-compare-toggle" aria-expanded={compareOpen} onClick={() => setCompareOpen(value => !value)}><Columns2 />{compareOpen ? "收起对比" : "比较版本"}</button> : null}
       {draft?.kind === "artifact_revision" ? <button type="button" className="agent-stage-secondary agent-review-feedback-toggle" onClick={onToggleFeedback}>
         <Pencil />{feedbackOpen ? "收起意见" : "提意见"}</button> : null}
     </header>
     {feedbackOpen && feedbackTarget ? <div className="agent-work-feedback">
       {feedbackSegment ? <span className="agent-target-chip">
         针对：片段 {feedbackSegmentIndex >= 0 ? feedbackSegmentIndex + 1 : ""}{feedbackSegmentTitle ? `「${feedbackSegmentTitle}」` : ""}
-        <button type="button" onClick={() => onPickSegment(null)} aria-label="取消针对该片段"><X /></button>
+        <button type="button" onClick={() => pickFeedbackSegment(null)} aria-label="取消针对该片段"><X /></button>
       </span> : null}
-      <label>这条意见只记录，不会自动改稿<textarea readOnly={feedbackReadOnly} value={feedbackText}
+      <label>这条意见只记录，不会自动改稿<textarea ref={feedbackInput} readOnly={feedbackReadOnly} value={feedbackText}
         onChange={event => { if (feedbackSubmitTarget && !feedbackReadOnly) feedback.edit(feedbackSubmitTarget, event.target.value); }}
         placeholder="留给这一版的意见…" aria-label="意见" /></label>
       {feedbackReadOnly ? <p>这是旧稿的未发送意见，可以复制后继续讨论。</p> : null}
@@ -489,17 +567,27 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
     </div> : null}
     {!draft ? <div className="agent-stage-empty">等待 Frame 交付这份内容。</div> : <>
       {viewingOld ? <div className="agent-inline-note">正在看旧版本，不能在这里确认；请回到最新稿。</div> : null}
-      <div className="agent-stage-meta">
-        {draft.kind === "artifact_revision"
-          ? <span>{viewingArtifact?.title ?? (isVideo ? "视频稿" : item.label)} · v{revision?.revisionNumber ?? "…"}</span>
-          : <span>聊天原文 · {draft.author === "user" ? "用户消息" : "Frame 消息"}</span>}
-      </div>
+      {draft.kind === "message_text" ? <div className="agent-stage-meta"><span>聊天原文 · {draft.author === "user" ? "用户消息" : "Frame 消息"}</span></div> : null}
+      <div className={compareOpen ? "agent-version-comparison" : undefined}>
+      {compareOpen ? <section aria-label="上一版内容"><h5>上一版 · v{previous.revision?.revisionNumber ?? "…"}</h5>{previous.revision ? <div className="agent-stage-body"><RevisionBody content={previous.revision.content} simulated={simulated} /></div>
+        : previous.error ? <p role="status">上一版读取失败。<button type="button" onClick={previous.retry}>重试对比</button></p> : <p>正在读取上一版…</p>}</section> : null}
+      <section aria-label={compareOpen ? "当前查看版本" : undefined}>
+      {compareOpen ? <h5>当前查看 · v{revision?.revisionNumber ?? "…"}</h5> : null}
       {draft.kind === "artifact_revision"
-        ? revision ? <div className="agent-stage-body"><RevisionBody content={revision.content} simulated={simulated} /></div>
+        ? revision ? <div className="agent-stage-body"><RevisionBody content={revision.content} simulated={simulated} onTimeUpdate={time => { playbackTime.current = time; }} /></div>
           : read.error
             ? <div role="status">草稿读取失败。<button type="button" onClick={read.retry}>重试读取草稿</button></div>
             : <div className="agent-stage-loading">正在读取…</div>
         : <div className="agent-stage-body"><MarkdownText text={draft.text} /></div>}
+      </section></div>
+      {isVideo && revision?.content.format === "media" && !viewingOld && feedbackTarget ? <button type="button" className="agent-time-feedback" onClick={() => {
+        const seconds = Math.floor(playbackTime.current);
+        const stamp = `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+        pickFeedbackSegment(null);
+        const prior = feedback.forTarget(feedbackTarget).text;
+        feedback.edit(feedbackTarget, `${prior}${prior.trim() ? "\n\n" : ""}[${stamp}] `);
+        if (!feedbackOpen) onToggleFeedback(); else feedbackInput.current?.focus();
+      }}><Pencil />对此时刻提意见</button> : null}
     </>}
     {isVideo && videoRun?.audioSummary ? <AudioSummaryView summary={videoRun.audioSummary} title="这版视频的声音" /> : null}
     {isVideo && segments.length ? <div className="agent-segment-strip" aria-label="按播放顺序的片段">
@@ -509,11 +597,11 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
         onSelect={() => {
           if (feedbackSegment != null && feedbackSegment.segmentId === segment.segmentId
             && feedbackSegment.runId === viewingRunId) {
-            onPickSegment(null);
+            pickFeedbackSegment(null);
             return;
           }
-          onPickSegment({ runId: viewingRunId!, segmentId: segment.segmentId });
-          onToggleFeedback();
+          pickFeedbackSegment({ runId: viewingRunId!, segmentId: segment.segmentId });
+          if (!feedbackOpen) onToggleFeedback();
         }} />)}
     </div> : null}
     {isVideo && viewingRunId && !videoRun ? <p className="agent-stage-muted">
@@ -535,9 +623,9 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
         : viewingOld ? <button type="button" className="agent-stage-secondary" onClick={() => onViewingRevision(draftRef)}>查看最新稿</button>
         : isVideo && finalizedCurrent ? <span className="agent-stage-muted">这一版已定稿并入库；修改请在对话中提出。</span>
         : isVideo && !finalizedCurrent ? <>
-          <button type="button" className="agent-stage-primary"
-            disabled={groupBusy} aria-label={`以这版「${item.label}」定稿并入库`}
-            onClick={() => void onConfirmReview(work, group, "finalize_video", confirmEntry!, `以这版「${item.label}」定稿。`)}>{draftApproved ? "定稿并入库" : "以这版定稿"}</button>
+          {!finalizeInFooter ? <button type="button" className="agent-stage-primary"
+            disabled={groupBusy || !currentRead} aria-label={`以这版「${item.label}」定稿并入库`}
+            onClick={() => void confirmItem("finalize_video", `以这版「${item.label}」定稿。`)}>{draftApproved ? "定稿并入库" : "以这版定稿"}</button> : null}
           {revision?.baseRevisionId && draft.kind === "artifact_revision"
             ? <button type="button" className="agent-stage-secondary"
                 onClick={() => onViewingRevision({ artifactId: draft.artifactId, revisionId: revision.baseRevisionId! })}>看上一版</button>
@@ -546,8 +634,8 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
         : draftApproved ? <span className="agent-stage-muted">这一份已认可；新稿出现后会再次等待确认。</span>
         : <>
           {confirmEntry ? <button type="button" className="agent-stage-secondary"
-            disabled={groupBusy} aria-label={`认可「${item.label}」`}
-            onClick={() => void onConfirmReview(work, group, "approve", confirmEntry, `认可「${item.label}」这一份。`)}>认可这一份</button> : null}
+            disabled={groupBusy || !currentRead} aria-label={`认可「${item.label}」`}
+            onClick={() => void confirmItem("approve", `认可「${item.label}」这一份。`)}>认可这一份</button> : null}
           {revision?.baseRevisionId && draft.kind === "artifact_revision"
             ? <button type="button" className="agent-stage-secondary"
                 onClick={() => onViewingRevision({ artifactId: draft.artifactId, revisionId: revision.baseRevisionId! })}>看上一版</button>
@@ -558,23 +646,27 @@ function ReviewItemCard({ work, group, item, artifacts, revisions, runs, simulat
   </article>;
 }
 
-function ConfirmedItem({ item, hasNewDraft, revisions, simulated, runs, onEnsureRun, referenceErrors }: {
+function ConfirmedItem({ item, hasNewDraft, revisions, simulated, runs, onEnsureRun, referenceErrors, onRevisionLoaded, groupTitle, onOpen, active }: {
   item: ReviewItem; hasNewDraft: boolean;
+  groupTitle: string; onOpen: () => void; active: boolean;
   revisions: Record<string, ArtifactRevision>; simulated: boolean;
+  onRevisionLoaded?: ((revision: ArtifactRevision) => void) | undefined;
   runs: Run[]; onEnsureRun: (runId: string) => void; referenceErrors: Record<string, string>;
 }) {
   const source = item.approved!;
-  const { revision, error, retry } = useStageRevision(source, revisions);
+  const { revision, error, retry } = useStageRevision(source, revisions, onRevisionLoaded, active);
   const runId = item.role === "video" ? revision?.runId ?? null : null;
   const run = runs.find(candidate => candidate.id === runId);
   const ensureRun = useRef(onEnsureRun);
   ensureRun.current = onEnsureRun;
   useEffect(() => {
-    if (runId && !run && !referenceErrors[`run:${runId}`]) ensureRun.current(runId);
-  }, [runId, run, referenceErrors]);
-  // 版本号只在有多版时出现；首版不挂常驻 v1。区域标题已是“已确认成果”，条目不再重复。
+    if (active && runId && !run && !referenceErrors[`run:${runId}`]) ensureRun.current(runId);
+  }, [runId, run, referenceErrors, active]);
+  // 版本始终对应认可来源；有新草稿时，旧版仍然完整保留。
   return <article className="agent-confirmed-stage" aria-label={`已确认${item.label}`}>
-    <header><h4>{item.label}</h4>{source.kind === "artifact_revision" && (revision?.revisionNumber ?? 0) > 1 ? <span>v{revision?.revisionNumber}</span> : null}</header>
+    <header><h4>{item.label}</h4>{source.kind === "artifact_revision" && revision ? <span>v{revision?.revisionNumber}</span> : null}</header>
+    <p className="agent-stage-muted">{groupTitle}</p>
+    {item.role === "video" ? <span className="agent-stage-state">{sameSource(item.finalizedSource, source) ? "已定稿" : hasNewDraft ? "已确认，未定稿" : "已认可，可定稿"}</span> : null}
     {hasNewDraft ? <p className="agent-stage-muted">新草稿讨论中，这份成果保持不变。</p> : null}
     {source.kind === "message_text" ? <MarkdownText text={source.text} />
       : revision ? <RevisionBody content={revision.content} simulated={simulated} />
@@ -584,6 +676,7 @@ function ConfirmedItem({ item, hasNewDraft, revisions, simulated, runs, onEnsure
     {runId && !run ? <p className="agent-stage-muted">{referenceErrors[`run:${runId}`]
       ? <>这版视频的声音记录读取失败。<button type="button" onClick={() => onEnsureRun(runId)}>重试读取</button></>
       : "正在读取这版视频的声音记录…"}</p> : null}
+    <button type="button" className="agent-text-link" aria-label={`审阅已确认${item.label}`} onClick={onOpen}>打开这项审阅</button>
   </article>;
 }
 
@@ -595,7 +688,7 @@ function SegmentCard({ segment, index, selected, onSelect }: {
   const url = segment.media ? blobContentUrl(segment.media.blobId) : null;
   const endMs = segment.startMs != null && segment.durationMs != null ? segment.startMs + segment.durationMs : null;
   const visual = url && segment.media?.mimeType.startsWith("video/")
-    ? <video controls preload="metadata" src={url} aria-label={`片段 ${index + 1} 预览`}
+    ? <video controls preload="none" src={url} aria-label={`片段 ${index + 1} 预览`}
       onLoadedMetadata={event => { if (segment.startMs != null) event.currentTarget.currentTime = segment.startMs / 1000; }}
       onTimeUpdate={event => { if (endMs != null && event.currentTarget.currentTime * 1000 >= endMs) event.currentTarget.pause(); }} />
     : url && segment.media?.mimeType.startsWith("image/") ? <img src={url} alt={`片段 ${index + 1} 画面`} loading="lazy" />

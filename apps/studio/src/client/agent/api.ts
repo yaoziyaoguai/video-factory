@@ -2,7 +2,7 @@ import type { ProviderConnectionSettings, SaveProviderConnection, SaveProviderCo
 import { notifyAuthenticationLoss } from "../auth-api.js";
 import type {
   ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, ConversationPage, FeedbackInput, FeedbackReceipt,
-  Message, MessageInput, MessagePage, Proposal, RequestReceipt, Snapshot, Target, ContextStatus,
+  Message, MessageInput, MessagePage, Proposal, RequestReceipt, Snapshot, Target, ContextStatus, RequestProgress,
   Error as ContractError, BusinessEvent, TextDelta, ArtifactPage, ProposalPage, Run, RunPage, AdmissionReceipt, AcceptProposal, CancelReceipt, CancelRun,
   LibraryVideo, LibraryVideoPage,
   Work, MaterialBatch,
@@ -61,6 +61,18 @@ function newCommandId(): string {
   return `cmd-${Date.now().toString(36)}-${random}`;
 }
 
+// 多处预览共用同一条在途读取；成功内容仍由工作台按准确修订保存，失败后可重新请求。
+const revisionReads = new Map<string, Promise<ArtifactRevision>>();
+function readRevision(artifactId: string, revisionId: string): Promise<ArtifactRevision> {
+  const key = `${artifactId}:${revisionId}`;
+  const existing = revisionReads.get(key);
+  if (existing) return existing;
+  const pending = requestJson<ArtifactRevision>("GET", `/api/agent/v1/artifacts/${encodeURIComponent(artifactId)}/revisions/${encodeURIComponent(revisionId)}`)
+    .finally(() => { revisionReads.delete(key); });
+  revisionReads.set(key, pending);
+  return pending;
+}
+
 export const agentApi = {
   newCommandId,
   readProviderConnections: () => requestJson<ProviderConnectionSettings>("GET", "/api/agent/v1/settings/model-connections"),
@@ -107,8 +119,7 @@ export const agentApi = {
   addFeedback: (conversationId: string, input: FeedbackInput) =>
     requestJson<FeedbackReceipt>("POST", `/api/agent/v1/conversations/${encodeURIComponent(conversationId)}/feedback`, input),
 
-  readRevision: (artifactId: string, revisionId: string) =>
-    requestJson<ArtifactRevision>("GET", `/api/agent/v1/artifacts/${encodeURIComponent(artifactId)}/revisions/${encodeURIComponent(revisionId)}`),
+  readRevision,
 
   readMessage: (id: string) => requestJson<Message>("GET", `/api/agent/v1/messages/${encodeURIComponent(id)}`),
   readArtifactHead: (id: string) => requestJson<ArtifactHead>("GET", `/api/agent/v1/artifacts/${encodeURIComponent(id)}`),
@@ -145,10 +156,39 @@ export function feedbackInput(target: Target, text: string): FeedbackInput {
 // —— SSE —— 业务事件 / 暂态增量 / 缺口重置。断流后重新取快照和游标；
 // 重复投递靠客户端按 id+版本合并吸收。
 
-export type { BusinessEvent, TextDelta, ArtifactDraft, ContextStatus };
+export type { BusinessEvent, TextDelta, ArtifactDraft, ContextStatus, RequestProgress };
 
 export interface EventSubscription {
   close(): void;
+}
+
+// 快照成功后才重建 SSE；失败退避，网络恢复或回到页面时立即再试。
+export function recoverSnapshot(read: () => Promise<boolean>, onExhausted: () => void): () => void {
+  let stopped = false, reading = false, attempts = 0;
+  let timer: number | undefined;
+  const stop = () => {
+    stopped = true;
+    window.clearTimeout(timer);
+    window.removeEventListener("online", resume);
+    document.removeEventListener("visibilitychange", visible);
+  };
+  const retry = async () => {
+    if (stopped || reading) return;
+    reading = true;
+    const success = await read();
+    reading = false;
+    if (stopped) return;
+    if (success) { stop(); return; }
+    attempts++;
+    if (attempts >= 6) { onExhausted(); return; }
+    timer = window.setTimeout(() => void retry(), Math.min(1000 * 2 ** (attempts - 1), 15000));
+  };
+  const resume = () => { if (!stopped) { attempts = 0; window.clearTimeout(timer); void retry(); } };
+  const visible = () => { if (document.visibilityState === "visible") resume(); };
+  window.addEventListener("online", resume);
+  document.addEventListener("visibilitychange", visible);
+  void retry();
+  return stop;
 }
 
 export function subscribeEvents(
@@ -162,6 +202,7 @@ export function subscribeEvents(
     onDraft?: (draft: ArtifactDraft) => void;
     /** 暂态上下文压缩状态；不持久，断流即失。 */
     onContextStatus?: (status: ContextStatus) => void;
+    onProgress?: (progress: RequestProgress) => void;
   },
 ): EventSubscription {
   const url = `/api/agent/v1/conversations/${encodeURIComponent(conversationId)}/events?cursor=${encodeURIComponent(cursor)}`;
@@ -170,10 +211,16 @@ export function subscribeEvents(
   source.addEventListener("text.delta", event => handlers.onDelta(JSON.parse((event as MessageEvent).data as string) as TextDelta));
   if (handlers.onDraft) source.addEventListener("artifact.draft", event => handlers.onDraft!(JSON.parse((event as MessageEvent).data as string) as ArtifactDraft));
   if (handlers.onContextStatus) source.addEventListener("context.status", event => handlers.onContextStatus!(JSON.parse((event as MessageEvent).data as string) as ContextStatus));
-  const reset = () => { source.close(); handlers.onReset(); };
+  if (handlers.onProgress) source.addEventListener("request.progress", event => handlers.onProgress!(JSON.parse((event as MessageEvent).data as string) as RequestProgress));
+  let closed = false;
+  const close = () => { closed = true; window.removeEventListener("offline", reset); source.close(); };
+  const reset = () => { if (!closed) { close(); handlers.onReset(); } };
   source.addEventListener("reset_required", reset);
   source.onerror = reset;
-  return { close: () => source.close() };
+  // 浏览器离线时现有 SSE 不一定立即报错，主动结束它才能及时呈现失联状态。
+  window.addEventListener("offline", reset);
+  if (!navigator.onLine) queueMicrotask(reset);
+  return { close };
 }
 
 export type { ArtifactHead, ArtifactRevision, Bootstrap, Conversation, Message, Proposal, Snapshot, Target, UserProfile, SaveUserProfile, PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings, SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt, Work, MaterialBatch, LibraryVideo };
