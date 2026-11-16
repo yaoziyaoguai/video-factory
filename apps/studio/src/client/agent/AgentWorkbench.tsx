@@ -16,7 +16,7 @@ import type { MessageInput, Run, AcceptProposal, CancelRun, SkillPackageMutation
 import { FilePreview, MediaPreview, ProjectPreview, ProposalCard, RunCard, runEnded } from "./ProductionCards.js";
 export { ProposalCard } from "./ProductionCards.js";
 import { WorkStagePanel, MaterialBatchCard, StandaloneScriptApproval, type AdoptPreview, type ReviewAction, type ReviewEntry, type ReviewNavigation } from "./WorkStagePanel.js";
-import { ArrowLeft, ArrowUp, ChevronRight, Cpu, Film, FolderOpen, Maximize2, MessageSquare, PanelLeft, Pencil, Plus, Sparkles, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, ChevronRight, Cpu, Film, Maximize2, MessageSquare, PanelLeft, Pencil, PlugZap, Plus, Sparkles, UserRound, X } from "lucide-react";
 import { ArtifactIcon, stageOwnedLabel, FrameEmptyPreview, FrameWelcome } from "./FramePresentation.js";
 import { FrameSettings, framePageTitle, type FramePage } from "./FrameSettings.js";
 import { LibraryPickerDialog } from "./WorkLibrary.js";
@@ -977,15 +977,15 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   return <div className={`agent-root${sidebarHidden || focusPreview ? " sidebar-hidden" : ""}${focusPreview ? " review-focused" : ""}`}>
     <nav className="agent-rail" aria-label="主导航">
       <button type="button" className="agent-rail-brand" aria-label="Frame 新对话" title="Frame · 新对话" onClick={() => void createConversation()}>f.</button>
-      <button type="button" aria-label="新建对话" title="新建对话" onClick={() => void createConversation()}><Plus /></button>
+      <button type="button" aria-label="新建对话" title="新建对话" onClick={() => void createConversation()}><Plus /><span className="agent-rail-label">新建</span></button>
       <button type="button" aria-label={page === "chat" ? (sidebarHidden || focusPreview ? "展开会话列表" : "收起会话列表") : "返回当前对话"} title={page === "chat" ? "会话列表" : "返回当前对话"}
         aria-current={page === "chat" ? "page" : undefined} aria-expanded={!sidebarHidden && !focusPreview}
-        onClick={() => { if (page !== "chat" || focusPreview) { setPage("chat"); chatPanel.current?.expand(); setFocusPreview(false); } else setSidebarHidden(value => !value); }}><MessageSquare /></button>
-      <button type="button" aria-label="打开作品库" title="作品库" aria-current={page === "library" ? "page" : undefined} onClick={() => setPage("library")}><Film /></button>
-      <div className="agent-rail-bottom"><button type="button" aria-label="打开模型配置" title="模型配置" aria-current={page === "models" ? "page" : undefined} onClick={() => setPage("models")}><Cpu /></button>
-        <button type="button" aria-label="打开免费服务" title="免费服务" aria-current={page === "services" ? "page" : undefined} onClick={() => setPage("services")}><FolderOpen /></button>
-        <button type="button" aria-label="打开 Skill 管理" title="Skill 管理" aria-current={page === "skills" ? "page" : undefined} onClick={() => setPage("skills")}><Sparkles /></button>
-        <button type="button" aria-label="打开个人设置" title="个人设置" aria-current={page === "profile" ? "page" : undefined} onClick={() => setPage("profile")}><span className="agent-user-avatar">创</span></button></div>
+        onClick={() => { if (page !== "chat" || focusPreview) { setPage("chat"); chatPanel.current?.expand(); setFocusPreview(false); } else setSidebarHidden(value => !value); }}><MessageSquare /><span className="agent-rail-label">对话</span></button>
+      <button type="button" aria-label="打开作品库" title="作品库" aria-current={page === "library" ? "page" : undefined} onClick={() => setPage("library")}><Film /><span className="agent-rail-label">作品库</span></button>
+      <div className="agent-rail-bottom"><button type="button" aria-label="打开模型配置" title="模型配置" aria-current={page === "models" ? "page" : undefined} onClick={() => setPage("models")}><Cpu /><span className="agent-rail-label">模型</span></button>
+        <button type="button" aria-label="打开免费服务" title="免费服务" aria-current={page === "services" ? "page" : undefined} onClick={() => setPage("services")}><PlugZap /><span className="agent-rail-label">免费服务</span></button>
+        <button type="button" aria-label="打开 Skill 管理" title="Skill 管理" aria-current={page === "skills" ? "page" : undefined} onClick={() => setPage("skills")}><Sparkles /><span className="agent-rail-label">Skill</span></button>
+        <button type="button" aria-label="打开个人设置" title="个人设置" aria-current={page === "profile" ? "page" : undefined} onClick={() => setPage("profile")}><UserRound /><span className="agent-rail-label">我的</span></button></div>
     </nav>
     <aside className="agent-side">
       <div className="agent-brand"><span className="agent-brand-mark">f.</span><div><span className="agent-brand-name">帧间 <em>Frame</em></span><span className="agent-brand-caption">YOUR VIDEO AGENT</span></div></div>
@@ -1004,7 +1004,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       })}{conversationCursor ? <button type="button" onClick={() => void loadMoreConversations()}>更多会话</button> : null}</nav>
       <nav className="agent-module-nav" aria-label="设置">
         <button type="button" className={page === "models" ? "active" : ""} onClick={() => setPage("models")}><Cpu />模型配置</button>
-        <button type="button" className={page === "services" ? "active" : ""} onClick={() => setPage("services")}><FolderOpen />免费服务</button>
+        <button type="button" className={page === "services" ? "active" : ""} onClick={() => setPage("services")}><PlugZap />免费服务</button>
         <button type="button" className={page === "skills" ? "active" : ""} onClick={() => setPage("skills")}><Sparkles />Skill 管理</button>
         <button type="button" className={page === "library" ? "active" : ""} onClick={() => setPage("library")}><Film />作品库</button>
         <button type="button" className={`agent-profile-link ${page === "profile" ? "active" : ""}`} onClick={() => setPage("profile")}><span className="agent-user-avatar">创</span><span><strong>{bootstrap?.displayName ?? "创作者"}</strong><small>用户页</small></span><ChevronRight /></button>

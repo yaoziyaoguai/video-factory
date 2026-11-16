@@ -1,6 +1,6 @@
 .agent-root {
   --frame-ink:#222b29; --frame-muted:#58665f; --frame-line:#dfe4e1; --frame-green:#23624c; --frame-soft:#edf3ef;
-  display:grid; grid-template-columns:64px 200px minmax(0,1fr); height:100dvh; min-height:540px; overflow:hidden;
+  display:grid; grid-template-columns:72px 200px minmax(0,1fr); height:100dvh; min-height:540px; overflow:hidden;
   background:#fff; color:var(--frame-ink); font:14px/1.65 "Noto Sans SC Variable",sans-serif;
 }
 .agent-root *, .agent-root *::before, .agent-root *::after { box-sizing:border-box; }
@@ -48,7 +48,7 @@
 .agent-topbar h1 { font-size:15px; font-weight:600; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; max-width:440px; }
 .agent-root .agent-icon-button { padding:5px; color:#7d9484; }
 .agent-runtime-label { margin-left:auto; color:var(--frame-muted); font-size:10px; white-space:nowrap; }
-.agent-root.sidebar-hidden { grid-template-columns:64px minmax(0,1fr); }
+.agent-root.sidebar-hidden { grid-template-columns:72px minmax(0,1fr); }
 .agent-root.sidebar-hidden .agent-side { display:none; }
 .agent-chat-workspace { flex:1; min-height:0; min-width:0; display:flex; flex-direction:column; }
 .agent-main { flex:1; min-height:0; }
@@ -685,12 +685,13 @@
 }
 
 /* 对话是一层，作品是另一层；总览与单件审阅共用同一个确认结构。 */
-.agent-rail { display:flex; flex-direction:column; align-items:center; gap:12px; padding:18px 10px; background:#1e2523; color:#bfcac4; }
-.agent-root .agent-rail button { display:grid; place-items:center; padding:0; width:38px; height:38px; color:inherit; border-radius:9px; }
+.agent-rail { display:flex; flex-direction:column; align-items:center; gap:8px; padding:16px 8px; background:#1e2523; color:#bfcac4; }
+.agent-root .agent-rail button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; flex-shrink:0; padding:4px 0; width:56px; height:54px; color:inherit; border-radius:9px; }
+.agent-rail-label { font-size:11px; font-weight:500; line-height:1.3; white-space:nowrap; }
+.agent-rail button>svg { width:20px; height:20px; stroke-width:1.7; }
 .agent-root .agent-rail button:hover,.agent-root .agent-rail button[aria-current="page"] { background:#34443d; color:#fff; }
-.agent-root .agent-rail .agent-rail-brand { background:#edf4ed; color:#254236; font:italic 30px Georgia,serif; margin-bottom:20px; }
-.agent-rail-bottom { margin-top:auto; display:grid; gap:12px; }
-.agent-rail .agent-user-avatar { width:30px; height:30px; font-size:12px; background:#495f52; color:#f3f7f4; }
+.agent-root .agent-rail .agent-rail-brand { width:40px; height:40px; background:#edf4ed; color:#254236; font:italic 30px Georgia,serif; margin-bottom:12px; }
+.agent-rail-bottom { margin-top:auto; display:grid; gap:8px; }
 .agent-root .agent-rail :focus-visible { outline-color:#9bd7b6; }
 .agent-topbar { height:64px; gap:12px; padding-inline:24px; }
 .agent-topbar h1 { font-size:17px; }
