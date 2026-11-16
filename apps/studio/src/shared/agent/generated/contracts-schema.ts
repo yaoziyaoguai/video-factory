@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.43",
+  "title": "Frame contract payloads 0.1.45",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -1122,6 +1122,11 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "groupId": {
           "$ref": "#/$defs/Id"
+        },
+        "intent": {
+          "type": "string",
+          "const": "continue",
+          "description": "仅明确继续按钮设置；同一组已有排队或执行中的继续请求时返回原请求，不吞并普通的新指令。"
         }
       },
       "required": [
@@ -1376,6 +1381,37 @@ export const contractsSchema: Record<string, unknown> = {
             "properties": {
               "skillId": {
                 "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "reviewContext"
+            ],
+            "properties": {
+              "reviewContext": {
+                "type": "object",
+                "required": [
+                  "intent"
+                ],
+                "properties": {
+                  "intent": {
+                    "const": "continue"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "new"
+              },
+              "librarySelections": {
+                "maxItems": 0,
+                "type": "array"
               }
             }
           }
@@ -4560,6 +4596,10 @@ export const contractsSchema: Record<string, unknown> = {
         "text": {
           "type": "string",
           "maxLength": 16000
+        },
+        "replace": {
+          "type": "boolean",
+          "description": "本回合新的助手答复开始；替换上一段暂态答复，避免把工具前后的文字拼成一份最终正文。"
         }
       },
       "required": [
@@ -10436,6 +10476,91 @@ export const contractsSchema: Record<string, unknown> = {
         "project",
         "relativePath",
         "mimeType"
+      ],
+      "additionalProperties": false
+    },
+    "RequestProgress": {
+      "type": "object",
+      "description": "真实回合步骤的暂态投影，不包含模型思考、工具参数或原始结果；不推进业务事件游标。",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "thinking",
+            "tool_running",
+            "tool_completed",
+            "tool_failed"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "steps": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/RequestProgressStep"
+          }
+        }
+      },
+      "required": [
+        "requestId",
+        "sequence",
+        "phase",
+        "label",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "RequestProgressStep": {
+      "type": "object",
+      "description": "本回合最近真实工具步骤；执行身份只用于关联开始和结束，不包含参数或结果。",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "state": {
+          "enum": [
+            "running",
+            "completed",
+            "failed"
+          ]
+        },
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "state",
+        "updatedAt"
       ],
       "additionalProperties": false
     }

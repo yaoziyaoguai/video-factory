@@ -187,10 +187,11 @@ export class ProductionWorker {
           if (!this.withinBudget(run)) return false;
           this.db.prepare("UPDATE production_attempts SET phase='submit_started',state='unknown' WHERE id=? AND phase='prepared'").run(attempt!.id);
           this.db.prepare("UPDATE production_operations SET state='running' WHERE run_id=? AND id=?").run(run.id, spec.operationId);
-          this.refresh(run.id);
+          this.refresh(run.id, undefined, false, attempt!.id);
           return true;
         })();
         if (!permitted) return;
+        this.hub.notifyCommitted(run.conversation_id);
         this.crash("after-submit-started");
         const observation = await this.call(attempt.id, () => this.port.submit(input, issueSubmitPermit(attempt!.id, lease.epoch), signal));
         this.observe(lease, observation);
@@ -493,7 +494,7 @@ export class ProductionWorker {
     this.db.prepare("UPDATE production_runs SET state='failed',issue_json=? WHERE id=?").run(canonicalJson({ code, message }), runId);
     this.refresh(runId, previous);
   }
-  private refresh(runId: string, prior?: Run, submittedConsumed = false): void {
+  private refresh(runId: string, prior?: Run, submittedConsumed = false, submittingAttemptId?: string): void {
     let run = runRow(this.db, runId);
     const before = prior ?? toRun(this.db, run);
     if (run.state === "cancel_requested" || terminal(run.state)) {
@@ -504,7 +505,9 @@ export class ProductionWorker {
     const ops = operationsFor(this.db, runId), attempts = attemptsFor(this.db, runId);
     let state = run.state, issue = run.issue_json;
     if (!terminal(state)) {
-      const unknown = attempts.some(a => a.state === "unknown");
+      // 提交屏障保留 unknown 防止崩溃后重复执行；本次调用明确仍在等待时，界面显示制作中。
+      // 重启恢复与真实 unknown 观测不带此 ID，继续按结果待核实处理。
+      const unknown = attempts.some(a => a.state === "unknown" && a.id !== submittingAttemptId);
       // 取消收敛只等“还能产生新事实”的尝试：本地渲染进程要等停止信号与退出收据；
       // 无任务身份的 unknown（本端口体系查询不到更多证据，如 OpenAI 单次会话）不再永久阻塞。
       const renderOps = new Set(ops.filter(o => (JSON.parse(o.spec_json) as OperationSpec).kind === "render").map(o => o.id));

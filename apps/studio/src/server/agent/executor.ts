@@ -6,14 +6,14 @@ import type { EventHub } from "./event-log.js";
 import type { PiModelSelection, PiRuntimeHost, ConversationSession } from "./pi-runtime.js";
 import type { ActiveRequestContext, CrashPointHook } from "./pi-tools.js";
 import type {
-  ContextStatus, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewConfirmation, ReviewContext,
+  ContextStatus, RequestProgress, RequestProgressStep, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewConfirmation, ReviewContext,
 } from "../../shared/agent/generated/contracts.js";
 import {
   claimNextRequest, emptyReferences, finalizeRequestMessages, getConversation, insertMessage,
   markRequestTerminal, nextSeq, touchConversation, saveAssistantMessage, type RequestRow,
 } from "./conversation-store.js";
 import { listArtifactRows, getProposalRow, rowToProposal } from "./artifact-store.js";
-import { listWorkRows, relatedWorkFeedback, workProjection } from "./creative-work.js";
+import { getWorkRow, listWorkRows, relatedWorkFeedback, workProjection } from "./creative-work.js";
 import type { CreativeSkill, CreativeToolContext } from "./creative-runner.js";
 import { captureStockConfigs } from "./free-service-settings.js";
 import { listMaterialBatches } from "./material-store.js";
@@ -58,6 +58,16 @@ const TOOL_NAMES = [
   "search_materials", "read_material_batch", "read_trends", "import_material", "dub_free",
   "start_work", "read_work", "confirm_review", "record_work_feedback", "read_skill_file",
 ] as const;
+
+const TOOL_PROGRESS_LABELS: Record<string, string> = {
+  search_materials: "搜索素材", read_material_batch: "核对素材", import_material: "导入素材",
+  read_trends: "读取选题参考", read_artifact: "查看作品内容", deliver_artifacts: "交付新版本",
+  publish_project: "保存制作工程", render_project: "提交视频渲染", prepare_production: "准备制作提案",
+  read_run: "检查制作进展", list_production: "检查制作记录", read_proposal: "核对制作提案",
+  dub_free: "生成配音", start_work: "准备作品", read_work: "核对作品版本",
+  confirm_review: "记录认可", record_work_feedback: "记录修改意见", read_skill_file: "读取创作方法",
+  read: "读取创作文件", write: "编写创作文件", edit: "修改创作文件", bash: "执行创作步骤",
+};
 
 export class ConversationRunner {
   current: CurrentTurn | null = null;
@@ -163,15 +173,35 @@ export class ConversationRunner {
       }
     }
     if (!current.abortReason) this.draftStream?.accept(event);
+    if (event.type === "message_start" && event.message.role === "assistant") this.replaceDelta = true;
+    if (!current.abortReason && (event.type === "tool_execution_start" || event.type === "tool_execution_end")) {
+      const label = TOOL_PROGRESS_LABELS[event.toolName] ?? "处理创作步骤";
+      const prior = this.progressSteps.find(step => step.id === event.toolCallId);
+      const candidate: unknown = event.type === "tool_execution_start"
+        ? event.args?.workId ?? (["read", "write", "edit", "bash"].includes(event.toolName) ? this.currentCreativeContext()?.workId : undefined)
+        : prior?.workId ?? (event.toolName === "start_work" && !event.isError ? event.result?.details?.workId : undefined);
+      const work = typeof candidate === "string" && this.holder.current
+        ? getWorkRow(this.options.db, this.holder.current.actorId, candidate) : undefined;
+      const workId = work?.conversation_id === this.conversationId ? work.id : undefined;
+      const step: RequestProgressStep = { id: event.toolCallId, label,
+        state: event.type === "tool_execution_start" ? "running" : event.isError ? "failed" : "completed",
+        updatedAt: this.options.clock(), ...(workId ? { workId } : {}) };
+      // 只保留最近八步；不从工具参数、输出或思考内容推测未发生的步骤。
+      this.progressSteps = [...this.progressSteps.filter(item => item.id !== step.id), step].slice(-8);
+      this.reportProgress(event.type === "tool_execution_start" ? "tool_running" : event.isError ? "tool_failed" : "tool_completed", label, workId);
+    }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && !current.abortReason) {
       this.options.hub.emitDelta(this.conversationId, {
         requestId, messageId: `msg-${requestId.slice(4)}`,
         sequence: this.deltaSequences.get(requestId) ?? 0, text: event.assistantMessageEvent.delta,
+        ...(this.replaceDelta ? { replace: true } : {}),
       });
+      this.replaceDelta = false;
       this.deltaSequences.set(requestId, (this.deltaSequences.get(requestId) ?? 0) + 1);
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
-      this.assistantEnd = { text: event.message.content.filter(block => block.type === "text").map(block => block.text).join(""),
+      const text = event.message.content.filter(block => block.type === "text").map(block => block.text).join("");
+      this.assistantEnd = { text: text.trim() ? text : this.assistantEnd?.text ?? "",
         stopReason: event.message.stopReason, ...(event.message.errorMessage !== undefined ? { errorMessage: event.message.errorMessage } : {}) };
     }
     if ((event.type === "compaction_start" || event.type === "compaction_end") && event.reason !== "manual") {
@@ -193,6 +223,15 @@ export class ConversationRunner {
 
   private draftStream: ArtifactDraftStream | null = null;
   private contextSequence = 0;
+  private progressSequence = 0;
+  private progressSteps: RequestProgressStep[] = [];
+  private replaceDelta = true;
+  private reportProgress(phase: RequestProgress["phase"], label: string, workId?: string): void {
+    if (this.current) this.options.hub.emitProgress(this.conversationId, {
+      requestId: this.current.requestId, sequence: this.progressSequence++, phase, label, updatedAt: this.options.clock(),
+      steps: this.progressSteps, ...(workId ? { workId } : {}),
+    });
+  }
   private compactionFailed = false;
   private assistantEnd: { text: string; stopReason: string; errorMessage?: string } | null = null;
   private readonly deltaSequences = new Map<string, number>();
@@ -359,6 +398,8 @@ export class ConversationRunner {
     const conversation = getConversation(this.options.db, request.owner_id, this.conversationId)!;
     this.current = { requestId: request.id, epoch, abortReason: null };
     this.assistantEnd = null; this.contextSequence = 0; this.compactionFailed = false;
+    this.progressSequence = 0; this.progressSteps = []; this.replaceDelta = true;
+    this.reportProgress("thinking", "准备回复与创作步骤");
     this.draftStream = new ArtifactDraftStream(request.id, draft => this.options.hub.emitDraft(this.conversationId, draft));
     this.holder.current = {
       actorId: request.owner_id,
@@ -451,6 +492,7 @@ export class ConversationRunner {
           }
         } catch (error) {
           // prompt 抛出时上面的赋值未到达，这里按当前回合状态直接判定。
+          assistantText = (this.assistantEnd as { text: string } | null)?.text ?? "";
           const aborted = this.current?.requestId === request.id && this.current.abortReason !== null;
           if (!aborted) {
             outcome = "failed";
@@ -481,6 +523,7 @@ export class ConversationRunner {
       this.draftStream?.close(); this.draftStream = null;
       this.deltaSequences.delete(request.id);
       this.toolCallCounts.delete(request.id);
+      this.options.hub.clearProgress(this.conversationId, request.id);
 
       // 崩溃窗口：回合事实已产生、finalize 事务尚未执行。
       this.options.crashPoint?.("before-finalize");

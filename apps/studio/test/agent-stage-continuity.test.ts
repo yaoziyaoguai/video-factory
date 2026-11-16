@@ -208,6 +208,64 @@ async function holdRequest(f: Fixture, text: string) {
       executionEpoch: row.execution_epoch, target: null, toolCallId: "call-r1", actionSourceMessageId: sent.receipt.messageId } };
 }
 
+it("PC 继续防重：排队与执行中复用同组请求，其他作品和明确修改仍独立受理", async () => {
+  const f = await setup(); let release = () => {};
+  try {
+    const scope = { ownerId: "local-owner", conversationId: f.conversation.id };
+    const a = seedEmptyContentItem(f.app.database, new Date().toISOString(), scope, "作品 A");
+    const b = seedEmptyContentItem(f.app.database, new Date().toISOString(), scope, "作品 B");
+    const held = await holdRequest(f, "先处理前一轮"); release = held.release;
+    const context = { workId: a.workId, groupId: a.groupId, intent: "continue" };
+    const first = await postMessage(f, { ...chatInput("继续"), reviewContext: context });
+    assert.equal(first.statusCode, 202); assert.equal(first.json().state, "queued");
+    const duplicate = await postMessage(f, { ...chatInput("继续"), reviewContext: context });
+    assert.equal(duplicate.json().requestId, first.json().requestId); assert.equal(duplicate.json().replayed, true);
+    const other = await postMessage(f, { ...chatInput("继续 B"), reviewContext: { workId: b.workId, groupId: b.groupId, intent: "continue" } });
+    assert.equal(other.statusCode, 202); assert.notEqual(other.json().requestId, first.json().requestId);
+    const edit = await postMessage(f, { ...chatInput("把开头缩短"), reviewContext: { workId: a.workId, groupId: a.groupId } });
+    assert.equal(edit.statusCode, 202); assert.notEqual(edit.json().requestId, first.json().requestId);
+    let entered!: () => void, finish!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    f.app.faux!.setResponses([async () => { entered(); await gate; return fauxAssistantMessage("A 完成。"); }, fauxAssistantMessage("B 完成。"), fauxAssistantMessage("修改完成。")]);
+    release(); release = finish; await ready;
+    const running = await postMessage(f, { ...chatInput("继续"), reviewContext: context });
+    assert.equal(running.json().requestId, first.json().requestId); assert.equal(running.json().state, "running");
+    release(); await waitRequestDone(f, edit.json().requestId);
+    f.app.faux!.setResponses([fauxAssistantMessage("新的下一步。")]);
+    const next = await postMessage(f, { ...chatInput("继续"), reviewContext: context });
+    assert.notEqual(next.json().requestId, first.json().requestId);
+    await waitRequestDone(f, next.json().requestId);
+  } finally { release(); await f.close(); }
+});
+
+it("PC 认可并继续：新 commandId 不重复认可或排队，变更来源不被吞掉", async () => {
+  const f = await setup(); let release = () => {};
+  try {
+    await turn(f, [startWorkStep("山路视频"), fauxAssistantMessage("已开始。")]);
+    const work = works(f)[0]!;
+    await turn(f, [deliverStep([scriptItem("山路内容", "第一版。")], [newGroupDelivery(work.id)]), fauxAssistantMessage("已交付。")]);
+    const content = contentItemOf(f, work.id), source = revisionDraftOf(content.item);
+    const held = await holdRequest(f, "前一轮还在处理"); release = held.release;
+    const confirmation = { workId: work.id, groupId: content.group.id, items: [{ itemId: content.item.id, source }], action: "approve_and_continue" };
+    const first = await postMessage(f, { ...chatInput("认可并继续"), reviewConfirmation: confirmation });
+    const repeated = await postMessage(f, { ...chatInput("认可并继续"), reviewConfirmation: confirmation });
+    assert.equal(first.statusCode, 202); assert.equal(repeated.json().requestId, first.json().requestId);
+    assert.equal(repeated.json().replayed, true);
+    assert.equal(countIn(f, "FROM work_review_confirmations WHERE work_id=?", work.id), 1);
+    assert.deepEqual(f.app.service.readMessage("local-owner", first.json().messageId).reviewContext,
+      { workId: work.id, groupId: content.group.id, intent: "continue" });
+    const changed = await postMessage(f, { ...chatInput("认可新稿并继续"), reviewConfirmation: { ...confirmation, items: [{ itemId: content.item.id, source: { ...source, revisionId: "different-revision" } }] } });
+    assert.equal(changed.statusCode, 409); assert.equal(changed.json().code, "RUN_BUSY");
+    const onlyApprove = await postMessage(f, { ...chatInput("只认可"), reviewConfirmation: { ...confirmation, action: "approve" } });
+    assert.equal(onlyApprove.statusCode, 202); assert.equal(onlyApprove.json().state, "completed");
+    const plainContinue = await postMessage(f, { ...chatInput("继续"), reviewContext: { workId: work.id, groupId: content.group.id, intent: "continue" } });
+    assert.equal(plainContinue.json().requestId, first.json().requestId);
+    f.app.faux!.setResponses([fauxAssistantMessage("继续完成。")]); release();
+    await waitRequestDone(f, first.json().requestId);
+  } finally { release(); await f.close(); }
+});
+
 // —— R1.1（F03/F04）：认可作用于事项准确当前稿；回放只回原回执；无认可依据不得受理正式整片 ——
 
 it("R1.1 旧稿确认被拒、当前稿认可可回放；纯认可不排模型，无认可依据的正式整片不能受理", async () => {

@@ -13,11 +13,11 @@ import { AgentError } from "./errors.js";
 import { type EventHub, insertEvent, maxEventSeq, readEventsAfter, toBusinessEventPayload } from "./event-log.js";
 import { decodeEventCursor, decodeListCursor, encodeEventCursor, encodeListCursor } from "./paging.js";
 import { validatorFor } from "./validate.js";
-import { newAgentId, type AgentClock } from "./util.js";
+import { canonicalJson, newAgentId, type AgentClock } from "./util.js";
 import {
   activeRequestId, checkCommandReceipt, emptyReferences, getConversation, getMessageRow, getRequestRow,
   insertConversation, insertMessage, insertQueuedRequest, listConversations, listMessageRows, listMessageRowsThrough,
-  markStopRequested, maxConversationSeq, maxMessageSeq, nextQueueSeq, nextSeq, pendingRequestCount,
+  markStopRequested, maxConversationSeq, maxMessageSeq, nextQueueSeq, nextSeq, pendingRequestCount, pendingReviewRequest,
   renameConversationRow, requestReceipt, requireConversation, rowToConversation, rowToMessage,
   stopQueuedRequest, storeCommandReceipt, touchConversation, type RequestRow,
 } from "./conversation-store.js";
@@ -573,6 +573,18 @@ export class AgentService {
     const queues = confirmation.action === "approve_and_continue";
     if (queues) this.options.skillPackages?.resources();
     const receipt = this.options.db.transaction(() => {
+      if (queues && !("kind" in confirmation)) {
+        const pending = pendingReviewRequest(this.options.db, ownerId, conversationId, confirmation.workId, confirmation.groupId);
+        if (pending) {
+          const original = getMessageRow(this.options.db, ownerId, pending.message_id)!;
+          if (canonicalJson(JSON.parse(original.review_confirmation_json ?? "null")) !== canonicalJson(confirmation)) {
+            throw new AgentError("RUN_BUSY", "这一组已经在继续处理。新稿可以先单独认可，等待当前请求完成后再继续。", { retryAction: "wait" });
+          }
+          const result = requestReceipt(pending, true);
+          storeCommandReceipt(this.options.db, this.options.clock(), { ownerId, operation: "sendMessage", targetId: conversationId, commandId: input.commandId }, input, result);
+          return result;
+        }
+      }
       // 文本模型只在排 Pi 请求时需要；纯认可即使没有可用文本模型也能完成。
       const binding = queues ? this.options.defaultTextBinding() : null;
       if (queues && !binding) throw new AgentError("CAPABILITY_UNAVAILABLE", "尚未配置可用的文本模型，暂不能继续后续工作；认可未写入。");
@@ -627,6 +639,14 @@ export class AgentService {
     // G4-2：作品库选材的入口验证在事务外完成（对冻结工程修订与 blob 行的读取，publishProject 同模式）。
     const libraryPlan = input.librarySelections?.length ? this.planLibrarySelections(ownerId, input.librarySelections) : null;
     const receipt = this.options.db.transaction(() => {
+      if (input.reviewContext?.intent === "continue") {
+        const pending = pendingReviewRequest(this.options.db, ownerId, conversationId, input.reviewContext.workId, input.reviewContext.groupId);
+        if (pending) {
+          const result = requestReceipt(pending, true);
+          storeCommandReceipt(this.options.db, this.options.clock(), { ownerId, operation: "sendMessage", targetId: conversationId, commandId: input.commandId }, input, result);
+          return result;
+        }
+      }
       // 接收事务内冻结默认条目的完整绑定：执行配置/Key 的后续编辑不影响已接收请求。
       const binding = this.options.defaultTextBinding();
       if (!binding) throw new AgentError("CAPABILITY_UNAVAILABLE", "尚未配置可用的文本模型，请先配置后发送。");

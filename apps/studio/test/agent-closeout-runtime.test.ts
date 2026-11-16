@@ -10,7 +10,10 @@ import { createAgentRuntime } from "../src/server/agent/assembly.js";
 import { projectDraftItems } from "../src/server/agent/artifact-drafts.js";
 import { validatorFor } from "../src/server/agent/validate.js";
 import type { ModelEntry } from "../src/shared/agent/generated/contracts.js";
-import type { ArtifactDraft, ContextStatus } from "../src/shared/agent/generated/contracts.js";
+import type { ArtifactDraft, ContextStatus, RequestProgress, TextDelta } from "../src/shared/agent/generated/contracts.js";
+import { Type } from "typebox";
+import { CreativeRunner } from "../src/server/agent/creative-runner.js";
+import { createWork, parseCreationState, writeWorkState } from "../src/server/agent/creative-work.js";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t: TestContext, options: Partial<Parameters<typeof assembleOfflineAgent>[0]> = {}) {
@@ -33,6 +36,96 @@ const batch = { items: [
   { mode: "create", kind: "analysis", title: "咖啡", content: { format: "markdown", text: "香气与温度的关系。".repeat(20) } },
 ] };
 const deliver = (id = "tool:provider/unsafe") => fauxAssistantMessage([fauxToolCall("deliver_artifacts", batch, { id })]);
+
+test("PC 真实步骤进展可重连，新的答复替换前文并与最终持久文字一致", async t => {
+  const { app, id } = await fixture(t);
+  const progress: RequestProgress[] = [], deltas: TextDelta[] = [];
+  app.service.hub().subscribeProgress(id, step => progress.push(step));
+  app.service.hub().subscribeDeltas(id, delta => deltas.push(delta));
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  app.faux!.setResponses([
+    fauxAssistantMessage([{ type: "text", text: "我先交付内容。" }, fauxToolCall("deliver_artifacts", batch)]),
+    async () => { entered(); await gate; return fauxAssistantMessage("两份已交付，请审阅。"); },
+  ]);
+  const requestId = await send(app, id, "交付两份"); await ready;
+  const restored: RequestProgress[] = [];
+  const unsubscribe = app.service.hub().subscribeProgress(id, step => restored.push(step));
+  assert.equal(restored.length, 1); assert.equal(restored[0]!.phase, "tool_completed");
+  assert.equal(restored[0]!.steps?.[0]?.state, "completed");
+  assert.equal(restored[0]!.steps?.[0]?.label, "交付新版本"); unsubscribe();
+  release(); await idle(app, id);
+  assert.ok(progress.some(step => step.phase === "tool_running" && step.label === "交付新版本"));
+  assert.ok(progress.every((step, index) => step.requestId === requestId && (!index || step.sequence > progress[index - 1]!.sequence)));
+  assert.equal(deltas.filter(delta => delta.replace).length, 2);
+  const shown = deltas.reduce((text, delta) => (delta.replace ? "" : text) + delta.text, "");
+  assert.equal(shown, "两份已交付，请审阅。");
+  assert.equal(app.service.snapshot("local-owner", id).messages.items.find(message => message.role === "assistant" && message.requestId === requestId)?.text, shown);
+  const after: RequestProgress[] = []; app.service.hub().subscribeProgress(id, step => after.push(step));
+  assert.equal(after.length, 0, "结束后的旧进度不会重放成执行中");
+});
+
+test("进展步骤绑定真实作品，重连最多恢复八步且跨会话目标不泄露归属", async t => {
+  const { app, id } = await fixture(t);
+  const other = app.service.createConversation("local-owner", { commandId: "other", title: "另一对话" }).conversation.id;
+  const progress: RequestProgress[] = [];
+  app.service.hub().subscribeProgress(id, step => progress.push(step));
+  const { createWork } = await import("../src/server/agent/creative-work.js");
+  const foreign = createWork(app.database, new Date().toISOString(), { ownerId: "local-owner", conversationId: other }, "另一对话的作品");
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  app.faux!.setResponses([
+    fauxAssistantMessage([fauxToolCall("start_work", { title: "一杯早晨" })]),
+    ...Array.from({ length: 8 }, () => () => fauxAssistantMessage([fauxToolCall("read_work", { workId: app.service.snapshot("local-owner", id).works[0]!.id })])),
+    fauxAssistantMessage([fauxToolCall("read_work", { workId: foreign.id })]),
+    async () => { entered(); await gate; return fauxAssistantMessage("本轮已结束。"); },
+  ]);
+  await send(app, id, "检查作品"); await ready;
+  const workId = app.service.snapshot("local-owner", id).works[0]!.id;
+  assert.ok(progress.some(frame => frame.label === "准备作品" && frame.phase === "tool_completed" && frame.workId === workId));
+  assert.ok(progress.some(frame => frame.phase === "tool_running" && frame.workId === workId));
+  const restored: RequestProgress[] = [];
+  const unsubscribe = app.service.hub().subscribeProgress(id, frame => restored.push(frame));
+  const last = restored[0]!;
+  assert.equal(restored.length, 1); assert.equal(last.steps?.length, 8);
+  assert.equal(last.phase, "tool_failed"); assert.equal(last.workId, undefined);
+  assert.equal(last.steps!.at(-1)!.state, "failed");
+  assert.equal(last.steps!.at(-1)!.workId, undefined);
+  assert.ok(last.steps!.slice(0, -1).every(step => step.state === "completed" && step.workId === workId));
+  assert.ok(progress.every(frame => (frame.steps?.length ?? 0) <= 8));
+  unsubscribe(); release(); await idle(app, id);
+});
+
+test("Oracle 原生适配器上下文与进展归属一致：明确继续、只读其他作品、显式切换", async t => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "frame-progress-scope-"));
+  const runner = new CreativeRunner({ socketPath: path.join(dataDir, "unused") });
+  const contexts: (string | null)[] = [];
+  // 只替换创作适配器执行端，不冒充 Docker 或真实文件写入；请求解析和 Pi 事件保持真实。
+  t.mock.method(runner, "tools", (current: Parameters<CreativeRunner["tools"]>[0]) => [{ name: "write", label: "Write", description: "上下文归属测试", parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+    execute: async () => { contexts.push(current()!.workId); return { content: [{ type: "text", text: "adapter fixture" }], details: undefined }; } }]);
+  const app = await createAgentRuntime({ dataDir, skillsRoot: defaultSkillsRoot, creative: { runner }, host: { faux: { provider: FAUX_PROVIDER, modelIds: [FAUX_TEXT_MODEL] } }, defaultModelId: FAUX_TEXT_MODEL,
+    models: [{ binding: { providerId: FAUX_PROVIDER, modelId: FAUX_TEXT_MODEL, connectionId: "fixture", configurationRevisionId: "1" }, name: "Faux", kind: "text", features: [], availability: "configured", verificationNote: "离线", isDefault: true }] });
+  t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const id = app.service.createConversation("local-owner", { commandId: "start", title: "明确归属" }).conversation.id;
+  const now = new Date().toISOString();
+  const a = createWork(app.database, now, { ownerId: "local-owner", conversationId: id }, "作品 A");
+  const b = createWork(app.database, now, { ownerId: "local-owner", conversationId: id }, "作品 B");
+  const state = parseCreationState(a); state.groups.push({ id: "group-a", title: "创作", revision: 1, nextIntent: null, items: [] }); writeWorkState(app.database, now, a, state);
+  const progress: RequestProgress[] = []; app.service.hub().subscribeProgress(id, frame => progress.push(frame));
+  const write = (id: string) => fauxAssistantMessage([fauxToolCall("write", { path: "sample.txt", content: "fixture" }, { id })]);
+  app.host.faux!.setResponses([write("write-a"), fauxAssistantMessage([fauxToolCall("read_work", { workId: b.id })]), write("write-a-again"),
+    fauxAssistantMessage([fauxToolCall("read_work", { workId: b.id, activate: true })]), write("write-b"), fauxAssistantMessage("已完成上下文核对。")]);
+  await app.service.sendMessage("local-owner", id, { commandId: "continue-a", text: "继续 A", target: null, skillId: null, proposalRef: null, mode: "new", steerRequestId: null,
+    reviewContext: { workId: a.id, groupId: "group-a", intent: "continue" } });
+  for (let index = 0; index < 300 && app.service.snapshot("local-owner", id).activeRequestId; index++) await sleep(10);
+  assert.equal(app.service.snapshot("local-owner", id).activeRequestId, null);
+  assert.deepEqual(contexts, [a.id, a.id, b.id]);
+  assert.deepEqual(progress.filter(frame => frame.phase === "tool_running" && frame.steps?.at(-1)?.id.startsWith("write-")).map(frame => frame.workId), contexts);
+});
 
 test("C1/C2/C3 请求状态只注入本次 provider 投影，工具续轮读取最新事实且不写进历史", async t => {
   const { app, id, dataDir } = await fixture(t);

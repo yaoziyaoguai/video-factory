@@ -10629,5 +10629,96 @@
         "scope": "重做视频A整片"
       }
     }
+  },
+  {
+    "name": "explicit group continue can reuse a pending request",
+    "schema": "MessageInput",
+    "valid": true,
+    "value": {
+      "commandId": "continue-button-1",
+      "text": "继续这一组",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "new",
+      "steerRequestId": null,
+      "reviewContext": {
+        "workId": "work-1",
+        "groupId": "group-1",
+        "intent": "continue"
+      }
+    }
+  },
+  {
+    "name": "continue intent cannot steer another request",
+    "schema": "MessageInput",
+    "valid": false,
+    "value": {
+      "commandId": "continue-button-1",
+      "text": "继续这一组",
+      "target": null,
+      "skillId": null,
+      "proposalRef": null,
+      "mode": "steer",
+      "steerRequestId": "request-1",
+      "reviewContext": {
+        "workId": "work-1",
+        "groupId": "group-1",
+        "intent": "continue"
+      }
+    }
+  },
+  {
+    "name": "transient actual tool progress",
+    "schema": "RequestProgress",
+    "valid": true,
+    "value": {
+      "requestId": "request-1",
+      "sequence": 1,
+      "phase": "tool_running",
+      "label": "搜索素材",
+      "updatedAt": "2026-11-16T10:00:00Z"
+    }
+  },
+  {
+    "name": "assistant response replaces prior streaming answer",
+    "schema": "TextDelta",
+    "valid": true,
+    "value": {
+      "requestId": "request-1",
+      "sequence": 2,
+      "text": "接下来",
+      "replace": true,
+      "messageId": "message-1"
+    }
+  },
+  {
+    "name": "progress reconnect carries real scoped recent steps",
+    "schema": "RequestProgress",
+    "valid": true,
+    "value": {
+      "requestId": "req_progress",
+      "sequence": 3,
+      "phase": "tool_running",
+      "label": "搜索素材",
+      "updatedAt": "2026-11-16T14:00:00.000Z",
+      "workId": "work_coffee",
+      "steps": [
+        {
+          "id": "tool_1",
+          "label": "交付新版本",
+          "state": "completed",
+          "workId": "work_space",
+          "updatedAt": "2026-11-16T13:59:00.000Z"
+        },
+        {
+          "id": "tool_2",
+          "label": "搜索素材",
+          "state": "running",
+          "workId": "work_coffee",
+          "updatedAt": "2026-11-16T14:00:00.000Z"
+        }
+      ]
+    }
   }
 ]

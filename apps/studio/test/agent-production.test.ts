@@ -703,6 +703,8 @@ it("B：旧租约 worker 迟到仅存观测，新持有者核对同一尝试，�
   try {
     const r = f.accept(await f.proposal()).run;
     const pending = old.pollOnce(); await entered;
+    assert.equal(f.app.service.getRun("local-owner", r.id).state, "running", "活跃 submit 显示制作中，不误报待核实");
+    assert.equal(attemptsFor(f.app.database, r.id)[0]!.state, "unknown", "持久尝试仍保留崩溃后的防重保护");
     for (let i = 0; i < 13; i++) f.advance();
     await current.pollOnce();
     assert.equal(f.app.service.getRun("local-owner", r.id).state, "succeeded");
