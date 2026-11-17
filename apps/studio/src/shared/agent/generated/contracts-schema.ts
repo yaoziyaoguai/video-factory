@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.45",
+  "title": "Frame contract payloads 0.1.47",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -1518,6 +1518,17 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
+        },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestExecution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "该条原始用户请求的执行记录；旧消息未采集时为空或省略。"
         }
       },
       "required": [
@@ -10561,6 +10572,99 @@ export const contractsSchema: Record<string, unknown> = {
         "label",
         "state",
         "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewApprovalHistoryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "confirmationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "$ref": "#/$defs/ContentSource"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "approve",
+            "approve_and_continue",
+            "finalize_video"
+          ]
+        },
+        "approvedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "revisionNumber": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "准确产物修订的版本号；消息原文为 null。历史列表不需要预读修订正文。"
+        }
+      },
+      "required": [
+        "confirmationId",
+        "source",
+        "action",
+        "approvedAt",
+        "revisionNumber"
+      ]
+    },
+    "ReviewApprovalHistoryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/ReviewApprovalHistoryItem"
+          }
+        },
+        "nextCursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "RequestExecution": {
+      "type": "object",
+      "description": "保存在原始用户请求消息上的有界执行记录。只含真实阶段与最近八项工具动作；没有原始命令、参数、输出或模型思考。完成、失败、停止后保留。",
+      "properties": {
+        "startedAt": {
+          "$ref": "#/$defs/Time"
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "progress": {
+          "$ref": "#/$defs/RequestProgress"
+        }
+      },
+      "required": [
+        "startedAt",
+        "endedAt",
+        "progress"
       ],
       "additionalProperties": false
     }

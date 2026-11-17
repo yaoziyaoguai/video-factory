@@ -10720,5 +10720,27 @@
         }
       ]
     }
+  },
+  {
+    "name": "review approval history preserves exact earlier source",
+    "schema": "ReviewApprovalHistoryPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "confirmationId": "confirmed_v2",
+          "source": {
+            "kind": "message_text",
+            "messageId": "m1",
+            "text": "已认可的原文",
+            "author": "user"
+          },
+          "action": "approve",
+          "approvedAt": "2026-11-17T00:00:00Z",
+          "revisionNumber": null
+        }
+      ],
+      "nextCursor": null
+    }
   }
 ]

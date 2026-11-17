@@ -1,6 +1,5 @@
 FROM node:22.23.1-bookworm-slim
-RUN node -e "const fs=require('node:fs'),p='/etc/apt/sources.list.d/debian.sources';fs.writeFileSync(p,fs.readFileSync(p,'utf8').replaceAll('deb.debian.org','mirrors.aliyun.com'))" \
-    && apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pil ffmpeg chromium fonts-noto-cjk ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/creative-operations.py /opt/frame/creative-operations.py

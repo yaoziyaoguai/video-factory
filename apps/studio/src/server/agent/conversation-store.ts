@@ -2,7 +2,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent, type EventHub } from "./event-log.js";
 import { canonicalJson, digestOf, newAgentId } from "./util.js";
-import type { Conversation, Message, MessageReferences, RequestReceipt, ReviewConfirmation, Target } from "../../shared/agent/generated/contracts.js";
+import type { Conversation, Message, MessageReferences, RequestProgress, RequestReceipt, ReviewConfirmation, Target } from "../../shared/agent/generated/contracts.js";
 
 // 会话、请求队列与消息的持久操作。全部为短事务内可调用的同步函数；
 // 策略（确认短句、目标绑定、限额）在 AgentService，不在这里。
@@ -58,6 +58,7 @@ export interface MessageRow {
   library_selections_json: string | null;
   review_context_json: string | null;
   review_confirmation_json: string | null;
+  execution_json: string | null;
   created_seq: number;
   created_at: string;
   updated_at: string;
@@ -81,6 +82,7 @@ export function rowToMessage(row: MessageRow): Message {
     createdSequence: row.created_seq,
     references: { ...emptyReferences(), ...JSON.parse(row.references_json) as MessageReferences },
     kind: row.kind,
+    execution: row.execution_json ? JSON.parse(row.execution_json) as Exclude<Message["execution"], undefined> : null,
     feedback: row.feedback_json ? (JSON.parse(row.feedback_json) as Message["feedback"]) : null,
     librarySelections: row.library_selections_json ? (JSON.parse(row.library_selections_json) as Message["librarySelections"]) : [],
     reviewContext: row.review_context_json ? (JSON.parse(row.review_context_json) as Exclude<Message["reviewContext"], undefined>)
@@ -272,6 +274,19 @@ export function markRequestTerminal(
   state: "completed" | "stopped" | "failed",
 ): void {
   db.prepare("UPDATE requests SET state = ?, updated_at = ? WHERE id = ?").run(state, now, request.id);
+  db.prepare("UPDATE messages SET execution_json = json_set(execution_json, '$.endedAt', ?) WHERE id = ? AND execution_json IS NOT NULL")
+    .run(now, request.message_id);
+}
+
+// 活动流不推进业务游标；同一份受控摘要随原始用户消息持久化，终态由正常消息事件发布。
+// SQL 同时核对执行代次，失去请求所有权的迟到工具回调不能覆盖新记录。
+export function recordRequestProgress(db: AgentDatabase, requestId: string, epoch: number, progress: RequestProgress): void {
+  db.prepare(`UPDATE messages SET execution_json = json_object(
+      'startedAt', COALESCE(json_extract(execution_json, '$.startedAt'), ?),
+      'endedAt', NULL, 'progress', json(?))
+    WHERE id = (SELECT message_id FROM requests WHERE id = ? AND state = 'running' AND execution_epoch = ?)
+      AND role = 'user'`)
+    .run(progress.updatedAt, canonicalJson(progress), requestId, epoch);
 }
 
 // —— 消息 ——

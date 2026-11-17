@@ -1,4 +1,4 @@
-import type { ArtifactDraft, ArtifactHead, Conversation, FeedbackInput, LibrarySelection, MaterialBatchIndexItem, Message, Proposal, Run, Work } from "../../shared/agent/generated/contracts.js";
+import type { ArtifactDraft, ArtifactHead, ContentSource, Conversation, FeedbackInput, LibrarySelection, MaterialBatchIndexItem, Message, Proposal, RevisionRef, Run, Work } from "../../shared/agent/generated/contracts.js";
 
 // 工作台状态合并规则（纯函数，可独立测试）：
 // - 一律按 id + 实体版本合并，旧版本不覆盖新版本（旧页晚到、重复乱序事件都吸收）；
@@ -255,13 +255,11 @@ export function clearReadingView(conversationId: string): void {
 // 新一版制作输出是新产物，只记修订号会把它配到当前草稿产物上读错。
 // 旧固定阶段格式（stageByWork）不再解释：组的默认视图按当前快照回落。
 
-export interface StageRevisionRef {
-  artifactId: string;
-  revisionId: string;
-}
+export type StageRevisionRef = RevisionRef | Extract<ContentSource, { kind: "message_text" }>;
 
 export interface StageReading {
   groupByWork: Record<string, string>;
+  itemByGroup: Record<string, string>;
   revisionByItem: Record<string, StageRevisionRef | null>;
   batchId: string | null;
 }
@@ -269,7 +267,7 @@ export interface StageReading {
 const STAGE_READING_KEY = "vf:agent-stage-reading:";
 
 export function loadStageReading(conversationId: string): StageReading {
-  const empty: StageReading = { groupByWork: {}, revisionByItem: {}, batchId: null };
+  const empty: StageReading = { groupByWork: {}, itemByGroup: {}, revisionByItem: {}, batchId: null };
   try {
     const raw = window.localStorage.getItem(`${STAGE_READING_KEY}${conversationId}`);
     if (!raw) return empty;
@@ -278,13 +276,18 @@ export function loadStageReading(conversationId: string): StageReading {
     for (const [workId, groupId] of Object.entries(parsed.groupByWork ?? {})) {
       if (typeof groupId === "string") groupByWork[workId] = groupId;
     }
+    const itemByGroup: Record<string, string> = {};
+    for (const [groupKey, itemId] of Object.entries(parsed.itemByGroup ?? {})) {
+      if (typeof itemId === "string") itemByGroup[groupKey] = itemId;
+    }
     const revisionByItem: Record<string, StageRevisionRef | null> = {};
     for (const [itemKey, ref] of Object.entries(parsed.revisionByItem ?? {})) {
-      if (ref === null || (typeof ref === "object" && typeof ref.artifactId === "string" && typeof ref.revisionId === "string")) {
-        revisionByItem[itemKey] = ref as StageRevisionRef | null;
+      if (ref === null || (typeof ref === "object" && "artifactId" in ref && typeof ref.artifactId === "string" && typeof ref.revisionId === "string")
+        || (typeof ref === "object" && "kind" in ref && ref.kind === "message_text" && typeof ref.messageId === "string" && typeof ref.text === "string" && (ref.author === "user" || ref.author === "assistant"))) {
+        revisionByItem[itemKey] = ref;
       }
     }
-    return { groupByWork, revisionByItem, batchId: typeof parsed.batchId === "string" ? parsed.batchId : null };
+    return { groupByWork, itemByGroup, revisionByItem, batchId: typeof parsed.batchId === "string" ? parsed.batchId : null };
   } catch {
     return empty;
   }

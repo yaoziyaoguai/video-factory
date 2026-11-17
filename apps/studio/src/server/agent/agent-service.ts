@@ -6,7 +6,7 @@ import type {
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
   PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch,
   FreeServiceSettings, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
-  CreationBinding,
+  CreationBinding, ReviewApprovalHistoryPage, ReviewApprovalHistoryItem,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
@@ -299,6 +299,27 @@ export class AgentService {
     const row = getWorkRow(this.options.db, ownerId, workId);
     if (!row) throw new AgentError("NOT_FOUND", "没有找到这条视频创作。");
     return workProjection(this.options.db, row);
+  }
+
+  listReviewApprovalHistory(ownerId: string, workId: string, groupId: string, itemId: string, cursor?: string): ReviewApprovalHistoryPage {
+    const row = getWorkRow(this.options.db, ownerId, workId);
+    if (!row || !parseCreationState(row).groups.some(group => group.id === groupId && group.items.some(item => item.id === itemId))) {
+      throw new AgentError("NOT_FOUND", "没有找到这个审阅事项。");
+    }
+    const scope = `${workId}:${groupId}:${itemId}`;
+    const page = cursor === undefined ? null : decodeListCursor(cursor, scope, "review_approvals");
+    const filter = "owner_id = ? AND subject_scope = 'work_item' AND work_id = ? AND group_id = ? AND item_id = ?";
+    const args = [ownerId, workId, groupId, itemId];
+    const watermark = page?.w ?? (this.options.db.prepare(`SELECT COALESCE(MAX(rowid),0) AS seq FROM work_review_confirmations WHERE ${filter}`).get(...args) as { seq: number }).seq;
+    const rows = this.options.db.prepare(`SELECT rowid AS seq, id, subject_json, action, created_at,
+      (SELECT revision_number FROM artifact_revisions WHERE id = json_extract(subject_json, '$.revisionId')
+        AND artifact_id = json_extract(subject_json, '$.artifactId')) AS revision_number FROM work_review_confirmations
+      WHERE ${filter} AND rowid <= ? AND rowid < ? ORDER BY rowid DESC LIMIT 21`).all(...args, watermark, page?.p ?? watermark + 1) as {
+        seq: number; id: string; subject_json: string; action: ReviewApprovalHistoryItem["action"]; created_at: string; revision_number: number | null;
+      }[];
+    const visible = rows.slice(0, 20);
+    return { items: visible.map(entry => ({ confirmationId: entry.id, source: JSON.parse(entry.subject_json) as ContentSource, action: entry.action, approvedAt: entry.created_at, revisionNumber: entry.revision_number })),
+      nextCursor: rows.length > 20 ? encodeListCursor({ v: 1, c: scope, k: "review_approvals", p: visible.at(-1)!.seq, w: watermark }) : null };
   }
 
   listMessages(ownerId: string, conversationId: string, cursor: string | undefined, limit: number | undefined, anchorMessageId?: string): MessagePage {

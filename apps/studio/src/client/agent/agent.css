@@ -33,9 +33,6 @@
 .agent-conversation:hover .agent-conversation-rename,.agent-conversation:focus-within .agent-conversation-rename { opacity:1; }
 .agent-rename-input { width:100%; border:1px solid #8cae9b; background:white; border-radius:4px; padding:5px; }
 .agent-notice-dot,.agent-live-dot { width:6px; height:6px; background:#548e70; border-radius:50%; flex:none; display:inline-block; }
-.agent-module-nav { border-top:1px solid var(--frame-line); padding-top:16px; display:flex; flex-direction:column; gap:3px; }
-.agent-root .agent-module-nav>button { display:flex; align-items:center; gap:12px; text-align:left; padding:10px 12px; min-height:42px; font-size:13px; color:var(--frame-muted); }
-.agent-root .agent-module-nav>button.active { background:#e3ece5; color:#31654f; }
 .agent-root .agent-profile-link { margin-top:8px; gap:10px; padding:9px 6px; }
 .agent-profile-link>span:nth-child(2) { flex:1; min-width:0; }
 .agent-profile-link strong { display:block; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -710,7 +707,6 @@
   .agent-side { padding-block:10px; }
   .agent-root .agent-new-chat { margin-top:12px; }
   .agent-nav-label { margin-block:12px 6px; }
-  .agent-module-nav { padding-top:6px; }
   .agent-composer textarea { height:42px; min-height:42px; }
   .agent-composer { padding-bottom:8px; }
 }
@@ -742,35 +738,12 @@
 .agent-root .agent-center-search button { padding:2px; display:flex; }
 .agent-root .agent-center-back { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13px; color:var(--frame-green); }
 .agent-center-back small { color:var(--frame-muted); }
-.agent-work-index { flex-shrink:0; min-width:0; margin-bottom:18px; }
-.agent-work-index>div { display:flex; gap:10px; overflow-x:auto; padding:2px 1px 8px; scrollbar-width:thin; scrollbar-color:#cad6cc transparent; }
-.agent-root .agent-work-index button { flex:1 0 192px; max-width:300px; min-width:0; display:flex; align-items:center; text-align:left; gap:10px; padding:11px; border:1px solid #dce4dd; border-radius:10px; background:#fff; }
-.agent-root .agent-work-index button:hover { border-color:#7ca68d; background:#f8faf8; }
-.agent-root .agent-work-index button[aria-pressed="true"] { border-color:#649278; background:#f0f6f1; box-shadow:inset 0 0 0 1px #649278; }
-.agent-work-index-icon { flex:none; width:38px; height:42px; border-radius:6px; display:grid; place-items:center; color:#6a8072; background:#edf1ec; overflow:hidden; }
-.agent-work-index-icon img { width:100%; height:100%; object-fit:cover; }
-.agent-work-index button>span:nth-child(2) { flex:1; min-width:0; }
-.agent-work-index strong { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:12px; font-weight:500; }
-.agent-work-index small { display:flex; align-items:center; gap:5px; margin-top:3px; font-size:10px; color:var(--frame-muted); }
-.agent-work-index small i { width:5px; height:5px; border-radius:50%; background:#bb842b; }
-.agent-work-index small svg,.agent-work-index button>svg { width:13px; height:13px; }
-.agent-work-index button>svg { color:#90a297; }
 .agent-center-overview { flex:1; min-height:0; display:flex; flex-direction:column; }
-.agent-review-board { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; flex:1; min-height:0; }
-.agent-review-lane { display:flex; flex-direction:column; min-height:0; min-width:0; border:1px solid #dfe5df; border-radius:12px; overflow:hidden; background:#f8faf8; }
-.agent-review-lane>header { display:flex; align-items:center; gap:8px; padding:13px 16px; border-bottom:1px solid #e4e8e3; background:#fff; flex-shrink:0; }
-.agent-review-lane h3 { font-size:14px; font-weight:600; }
-.agent-review-lane>header>span:last-child { font-size:12px; color:var(--frame-muted); }
 .agent-lane-marker { display:grid; place-items:center; width:15px; height:15px; border:1.5px solid #ac7d2b; border-radius:50%; }
 .approved .agent-lane-marker { background:#477759; border-color:#477759; color:white; }
 .agent-lane-marker svg { width:11px; height:11px; stroke-width:2.5; }
-.agent-lane-scroll { padding:14px; flex:1; min-height:0; overflow:auto; scrollbar-width:thin; scrollbar-color:#ccd7cf transparent; }
 .agent-work-deliveries { margin-bottom:20px; }
 .agent-work-deliveries:last-child { margin-bottom:0; }
-.agent-delivery-work { display:flex; align-items:center; gap:8px; margin:0 0 10px; font-size:12px; }
-.agent-root .agent-delivery-work button { display:flex; align-items:center; gap:7px; min-width:0; padding:0; text-align:left; font-size:12px; font-weight:500; }
-.agent-delivery-work button svg { width:13px; height:13px; color:#718377; }
-.agent-delivery-work>span { margin-left:auto; color:var(--frame-muted); font-size:11px; }
 .agent-delivery-card { background:#fff; border:1px solid #e0e6df; border-radius:10px; margin-bottom:10px; overflow:hidden; }
 .agent-delivery-card:has(button:hover) { border-color:#91ad99; }
 .agent-root .agent-delivery-open { display:block; width:100%; padding:14px; border-radius:0; text-align:left; }
@@ -778,7 +751,6 @@
 .agent-delivery-title { display:flex; align-items:baseline; gap:8px; }
 .agent-delivery-title strong { font-weight:600; font-size:13px; overflow-wrap:anywhere; }
 .agent-delivery-title>span { font-size:11px; color:var(--frame-muted); margin-left:auto; white-space:nowrap; }
-.agent-delivery-group { display:block; font-size:10px; color:var(--frame-muted); margin:3px 0 12px; }
 .agent-delivery-preview { position:relative; width:100%; aspect-ratio:16/9; max-height:220px; overflow:hidden; border-radius:7px; background:#e9eeea; }
 .agent-delivery-preview video,.agent-delivery-preview img { display:block; width:100%; height:100%; object-fit:cover; pointer-events:none; }
 .agent-delivery-play { position:absolute; inset:0; display:grid; place-items:center; color:white; background:#1022180a; }
@@ -826,8 +798,6 @@
   .agent-workspace-scroll[data-mode="work"] { padding-inline:12px; }
   .agent-center-toolbar { flex-wrap:wrap; gap:8px; }
   .agent-center-filters { flex-wrap:wrap; }
-  .agent-review-board { gap:8px; }
-  .agent-lane-scroll { padding:10px; }
 }
 @media (max-height:620px) {
   .agent-topbar { height:52px; }

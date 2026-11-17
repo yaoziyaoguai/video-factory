@@ -1,6 +1,6 @@
 # Frame Agent v1 接口索引
 
-工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.45**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
+工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.47**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
 
 | 文件 | 用途 |
 | --- | --- |
@@ -41,3 +41,5 @@
 `examples.json` 使用外部 JSON 形状覆盖精确单项确认、局部试做、工程三种媒体、本地无财务、源文件/素材复用与拒绝案例。`consumer-example.ts` 同时检验消费方静态类型。离线检查不等于真实 provider、迁移、隔离执行或端到端验收；这些证据由对应实现测试提供。
 
 0.1.45：`RequestProgress` 可选携带经同会话归属核对的 `workId` 和最多八条真实 `steps`。`RequestProgressStep` 只包含步骤 ID、受控标签、running/completed/failed、时间与可选作品归属，不含原始参数或工具输出。重连回放沿用原暂态帧，不制造历史持久事件。
+
+0.1.47：Message.execution 可选携带原始用户请求的持久执行记录（开始/结束时间及最新 RequestProgress，最多八个实际工具步骤）。旧消息没有记录时为空，不回填推测步骤。SSE仍是无游标暂态流；终态消息的正常版本事件携带记录，不追加每步业务事件。

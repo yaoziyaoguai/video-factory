@@ -752,6 +752,9 @@ export const MIGRATIONS: readonly {
       if (matches.length === 1) update.run(matches[0]!.id, output.run_id, output.id);
     }
   } },
+  { version: 25, statements: [
+    "ALTER TABLE messages ADD COLUMN execution_json TEXT",
+  ] },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {

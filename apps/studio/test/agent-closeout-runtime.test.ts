@@ -14,6 +14,8 @@ import type { ArtifactDraft, ContextStatus, RequestProgress, TextDelta } from ".
 import { Type } from "typebox";
 import { CreativeRunner } from "../src/server/agent/creative-runner.js";
 import { createWork, parseCreationState, writeWorkState } from "../src/server/agent/creative-work.js";
+import { openAgentDatabase } from "../src/server/agent/db.js";
+import { getMessageRow, recordRequestProgress, rowToMessage } from "../src/server/agent/conversation-store.js";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t: TestContext, options: Partial<Parameters<typeof assembleOfflineAgent>[0]> = {}) {
@@ -36,6 +38,32 @@ const batch = { items: [
   { mode: "create", kind: "analysis", title: "咖啡", content: { format: "markdown", text: "香气与温度的关系。".repeat(20) } },
 ] };
 const deliver = (id = "tool:provider/unsafe") => fauxAssistantMessage([fauxToolCall("deliver_artifacts", batch, { id })]);
+
+test("首次进展写入失败如实结束请求，下一条请求仍可执行", async t => {
+  const { app, id } = await fixture(t);
+  const prepare = app.database.prepare.bind(app.database);
+  let failOnce = true;
+  t.mock.method(app.database, "prepare", (sql: string) => {
+    if (failOnce && sql.startsWith("UPDATE messages SET execution_json = json_object(")) {
+      failOnce = false;
+      throw new Error("模拟首次进展写入失败");
+    }
+    return prepare(sql);
+  });
+  const failedId = await send(app, id, "先核对作品");
+  await idle(app, id);
+  assert.equal(failOnce, false);
+  const failed = app.service.snapshot("local-owner", id).messages.items.find(message => message.requestId === failedId && message.role === "user")!;
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.execution, null, "未保存的步骤不能补造");
+  const lingering: RequestProgress[] = [];
+  const unsubscribe = app.service.hub().subscribeProgress(id, frame => lingering.push(frame));
+  assert.deepEqual(lingering, []); unsubscribe();
+  app.faux!.setResponses([fauxAssistantMessage("新请求已正常完成。")]);
+  const nextId = await send(app, id, "继续核对");
+  await idle(app, id);
+  assert.equal(app.service.snapshot("local-owner", id).messages.items.find(message => message.requestId === nextId && message.role === "user")?.state, "completed");
+});
 
 test("长会话在继续前由 Pi 整理历史，不等到 272k 窗口耗尽且不重写原记录", async t => {
   const { app, id, dataDir } = await fixture(t, { fauxContextWindow: 272_000 });
@@ -114,7 +142,7 @@ test("大窗口整理后保留工具与业务上下文余量，不在核对续�
 });
 
 test("PC 真实步骤进展可重连，新的答复替换前文并与最终持久文字一致", async t => {
-  const { app, id } = await fixture(t);
+  const { app, id, dataDir } = await fixture(t);
   const progress: RequestProgress[] = [], deltas: TextDelta[] = [];
   app.service.hub().subscribeProgress(id, step => progress.push(step));
   app.service.hub().subscribeDeltas(id, delta => deltas.push(delta));
@@ -133,6 +161,12 @@ test("PC 真实步骤进展可重连，新的答复替换前文并与最终持�
   assert.equal(restored[0]!.label, "等待模型响应", "工具结束后真实续轮等待不能一直显示已完成的工具");
   assert.equal(restored[0]!.steps?.[0]?.state, "completed");
   assert.equal(restored[0]!.steps?.[0]?.label, "交付新版本"); unsubscribe();
+  const running = app.service.snapshot("local-owner", id).messages.items.find(message => message.role === "user" && message.requestId === requestId)!;
+  assert.equal(running.execution?.progress.label, "等待模型响应", "刷新能恢复真实执行阶段");
+  assert.equal(running.execution?.endedAt, null);
+  const beforeLateProgress = running.execution;
+  recordRequestProgress(app.database, requestId, -1, { ...restored[0]!, label: "过期代次" });
+  assert.deepEqual(rowToMessage(getMessageRow(app.database, "local-owner", running.id)!).execution, beforeLateProgress, "运行中也拒绝过期代次写入");
   release(); await idle(app, id);
   assert.ok(progress.some(step => step.phase === "tool_running" && step.label === "交付新版本"));
   assert.ok(progress.every((step, index) => step.requestId === requestId && (!index || step.sequence > progress[index - 1]!.sequence)));
@@ -142,6 +176,19 @@ test("PC 真实步骤进展可重连，新的答复替换前文并与最终持�
   assert.equal(app.service.snapshot("local-owner", id).messages.items.find(message => message.role === "assistant" && message.requestId === requestId)?.text, shown);
   const after: RequestProgress[] = []; app.service.hub().subscribeProgress(id, step => after.push(step));
   assert.equal(after.length, 0, "结束后的旧进度不会重放成执行中");
+  const reopened = openAgentDatabase(dataDir);
+  try {
+    const saved = rowToMessage(getMessageRow(reopened, "local-owner", running.id)!);
+    assert.equal(saved.state, "completed");
+    assert.ok(saved.execution?.endedAt);
+    assert.equal(saved.execution?.progress.steps?.[0]?.label, "交付新版本");
+    assert.equal(saved.execution?.progress.steps?.[0]?.state, "completed");
+    assert.equal(getMessageRow(reopened, "another-owner", running.id), undefined);
+    assert.equal(validatorFor("Message")(saved).ok, true);
+    assert.ok(!JSON.stringify(saved.execution).includes("晨光沿山路"), "执行记录不能保存工具参数或产物正文");
+    recordRequestProgress(reopened, requestId, 999, { ...restored[0]!, label: "迟到回调" });
+    assert.deepEqual(rowToMessage(getMessageRow(reopened, "local-owner", running.id)!).execution, saved.execution);
+  } finally { reopened.close(); }
 });
 
 test("进展步骤绑定真实作品，重连最多恢复八步且跨会话目标不泄露归属", async t => {
@@ -328,6 +375,9 @@ test("S1-13 白名单、不合法工具后换调用、停止后无迟到草稿�
   const after = samples.length; await sleep(300); assert.equal(samples.length, after);
   assert.equal(samples.at(-1)!.state, "cleared");
   assert.equal(app.service.snapshot("local-owner", id).artifacts.items.length, 2);
+  const stopped = app.service.snapshot("local-owner", id).messages.items.find(message => message.requestId === requestId && message.role === "user")!;
+  assert.equal(stopped.state, "stopped");
+  assert.ok(stopped.execution?.endedAt, "停止后仍保留本轮执行记录");
 });
 
 test("S1-05 原生 threshold 自动压缩后最后答复正确，继续闲聊与单目标改稿", async t => {
@@ -429,6 +479,7 @@ test("S1-06 原生 overflow 只恢复一次，新 toolCallId 不重复交付，�
   const requestId = await send(app, id, "模拟连续超窗"); await idle(app, id);
   assert.equal(attempts, 2);
   assert.equal((app.database.prepare("SELECT state FROM requests WHERE id=?").get(requestId) as { state: string }).state, "failed");
+  assert.ok(app.service.snapshot("local-owner", id).messages.items.find(message => message.role === "user" && message.requestId === requestId)?.execution?.endedAt);
   assert.ok(statuses.some(s => s.requestId === requestId && s.phase === "failed" && s.willRetry === false));
 });
 

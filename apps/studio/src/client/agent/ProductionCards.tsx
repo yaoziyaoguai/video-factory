@@ -269,16 +269,18 @@ function MediaSources({ sources }: { sources: MediaContent["sources"] }) {
   </div>;
 }
 
-export function MediaPreview({ content, simulated, onTimeUpdate }: { content: MediaContent; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined }) {
+export function MediaPreview({ content, simulated, onTimeUpdate, initialTime }: { content: MediaContent; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined; initialTime?: number | undefined }) {
   const url = `/api/agent/v1/blobs/${encodeURIComponent(content.blobId)}/content`;
   const [dimensions, setDimensions] = useState<{ blobId: string; width: number; height: number } | null>(null);
   return <div className="agent-preview-media">
     {simulated ? <p>模拟样片，仅验证制作流程</p> : null}
-    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)} />
+    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)}
+      onLoadedMetadata={event => { if (initialTime) event.currentTarget.currentTime = Math.min(initialTime, event.currentTarget.duration); }} />
       : content.mimeType.startsWith("image/") ? <img src={url} alt="图片产出" onLoad={event => {
         const image = event.currentTarget;
         setDimensions({ blobId: content.blobId, width: image.naturalWidth, height: image.naturalHeight });
-      }} /> : <audio key={url} controls preload="metadata" src={url} aria-label={content.sources?.length ? "音乐预览" : "音频预览"} />}
+      }} /> : <audio key={url} controls preload="metadata" src={url} aria-label={content.sources?.length ? "音乐预览" : "音频预览"}
+        onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)} onLoadedMetadata={event => { if (initialTime) event.currentTarget.currentTime = Math.min(initialTime, event.currentTarget.duration); }} />}
     {content.mimeType.startsWith("image/") && dimensions?.blobId === content.blobId && dimensions.width > 0 && dimensions.height > 0
       ? <span className="agent-stage-muted">实际尺寸 {dimensions.width}×{dimensions.height}</span> : null}
     <a href={url} download>下载文件</a>
@@ -324,9 +326,9 @@ export function ProjectPreview({ content }: { content: CreativeProjectContent })
 }
 
 // 修订正文按 format 判别渲染；调用方只提供准确修订，不预读内容。
-export function RevisionBody({ content, simulated, onTimeUpdate }: { content: ArtifactRevision["content"]; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined }) {
+export function RevisionBody({ content, simulated, onTimeUpdate, initialTime }: { content: ArtifactRevision["content"]; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined; initialTime?: number | undefined }) {
   if (content.format === "markdown") return <MarkdownBody content={content} />;
-  if (content.format === "media") return <MediaPreview content={content} simulated={simulated} onTimeUpdate={onTimeUpdate} />;
+  if (content.format === "media") return <MediaPreview content={content} simulated={simulated} onTimeUpdate={onTimeUpdate} initialTime={initialTime} />;
   if (content.format === "file") return <FilePreview content={content} />;
   return <ProjectPreview content={content} />;
 }

@@ -227,6 +227,7 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
     ? { status: 200, body: message } : null });
   renderAt("/agent/progress");
   await screen.findByText("继续制作");
+  await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
   const source = FakeEventSource.instances.find(item => !item.closed)!;
   const snapshotsBefore = calls.filter(call => call.url.endsWith("/snapshot")).length;
   for (let index = 0; index < 6; index++) source.emit("business", { eventId: `change-${index}`, kind: "message.changed", entityId: message.id, entityVersion: index + 2 });
@@ -259,6 +260,17 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
   expect(screen.queryByText("先前说明")).toBeNull();
   source.emit("request.progress", { requestId: message.requestId, sequence: 0, phase: "thinking", label: "旧步骤", updatedAt: new Date().toISOString() });
   expect(screen.queryByText("正在旧步骤")).toBeNull();
+  message.state = "completed"; message.revision = 8; snapshot.activeRequestId = null;
+  message.execution = { startedAt: message.createdAt, endedAt: new Date().toISOString(), progress: {
+    requestId: message.requestId!, sequence: 3, phase: "thinking", label: "生成回复", updatedAt: new Date().toISOString(),
+    steps: [{ id: "read", label: "核对作品版本", state: "completed", updatedAt: new Date().toISOString() }],
+  } };
+  source.emit("business", { eventId: "request-finished", kind: "message.changed", entityId: message.id, entityVersion: 8 });
+  const record = await screen.findByLabelText("查看本轮执行记录：已完成");
+  expect(record.closest(".agent-messages")).not.toBeNull();
+  await userEvent.click(record);
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toHaveTextContent("核对作品版本已完成");
+  await waitFor(() => expect(screen.queryByRole("region", { name: "当前进展" })).toBeNull());
 });
 
 const REVISION_FIXTURE: ArtifactRevision = {
@@ -459,12 +471,12 @@ it("R45-CLOSE-1 旧继续缓存缺少组目标时不发送，保留原命令并�
   localStorage.setItem(storageKey, saved);
   renderAt(`/agent/${conversation.id}`);
   await userEvent.click(await screen.findByRole("button", { name: `审阅${snapshot.works[0]!.title}` }));
-  await screen.findByText("这一组已全部认可；想调整时在对话中提出。");
-  await userEvent.click(screen.getByRole("button", { name: "继续" }));
+  await screen.findByRole("button", { name: "继续下一步" });
+  await userEvent.click(screen.getByRole("button", { name: "继续下一步" }));
   expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(0);
   expect(localStorage.getItem(storageKey)).toBe(saved);
   expect(await screen.findByRole("alert")).toHaveTextContent("这是旧版留下的继续操作");
-  expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "继续下一步" })).toBeEnabled();
 });
 
 // —— 纯逻辑 ——
@@ -603,7 +615,7 @@ describe("AgentWorkbench", () => {
     renderAt("/agent/conv-1");
 
     expect(await screen.findByText("本地离线模型（Faux）")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "模型配置" }));
+    await userEvent.click(screen.getByRole("button", { name: "打开模型配置" }));
     expect(await screen.findByText("添加你的第一个模型连接")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "旅行视频讨论" }));
     expect(screen.getByRole("heading", { name: "旅行视频讨论" })).toBeInTheDocument();
@@ -635,7 +647,7 @@ describe("AgentWorkbench", () => {
     renderAt("/agent");
 
     await userEvent.click(await screen.findByRole("button", { name: "＋ 新的会话" }));
-    await screen.findByText("新的会话", { selector: ".agent-chat-header h1" });
+    await screen.findByText("新的会话", { selector: ".agent-conversation-heading h1" });
     // 创建之后会请求新会话快照，证明前端已切换到 /agent/conv-2
     await waitFor(() => {
       expect(calls.some(call => call.url.includes("/conversations/conv-2/snapshot"))).toBe(true);
@@ -963,7 +975,7 @@ it("审计 F6 回归：无显式绑定的首次干预继承当前目标，未改
   const calls = installWorkbenchRoutes({ conversations: [conv], snapshots: { [conv.id]: snap }, onRequest: (url, call) => call.method === "POST" && url.endsWith("/messages") ? { status: 200, body: { replayed: false } } : null });
   renderAt(`/agent/${conv.id}`); await screen.findByRole("heading", { name: conv.title });
   const text = screen.getByRole("textbox", { name: "消息输入" });
-  await userEvent.type(text, "结尾再安静一点"); await userEvent.click(screen.getByRole("button", { name: "干预本轮" }));
+  await userEvent.type(text, "结尾再安静一点"); await userEvent.click(screen.getByRole("button", { name: "补充当前请求" }));
   await waitFor(() => expect(text).toHaveValue(""));
   expect(calls.find(call => call.method === "POST")?.body).toMatchObject({ mode: "steer", target, steerRequestId: "active-request" });
 });
@@ -1124,7 +1136,7 @@ it("§11.7 来源8/10 输入框“从作品库选择”：勾选并入草稿可�
   expect(loadDraft("conv-lib")?.librarySelections).toHaveLength(1);
   // steer 是对在途请求的补充说明：不携带库选材，也不消耗 chips。
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "这轮先保持原方案");
-  await userEvent.click(screen.getByRole("button", { name: "干预本轮" }));
+  await userEvent.click(screen.getByRole("button", { name: "补充当前请求" }));
   await waitFor(() => expect(calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(1));
   let command = calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as Record<string, unknown>;
   expect(command.mode).toBe("steer");
@@ -1260,11 +1272,11 @@ it("Frame 三个设置入口独立，往返保留预览、目标和草稿，不�
   await userEvent.click(await screen.findByRole("button", { name: "我的 Prompt" }));
   await userEvent.click(await screen.findByRole("button", { name: "提意见" }));
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "结尾再安静一点");
-  await userEvent.click(screen.getByRole("button", { name: "模型配置" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开模型配置" }));
   expect(screen.getAllByRole("tab")).toHaveLength(4);
-  await userEvent.click(screen.getByRole("button", { name: "免费服务" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开免费服务" }));
   expect(screen.getByRole("tab", { name: "视频选题" })).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: /用户页/ }));
+  await userEvent.click(screen.getByRole("button", { name: "打开个人设置" }));
   expect(screen.getByLabelText("显示名称")).toHaveValue("本地用户");
   await userEvent.click(within(screen.getByRole("navigation", { name: "会话列表" })).getByRole("button", { name: "随时接着聊" }));
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("结尾再安静一点");
@@ -1653,7 +1665,7 @@ it("K1.2 steer 只干预当前轮：不带 Skill，也不消费已指定的选�
   const select = await screen.findByRole("combobox", { name: "指定 Skill" });
   await userEvent.selectOptions(select, "travel-prompt-kit");
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "语气再克制一点");
-  await userEvent.click(screen.getByRole("button", { name: "干预本轮" }));
+  await userEvent.click(screen.getByRole("button", { name: "补充当前请求" }));
   await waitFor(() => expect(commands).toHaveLength(1));
   expect(commands[0]!.mode).toBe("steer");
   expect(commands[0]!.skillId).toBeNull();
@@ -1691,7 +1703,7 @@ it("P3c 侧栏与 skills 路由：安装后原对话立即指定，一次性复�
   const rendered = renderAt(`/agent/${conversation.id}`);
   await screen.findByRole("heading", { name: conversation.title });
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "接着聊旅行");
-  await userEvent.click(screen.getByRole("button", { name: "Skill 管理" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开 Skill 管理" }));
   await screen.findByRole("article", { name: "内置创作" });
   expect(screen.queryByRole("button", { name: "卸载 内置创作" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "安装 Skill" }));
@@ -1717,7 +1729,7 @@ it("P3c 侧栏与 skills 路由：安装后原对话立即指定，一次性复�
   expect(calls.find(call => call.url.endsWith("/messages"))?.body).toMatchObject({ skillId: "weekend-prompt", text: "接着聊旅行" });
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "保留下一条想法");
   await userEvent.selectOptions(select, "weekend-script");
-  await userEvent.click(screen.getByRole("button", { name: "Skill 管理" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开 Skill 管理" }));
   await userEvent.click(await screen.findByRole("button", { name: "卸载 周末创作包" }));
   const removeDialog = screen.getByRole("dialog", { name: "卸载 Skill 包" });
   expect(removeDialog).toHaveTextContent("周末 Prompt"); expect(removeDialog).toHaveTextContent("周末脚本");
@@ -1865,7 +1877,7 @@ it("P3c 安装中可关闭与离页，目录忙态保留聊天草稿，后台完
   renderAt(`/agent/${conversation.id}`);
   await screen.findByRole("heading", { name: conversation.title });
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "目录更新后再发送");
-  await userEvent.click(screen.getByRole("button", { name: "Skill 管理" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开 Skill 管理" }));
   await screen.findByRole("article", { name: "内置创作" });
   await userEvent.click(screen.getByRole("button", { name: "安装 Skill" }));
   await userEvent.type(screen.getByLabelText("包来源"), "/srv/skills/travel-kit");
@@ -1904,7 +1916,7 @@ it("P3c 管理与发送 RUN_BUSY/409/wait：如实显示等待，原来源、消
   const select = screen.getByRole("combobox", { name: "指定 Skill" });
   await userEvent.selectOptions(select, "weekend-script");
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "等目录空闲后发送");
-  await userEvent.click(screen.getByRole("button", { name: "Skill 管理" }));
+  await userEvent.click(screen.getByRole("button", { name: "打开 Skill 管理" }));
   await screen.findByRole("article", { name: "周末创作包" });
   await userEvent.click(screen.getByRole("button", { name: "安装 Skill" }));
   await userEvent.type(screen.getByLabelText("包来源"), "npm:keep-draft");
@@ -1920,4 +1932,31 @@ it("P3c 管理与发送 RUN_BUSY/409/wait：如实显示等待，原来源、消
   expect(screen.queryByRole("button", { name: /重试上次发送/ })).toBeNull();
   expect(localStorage.getItem(`vf:agent-send:${conversation.id}`)).toBeNull();
   expect(calls.filter(call => call.url.endsWith("/messages"))).toHaveLength(1);
+});
+
+it("状态同步断开仍可通过停止接口取消，停止失败可重试", async () => {
+  const conversation = conversationFixture("stop-disconnected", "停止仍可用");
+  const request = messageFixture({ id: "stoppable-user", role: "user", text: "继续核对", requestId: "stoppable-request", state: "running" });
+  const snapshot = snapshotFixture(conversation, { messages: [request] }); snapshot.activeRequestId = request.requestId;
+  let attempts = 0;
+  installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshot }, onRequest: (url, call) => {
+    if (call.method === "POST" && url.endsWith("/stop")) {
+      if (++attempts === 1) return { status: 503, body: { code: "UNAVAILABLE", message: "停止暂未成功" } };
+      request.state = "stopped"; request.revision++; snapshot.activeRequestId = null;
+      return { status: 202, body: { requestId: request.requestId, state: "stopped" } };
+    }
+    return null;
+  } });
+  renderAt(`/agent/${conversation.id}`);
+  await screen.findByRole("button", { name: "停止本轮" });
+  const stream = await waitFor(() => { const value = FakeEventSource.instances.find(source => !source.closed); expect(value).toBeDefined(); return value!; });
+  act(() => stream.onerror?.());
+  await screen.findByText("进展暂未同步");
+  expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  await screen.findByText("停止暂未成功");
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  await screen.findByText("本轮已停止，已完成的内容保留。");
+  expect(attempts).toBe(2);
 });

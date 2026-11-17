@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkCenter } from "../src/client/agent/WorkCenter.js";
 import { agentApi, subscribeEvents } from "../src/client/agent/api.js";
-import { TaskProgress } from "../src/client/agent/TaskProgress.js";
+import { ExecutionRecord, TaskProgress } from "../src/client/agent/TaskProgress.js";
 import type { ArtifactRevision, ContentSource, Message, RequestProgress, Work } from "../src/shared/agent/generated/contracts.js";
 
 const time = "2026-11-16T10:00:00Z";
@@ -18,14 +18,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 it("总览同时保留各作品未确认 v3 和已确认 v2，打开时传递准确作品、事项和版本", async () => {
   const props = propsFor([work("earth", "轨道之上"), work("coffee", "一杯早晨"), work("city", "夜色上海")]);
   render(<WorkCenter {...props} />);
-  const pending = within(screen.getByRole("region", { name: "未确认" }));
-  const approved = within(screen.getByRole("region", { name: "已确认" }));
+  const pending = within(screen.getByRole("region", { name: "轨道之上 · 未确认" }));
+  const approved = within(screen.getByRole("region", { name: "轨道之上 · 已确认" }));
   expect(pending.getByText("earth第3版正文")).toBeVisible();
   expect(approved.getByText("earth第2版正文")).toBeVisible();
   expect(pending.queryByText("earth第2版正文")).toBeNull();
-  await userEvent.click(approved.getByRole("button", { name: "查看已确认一杯早晨脚本 v2" }));
+  await userEvent.click(screen.getByRole("button", { name: "查看已确认一杯早晨脚本 v2" }));
   expect(props.onOpenReview).toHaveBeenCalledWith({ workId: "coffee", groupId: "group-coffee", itemId: "item-coffee", artifactId: "coffee", revisionId: "coffee-v2" });
-  await userEvent.click(pending.getByRole("button", { name: "审阅夜色上海脚本 v3" }));
+  await userEvent.click(screen.getByRole("button", { name: "审阅夜色上海脚本 v3" }));
   expect(props.onOpenReview).toHaveBeenLastCalledWith({ workId: "city", groupId: "group-city", itemId: "item-city", artifactId: "city", revisionId: "city-v3" });
 });
 
@@ -49,6 +49,23 @@ it("长对话分批显示作品，搜索覆盖未展示作品，空结果可恢�
   expect(screen.getByRole("textbox", { name: "搜索作品和交付内容" })).toHaveValue("");
 });
 
+it("作品总览优先展示真实成片预览，不让较早的多份脚本挤掉已确认视频", async () => {
+  const film = work("film", "太空短片");
+  const group = film.reviewGroups[0]!;
+  const original = group.items[0]!;
+  group.items = Array.from({ length: 10 }, (_, index) => ({ ...original, id: `script-${index}`, label: `已确认脚本${index}`, draft: source("film", 2) }));
+  group.items.push({ ...original, id: "final-video", label: "视频初稿", role: "video", draft: source("film-video", 3), approved: source("film-video", 2) });
+  const revisions = { ...cacheFor([film]), ...Object.fromEntries([2, 3].map(version => [`film-video:film-video-v${version}`, { ...revision("film-video", version), content: { format: "media", blobId: `film-file-v${version}`, mimeType: "video/mp4", durationMs: 90000 } } satisfies ArtifactRevision])) };
+  const props = propsFor([film]);
+  render(<WorkCenter {...props} revisions={revisions} />);
+  const approved = within(screen.getByRole("region", { name: "太空短片 · 已确认" }));
+  const preview = approved.getByRole("button", { name: "查看已确认视频初稿 v2" });
+  expect(preview.querySelector("video")).toHaveAttribute("src", "/api/agent/v1/blobs/film-file-v2/content#t=0.1");
+  expect(approved.getAllByRole("button")[0]).toBe(preview);
+  await userEvent.click(preview);
+  expect(props.onOpenReview).toHaveBeenCalledWith({ workId: "film", groupId: group.id, itemId: "final-video", artifactId: "film-video", revisionId: "film-video-v2" });
+});
+
 it("总览只为进入可见范围的卡片读取修订，失败可重试且不替换为别的版本", async () => {
   let observe: IntersectionObserverCallback | undefined;
   vi.stubGlobal("IntersectionObserver", class { constructor(callback: IntersectionObserverCallback) { observe = callback; } observe() {} disconnect() {} });
@@ -69,6 +86,47 @@ const message: Message = { id: "message", requestId: "request", role: "user", ki
 const progress: RequestProgress = { requestId: "request", sequence: 3, phase: "tool_running", label: "查找素材", updatedAt: time, workId: "coffee", steps: [{ id: "read", label: "核对作品版本", state: "completed", workId: "coffee", updatedAt: time }, { id: "search", label: "查找素材", state: "running", workId: "coffee", updatedAt: time }] };
 const progressProps = () => ({ activeRequestId: "request", messages: [message], progress, runs: [], works: [work("coffee", "一杯早晨")], onStop: vi.fn(async () => true), onOpenRun: vi.fn(), onOpenWork: vi.fn() });
 
+it.each(["completed", "failed", "stopped"] as const)("%s 的真实执行记录可展开，重新挂载后仍可读且不冒充仍在执行", async state => {
+  const saved: Message = { ...message, state, execution: { startedAt: time, endedAt: "2026-11-16T10:01:01Z", progress } };
+  const ui = render(<ExecutionRecord message={saved} />);
+  const result = state === "completed" ? "已完成" : state === "stopped" ? "已停止" : "未完成";
+  await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${result}`));
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toHaveTextContent("核对作品版本已完成");
+  expect(screen.getByText("结束前未取得完成回执", { selector: "small" })).toBeVisible();
+  expect(screen.queryByText("已停止", { selector: "small" })).toBeNull();
+  expect(screen.getByText("01:01")).toBeVisible();
+  expect(screen.queryByRole("progressbar")).toBeNull();
+  ui.unmount();
+  render(<ExecutionRecord message={saved} />);
+  await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${result}`));
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toBeVisible();
+});
+
+it("历史执行步骤沿保存的作品归属显示，同名操作在刷新后仍能区分", async () => {
+  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time, progress: { ...progress,
+    steps: ["coffee", "earth", "unloaded"].map(id => ({ id, label: "编写创作文件", state: "completed", workId: id, updatedAt: time })),
+  } } };
+  const works = [work("coffee", "一杯早晨"), work("earth", "轨道之上")];
+  const ui = render(<ExecutionRecord message={saved} works={works} />);
+  await userEvent.click(screen.getByLabelText("查看本轮执行记录：已完成"));
+  const steps = within(screen.getByRole("list", { name: "本轮实际执行步骤" })).getAllByRole("listitem");
+  expect(steps[0]).toHaveTextContent("一杯早晨");
+  expect(steps[1]).toHaveTextContent("轨道之上");
+  expect(steps[2]).toHaveTextContent("关联作品未载入");
+  ui.unmount();
+  render(<ExecutionRecord message={saved} works={[...works].reverse()} />);
+  await userEvent.click(screen.getByLabelText("查看本轮执行记录：已完成"));
+  expect(within(screen.getByRole("list", { name: "本轮实际执行步骤" })).getAllByRole("listitem")[0]).toHaveTextContent("一杯早晨");
+});
+
+it("旧消息不编造执行记录，运行中刷新沿已保存的阶段恢复", () => {
+  const ui = render(<ExecutionRecord message={{ ...message, state: "completed" }} />);
+  expect(screen.queryByText("执行记录")).toBeNull();
+  ui.rerender(<TaskProgress {...progressProps()} progress={null} messages={[{ ...message, execution: { startedAt: time, endedAt: null, progress } }]} />);
+  expect(screen.getByRole("status")).toHaveTextContent("查找素材");
+  expect(screen.getByRole("list", { name: "最近执行步骤" })).toHaveTextContent("核对作品版本已完成");
+});
+
 it("执行圈有不确定进度语义、真实作品和步骤，断线与终态不会继续假装执行", async () => {
   const props = progressProps();
   const ui = render(<TaskProgress {...props} />);
@@ -80,7 +138,9 @@ it("执行圈有不确定进度语义、真实作品和步骤，断线与终态�
   ui.rerender(<TaskProgress {...props} disconnected />);
   expect(screen.queryByRole("progressbar")).toBeNull();
   expect(screen.getByRole("status")).toHaveTextContent("进展暂未同步");
-  expect(screen.getByRole("button", { name: "停止本轮" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  expect(props.onStop).toHaveBeenCalledTimes(1);
   ui.rerender(<TaskProgress {...props} activeRequestId={null} messages={[{ ...message, state: "completed" }]} />);
   expect(screen.queryByRole("region", { name: "当前进展" })).toBeNull();
 });
@@ -128,7 +188,7 @@ it("总览进入审阅把焦点交给作品标题，返回搜索后仍保留已�
   await userEvent.click(screen.getByRole("button", { name: "审阅一杯早晨" }));
   expect(screen.getByRole("heading", { name: "一杯早晨详情" })).toHaveFocus();
   await userEvent.type(screen.getByRole("textbox", { name: "审阅草稿" }), "保留草稿");
-  await userEvent.click(screen.getByRole("button", { name: "全部作品 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "全部作品 1 件" }));
   expect(screen.getByRole("textbox", { name: "搜索作品和交付内容" })).toHaveFocus();
   await userEvent.click(screen.getByRole("button", { name: "审阅一杯早晨" }));
   expect(screen.getByRole("textbox", { name: "审阅草稿" })).toHaveValue("保留草稿");
@@ -161,8 +221,7 @@ it("Oracle P2-08 本批没有交付而后面有时解释计数并可直接展开
   const works = Array.from({ length: 9 }, (_, index) => work(`batch-${index}`));
   works.slice(0, 8).forEach(item => { item.reviewGroups = []; });
   render(<WorkCenter {...propsFor(works)} />);
-  const pending = within(screen.getByRole("region", { name: "未确认" }));
-  expect(pending.getByText("这批作品暂无未确认内容，后续作品还有 1 项。")).toBeVisible();
-  await userEvent.click(pending.getByRole("button", { name: "显示后续作品" }));
-  expect(pending.getByText("batch-8第3版正文")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "未确认 1 项" })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: /再显示 1 件作品/ }));
+  expect(screen.getByText("batch-8第3版正文")).toBeVisible();
 });

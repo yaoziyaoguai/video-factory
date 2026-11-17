@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.45",
+    "version": "0.1.47",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [
@@ -2294,6 +2294,76 @@
               "minimum": 1,
               "maximum": 50,
               "default": 50
+            }
+          }
+        ]
+      }
+    },
+    "/works/{workId}/groups/{groupId}/items/{itemId}/approvals": {
+      "get": {
+        "operationId": "listReviewApprovalHistory",
+        "description": "按事项分页读取真实认可和定稿记录，最新在前。只读、按拥有者和作品/组/事项限定；不改变当前认可，不触发继续或制作。每页最多20条，游标固定本次读取水位。",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ReviewApprovalHistoryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "workId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "itemId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
             }
           }
         ]
