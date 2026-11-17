@@ -1472,7 +1472,13 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     // 定稿后出现新的未认可草稿：指引恢复，状态回到新稿待确认。
     harness.snapshot.works[0] = { ...base, revision: 2, reviewGroups: videoGroup(v2, v1, v1) };
     harness.snapshot.runs.items = [run1, run2];
-    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "video-v2", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
+    // 首屏内容可先于 SSE effect 出现；等订阅建立后再模拟新稿事件。
+    const source = await waitFor(() => {
+      const current = FakeEventSource.instances.find(item => !item.closed);
+      expect(current).toBeDefined();
+      return current!;
+    });
+    source.emit("business", { eventId: "video-v2", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
     await screen.findByText(nextIntent);
     expect(screen.getByText("新稿待确认")).toBeInTheDocument();
   });
