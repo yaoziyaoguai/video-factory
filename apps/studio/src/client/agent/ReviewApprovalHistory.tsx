@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ContentSource, ReviewApprovalHistoryPage, ReviewItem } from "../../shared/agent/generated/contracts.js";
 import { agentApi } from "./api.js";
-import { sameSource } from "./review-content.js";
 
 export function ReviewApprovalHistory({ workId, groupId, item, active, onOpen }: {
   workId: string; groupId: string; item: ReviewItem; active: boolean;
@@ -34,7 +33,7 @@ export function ReviewApprovalHistory({ workId, groupId, item, active, onOpen }:
     } catch { if (epoch.current === current) setError(true); }
     finally { if (epoch.current === current) setLoading(false); }
   };
-  const previous = page?.items.filter(entry => !sameSource(entry.source, item.approved)) ?? [];
+  const previous = page?.items.filter(entry => entry.confirmationId !== item.confirmationId) ?? [];
   return <details className="agent-approval-history" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>此前认可记录</summary>
     {open ? <div>{previous.map(entry => <button key={entry.confirmationId} type="button" onClick={() => onOpen(entry.source)}>

@@ -95,7 +95,7 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
       {current ? <span>最近进展 <time>{elapsed(current.updatedAt, now)}</time> 前</span> : null}
       {queued.length ? <span>{queued.length} 条排队</span> : null}
     </div>
-    {activeRequestId ? <button type="button" className="agent-stop" disabled={stopping || disconnected} onClick={async () => {
+    {activeRequestId ? <button type="button" className="agent-stop" disabled={stopping} onClick={async () => {
       setStopping(true);
       if (!await onStop()) setStopping(false);
     }}><Square />{stopping ? "正在停止…" : "停止本轮"}</button> : null}</div>

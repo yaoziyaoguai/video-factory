@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1307,7 +1307,8 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     harness.snapshot.works[0] = workFixture({ id: "work-1", title: "意见跟随", stage: "video", revision: 2, video: { draft: v2 } });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "video-new", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
     // 先等只存在于更新后的锚点：SSE 监听是异步的，直接等输入框值会被更新前的旧 DOM 空洞满足。
-    await screen.findByText("正在看旧版本，不能在这里确认；请回到最新稿。");
+    await screen.findByText("旧版画面不能认可；片段意见会记录到当前稿。");
+    expect(screen.getByText(/正在查看 v.*的片段，意见记录到/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("换一个更亮的结尾镜头"));
     expect(screen.getByRole("button", { name: "记录意见" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
@@ -1342,7 +1343,8 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     harness.snapshot.works[0] = workFixture({ id: "work-1", title: "跨产物意见", stage: "video", revision: 2, video: { draft: v2 } });
     harness.snapshot.runs.items = [run1, run2];
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "video-new-artifact", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
-    await screen.findByText("正在看旧版本，不能在这里确认；请回到最新稿。");
+    await screen.findByText("旧版画面不能认可；片段意见会记录到当前稿。");
+    expect(screen.getByText(/正在查看 v.*的片段，意见记录到/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("结尾换一个更亮的镜头"));
     expect(screen.getByRole("button", { name: "记录意见" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
@@ -2204,7 +2206,7 @@ it("F2 作品库未知音频不从旧方案猜测实际旁白", async () => {
 it("稳定画布：双击认可只记录一次，保留播放器与意见，之后才明确继续", async () => {
   const source: ContentSource = { kind: "artifact_revision", artifactId: "stable-video", revisionId: "stable-v3", digest: "v3" };
   const work = workFixture({ id: "stable-work", title: "稳定审片", stage: "video", video: { draft: source } });
-  const harness = installStageRoutes({ works: [work], onRequest: (url, call) => {
+  const harness = installStageRoutes({ works: [work, workFixture({ id: "other-stable-work", title: "另一件作品" })], onRequest: (url, call) => {
     if (url.endsWith("/revisions/stable-v3")) return { status: 200, body: { ...videoRevisionFixture("stable-video", "stable-v3", "unused-run", "stable-file"), runId: null } };
     if (call.method === "POST" && url.endsWith("/messages") && (call.body as MessageInput).reviewConfirmation) {
       harness.snapshot.works[0] = { ...work, revision: 2, reviewGroups: work.reviewGroups.map(group => ({ ...group, items: group.items.map(item => ({ ...item, approved: item.draft, confirmationId: "stable-approved" })) })) };
@@ -2230,6 +2232,13 @@ it("稳定画布：双击认可只记录一次，保留播放器与意见，之�
   expect(commands[1]!.reviewConfirmation).toBeNull();
   expect(commands[1]!.reviewContext).toEqual({ workId: work.id, groupId: "group-video", intent: "continue" });
   expect(commands[1]!.text).not.toContain("这句留着");
+  fireEvent.timeUpdate(video);
+  await switchWork("另一件作品");
+  await switchWork("稳定审片");
+  const returned = await canvas().findByLabelText("视频预览") as HTMLVideoElement;
+  Object.defineProperty(returned, "duration", { value: 3, configurable: true });
+  fireEvent.loadedMetadata(returned);
+  expect(returned.currentTime).toBe(1.25);
 });
 
 it("此前认可的聊天原文按准确来源打开，刷新仍保留旧版且不会认可当前新稿", async () => {
@@ -2252,4 +2261,45 @@ it("此前认可的聊天原文按准确来源打开，刷新仍保留旧版且�
   await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
   expect(await findCanvasText(current.text)).toBeVisible();
   expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+it("同版本的较早认可保留；历史上一版始终沿所读产物读取", async () => {
+  const current: ContentSource = { kind: "artifact_revision", artifactId: "new-video", revisionId: "new-video-rev-2", digest: "new-v2" };
+  const prior: ContentSource = { kind: "artifact_revision", artifactId: "old-video", revisionId: "old-video-rev-2", digest: "old-v2" };
+  const work = workFixture({ id: "history-video", title: "跨产物历史", stage: "video", video: { draft: current, approved: current, finalizedSource: current, confirmationId: "finalized-current" } });
+  const harness = installStageRoutes({ works: [work], onRequest: (url, call) => call.method === "GET" && url.endsWith("/approvals") ? { status: 200, body: { items: [
+    { confirmationId: "finalized-current", source: current, revisionNumber: 2, action: "finalize_video", approvedAt: "2026-11-17T00:00:00.000Z" },
+    { confirmationId: "approved-current", source: current, revisionNumber: 2, action: "approve", approvedAt: "2026-11-16T00:00:00.000Z" },
+    { confirmationId: "approved-prior", source: prior, revisionNumber: 2, action: "approve", approvedAt: "2026-11-15T00:00:00.000Z" },
+  ], nextCursor: null } } : null });
+  renderAt("/agent/conv-w");
+  await findCanvasText("new-video 正文 new-video-rev-2");
+  await userEvent.click(screen.getByText("此前认可记录"));
+  const entries = await screen.findAllByRole("button", { name: /此前认可 v2/ });
+  expect(entries).toHaveLength(2);
+  await userEvent.click(entries[1]!);
+  await findCanvasText("old-video 正文 old-video-rev-2");
+  await userEvent.click(screen.getByRole("button", { name: "看上一版" }));
+  await findCanvasText("old-video 正文 old-video-rev-1");
+  expect(harness.calls.some(call => call.url.endsWith("/artifacts/new-video/revisions/old-video-rev-1"))).toBe(false);
+});
+
+it("双击认可不会跨到另一个待审事项，须单独点击审阅下一项", async () => {
+  const source: ContentSource = { kind: "message_text", messageId: "first-item", text: "先查看这一项", author: "assistant" };
+  const work = workFixture({ id: "two-items", title: "两个事项", content: { draft: source } });
+  const item = work.reviewGroups[0]!.items[0]!;
+  work.reviewGroups[0]!.items.push({ ...item, id: "second-item", label: "第二项", draft: { ...source, messageId: "second-source", text: "需要单独查看的另一项" } });
+  const harness = installStageRoutes({ works: [work], onRequest: (url, call) => {
+    if (call.method === "POST" && url.endsWith("/messages")) harness.snapshot.works[0] = { ...work, revision: 2, reviewGroups: [{ ...work.reviewGroups[0]!, items: [{ ...item, approved: source }, work.reviewGroups[0]!.items[1]!] }] };
+    return null;
+  } });
+  renderAt("/agent/conv-w");
+  await findCanvasText(source.text);
+  await userEvent.dblClick(screen.getByRole("button", { name: "认可「内容草稿」" }));
+  const next = await screen.findByRole("button", { name: "审阅下一项" });
+  await waitFor(() => expect(next).toBeEnabled());
+  expect(canvas().getByText(source.text)).toBeVisible();
+  expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(1);
+  await userEvent.click(next);
+  expect(await findCanvasText("需要单独查看的另一项")).toBeVisible();
 });

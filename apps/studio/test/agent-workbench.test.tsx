@@ -1921,3 +1921,30 @@ it("P3c 管理与发送 RUN_BUSY/409/wait：如实显示等待，原来源、消
   expect(localStorage.getItem(`vf:agent-send:${conversation.id}`)).toBeNull();
   expect(calls.filter(call => call.url.endsWith("/messages"))).toHaveLength(1);
 });
+
+it("状态同步断开仍可通过停止接口取消，停止失败可重试", async () => {
+  const conversation = conversationFixture("stop-disconnected", "停止仍可用");
+  const request = messageFixture({ id: "stoppable-user", role: "user", text: "继续核对", requestId: "stoppable-request", state: "running" });
+  const snapshot = snapshotFixture(conversation, { messages: [request] }); snapshot.activeRequestId = request.requestId;
+  let attempts = 0;
+  installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshot }, onRequest: (url, call) => {
+    if (call.method === "POST" && url.endsWith("/stop")) {
+      if (++attempts === 1) return { status: 503, body: { code: "UNAVAILABLE", message: "停止暂未成功" } };
+      request.state = "stopped"; request.revision++; snapshot.activeRequestId = null;
+      return { status: 202, body: { requestId: request.requestId, state: "stopped" } };
+    }
+    return null;
+  } });
+  renderAt(`/agent/${conversation.id}`);
+  await screen.findByRole("button", { name: "停止本轮" });
+  const stream = await waitFor(() => { const value = FakeEventSource.instances.find(source => !source.closed); expect(value).toBeDefined(); return value!; });
+  act(() => stream.onerror?.());
+  await screen.findByText("进展暂未同步");
+  expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  await screen.findByText("停止暂未成功");
+  await waitFor(() => expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  await screen.findByText("本轮已停止，已完成的内容保留。");
+  expect(attempts).toBe(2);
+});
