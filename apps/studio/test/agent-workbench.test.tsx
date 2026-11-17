@@ -233,6 +233,24 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
   await waitFor(() => expect(calls.filter(call => call.url.endsWith("/snapshot")).length).toBe(snapshotsBefore + 1));
   source.emit("request.progress", { requestId: message.requestId, sequence: 1, phase: "tool_running", label: "搜索素材", updatedAt: new Date().toISOString() });
   expect(await screen.findByText("正在搜索素材")).toBeInTheDocument();
+  const activity = screen.getByRole("region", { name: "当前进展" });
+  expect(activity.closest(".agent-messages")).toBeNull();
+  source.emit("request.progress", { requestId: message.requestId, sequence: 2, phase: "thinking", label: "等待模型响应", updatedAt: new Date().toISOString(),
+    steps: [{ id: "read", label: "核对作品版本", state: "completed", updatedAt: new Date().toISOString() }] });
+  expect(screen.getByText("正在等待模型响应")).toBeInTheDocument();
+  const disclosure = activity.querySelector("details")!;
+  expect(disclosure.open).toBe(false);
+  await userEvent.click(disclosure.querySelector("summary")!);
+  expect(disclosure.open).toBe(true);
+  expect(within(activity).getByRole("list", { name: "最近执行步骤" })).toHaveTextContent("核对作品版本已完成");
+  // JSDOM 不实现 summary 的原生键盘默认动作；Enter/Space 在实际浏览器验证。
+  await userEvent.click(disclosure.querySelector("summary")!);
+  expect(disclosure.open).toBe(false);
+  source.emit("context.status", { requestId: message.requestId, sequence: 0, phase: "compacting", reason: "threshold", willRetry: null });
+  expect(within(activity).getByText("正在整理会话历史")).toBeInTheDocument();
+  expect(within(activity).getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  source.emit("context.status", { requestId: message.requestId, sequence: 1, phase: "compacted", reason: "threshold", willRetry: false });
+  expect(within(activity).getByText("正在等待模型响应")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "排队发送" })).toHaveAttribute("title", "等待当前请求完成后处理");
   source.emit("text.delta", { requestId: message.requestId, messageId: "answer", sequence: 1, text: "先前说明", replace: true });
   await within(await screen.findByTestId("streaming-message")).findByText("先前说明");

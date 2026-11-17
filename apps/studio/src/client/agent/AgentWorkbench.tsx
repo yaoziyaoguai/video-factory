@@ -955,7 +955,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const openReview = (target: ReviewNavigation) => { backToWork(); setSelectedWorkId(target.workId); setReviewNavigation(target); };
   const cacheRevision = (revision: ArtifactRevision) => setRevisionCache(current => current[`${revision.artifactId}:${revision.revisionId}`] ? current : ({ ...current, [`${revision.artifactId}:${revision.revisionId}`]: revision }));
   const progressCard = (compact = false) => <TaskProgress activeRequestId={view.activeRequestId} messages={view.requestMessages} progress={requestProgress} runs={activeRuns}
-    works={view.works} disconnected={streamDisconnected} compact={compact} onStop={stopActive} onOpenRun={runId => void openRun(runId)} onOpenWork={selectWork}
+    contextStatus={contextNote} works={view.works} disconnected={streamDisconnected} compact={compact} onStop={stopActive} onOpenRun={runId => void openRun(runId)} onOpenWork={selectWork}
     onOpenChat={() => { chatPanel.current?.expand(); setFocusPreview(false); if (view.windowAnchor) navigate(`/agent/${conversationId}`); }} />;
   const title = view.conversation.title || "新的对话";
   const discussArtifact = () => {
@@ -1023,7 +1023,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       {actionError || bootError ? <div className="agent-action-error" role="alert">{actionError || bootError}<button type="button" onClick={() => setActionError("")}>知道了</button></div> : null}
       {focusPreview ? progressCard(true) : null}
       <Group className="agent-main" orientation="horizontal" id="vf-agent-panels" onLayoutChanged={layout => { if (layout["agent-chat"]) savePanelLayout(layout); }} defaultLayout={panelLayout ?? undefined}>
-        <Panel id="agent-chat" defaultSize="36%" minSize="340px" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
+        <Panel id="agent-chat" defaultSize="36%" minSize="25%" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
           <section className="agent-chat" inert={focusPreview}>
             <div className="agent-chat-title"><MessageSquare />与 Frame 协作</div>
             <div className="agent-messages" ref={chatScroll} onScroll={onChatScroll}>
@@ -1046,9 +1046,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                   </div>)}
                 </div>
               </div>)}
-              {!focusPreview ? progressCard() : null}
               {streaming ? <div className="agent-message assistant streaming" data-testid="streaming-message"><span className="agent-assistant-avatar">f·</span><div className="agent-message-content"><span className="agent-author">Frame</span><MarkdownText text={streaming.text || "正在想…"} /></div></div> : null}
             </div>
+            {!focusPreview ? progressCard() : null}
             {unseenMessages && !view.windowAnchor ? <button className="agent-new-messages" type="button" onClick={() => { pinnedBottom.current = true; setUnseenMessages(false); if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight; }}>回到最新消息 ↓</button> : null}
             <footer className="agent-composer">
               {skillNotice ? <p className="agent-config-note" role="status">{skillNotice}</p> : null}
@@ -1074,7 +1074,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
           </section>
         </Panel>
         <Separator className="agent-resizer" aria-label="调整对话与预览的宽度" title="拖动或用左右方向键调整宽度" />
-        <Panel id="agent-preview" minSize="620px">
+        <Panel id="agent-preview" minSize="50%">
           <section className="agent-preview">
             <div className="agent-workspace-status"><Film /><strong>{focusPreview ? "聚焦审片" : "作品中心"}</strong>{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}<button type="button" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"} title={focusPreview ? "返回聊天与作品" : "展开作品区"} onClick={() => { if (focusPreview) chatPanel.current?.expand(); else chatPanel.current?.collapse(); setFocusPreview(!focusPreview); }}>{focusPreview ? <ArrowLeft /> : <Maximize2 />}{focusPreview ? "返回创作" : "聚焦审片"}</button></div>
             {!workMode && view.artifacts.length ? <div className="agent-artifact-tabs" data-work-mode={workMode || undefined} aria-label="当前会话产物">{view.artifacts.map(artifact => <button type="button" key={artifact.id} aria-label={artifact.title} title={artifact.title} aria-pressed={!inspectedRun && selection?.artifactId === artifact.id} onClick={() => openArtifact(artifact.id)}><span className="agent-artifact-icon"><ArtifactIcon kind={artifact.kind} /></span><span><strong>{artifact.title}</strong><small>{stageOwnedLabel(view.works, artifact)}就绪</small></span>{notices.byConversation.get(conversationId ?? "")?.includes(artifact.id) ? <span className="agent-output-badge">有更新</span> : null}</button>)}{view.artifactCursor ? <button type="button" onClick={() => void loadMoreOutputs("artifacts")}>更多产物</button> : null}</div> : null}

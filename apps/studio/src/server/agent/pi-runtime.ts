@@ -58,6 +58,9 @@ export const AGENT_SYSTEM_PROMPT = `你是帧间 Frame 的创作助手。产品�
 - 修改已有内容要精确按用户指名的对象与当前版本：没有预绑定 target 时用 read_artifact 核对真实修订，再用 deliver_artifacts 的 mode=revise 项交付修改；
   目标是哪一条不清楚时只问一次，不擅自改任一方。
 - 阅读技能参考文件用 read_skill_file；阅读具体产物修订用 read_artifact；冻结工程或已有素材的纯本地拼接、配音轨混音用 render_project，直接交给现有后台制作，不创建零元费用确认卡。
+  已有成片只改音轨时优先复制视频流，不重做画面。创作自检先用语法检查、元数据和 2～5 秒低分辨率样本验证关键路径；
+  不为常规修改默认生成与正式作品等长的测试片、重复全长渲染或立即轮询刚提交的任务。确有全长验证必要时说明依据，正式制作交给后台执行。
+  互不依赖的只读核对可在同轮完成，避免每读一个对象就额外等待一轮模型。
   包含付费图片、视频或配音的整批制作才用 prepare_production（只准备提案，不是开始制作，不把整批拆开绕过授权）。查制作事实用 read_proposal / read_run / list_production：
   回答制作状态、失败原因或费用之前必须先读对应对象，不用猜测。
   已受理的 run 表示该次制作已经获得授权；finance.pending_reconciliation 只是实际账单尚未取得，不能说用户未确认费用。失败原因以 issue 为准，缺失就如实说明。
@@ -291,15 +294,17 @@ export class PiRuntimeHost {
   }
 
   private compactionSettings(capacity: number) {
-    // 小窗口不能照搬大窗口默认预留，避免每次请求都压缩且没有可保留内容。
-    const reserveTokens = Math.min(16_384, Math.floor(capacity / 4));
-    const keepRecentTokens = Math.min(20_000, Math.floor(capacity / 4));
+    // 大窗口仍在 64k 整理历史，避免每次继续重放十几万 token；小窗口保留原比例。
+    // 由 Pi 原生摘要追加记录，作品事实仍从数据库注入，不删历史或降低模型档位。
+    const reserveTokens = Math.max(Math.min(16_384, Math.floor(capacity / 4)), capacity - 64_000);
+    const keepRecentTokens = Math.min(12_000, Math.floor(capacity / 4));
     return { enabled: true as const, reserveTokens, keepRecentTokens, ...this.options.compaction };
   }
 
   private settingsManager(capacity: number): SettingsManager {
     return SettingsManager.inMemory({
-      retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0, timeoutMs: 45_000 } },
+      // 线上长会话首响应曾触发 45s SDK 截止；允许整理/首响应完成，仍可随时停止且不盲目重发。
+      retry: { enabled: false, maxRetries: 0, provider: { maxRetries: 0, timeoutMs: 120_000 } },
       // 保留 SDK 原生压缩与恢复；测试只调整窗口和预留量，不替换调度。
       compaction: this.compactionSettings(capacity),
       cacheWarming: "off",

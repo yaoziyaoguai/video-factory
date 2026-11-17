@@ -173,7 +173,17 @@ export class ConversationRunner {
       }
     }
     if (!current.abortReason) this.draftStream?.accept(event);
+    if (event.type === "turn_start") {
+      this.modelProgressLabel = null;
+      this.reportModelProgress("等待模型响应");
+    }
     if (event.type === "message_start" && event.message.role === "assistant") this.replaceDelta = true;
+    if (event.type === "message_update" && !current.abortReason) {
+      const delta = event.assistantMessageEvent;
+      if (delta.type === "thinking_start") this.reportModelProgress("分析下一步");
+      if (delta.type === "text_start") this.reportModelProgress("生成回复");
+      if (delta.type === "toolcall_start") this.reportModelProgress("准备工具操作");
+    }
     if (!current.abortReason && (event.type === "tool_execution_start" || event.type === "tool_execution_end")) {
       const label = TOOL_PROGRESS_LABELS[event.toolName] ?? "处理创作步骤";
       const prior = this.progressSteps.find(step => step.id === event.toolCallId);
@@ -226,6 +236,12 @@ export class ConversationRunner {
   private progressSequence = 0;
   private progressSteps: RequestProgressStep[] = [];
   private replaceDelta = true;
+  private modelProgressLabel: string | null = null;
+  private reportModelProgress(label: string): void {
+    if (this.current?.abortReason || this.modelProgressLabel === label) return;
+    this.modelProgressLabel = label;
+    this.reportProgress("thinking", label, this.currentCreativeContext()?.workId ?? undefined);
+  }
   private reportProgress(phase: RequestProgress["phase"], label: string, workId?: string): void {
     if (this.current) this.options.hub.emitProgress(this.conversationId, {
       requestId: this.current.requestId, sequence: this.progressSequence++, phase, label, updatedAt: this.options.clock(),
@@ -399,7 +415,7 @@ export class ConversationRunner {
     this.current = { requestId: request.id, epoch, abortReason: null };
     this.assistantEnd = null; this.contextSequence = 0; this.compactionFailed = false;
     this.progressSequence = 0; this.progressSteps = []; this.replaceDelta = true;
-    this.reportProgress("thinking", "准备回复与创作步骤");
+    this.reportProgress("thinking", "准备请求");
     this.draftStream = new ArtifactDraftStream(request.id, draft => this.options.hub.emitDraft(this.conversationId, draft));
     this.holder.current = {
       actorId: request.owner_id,
