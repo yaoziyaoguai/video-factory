@@ -68,7 +68,8 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
           <h4><button type="button" aria-label={`审阅${work.title}`} onClick={() => onSelectWork(work.id)}>{work.title}<ChevronRight /></button></h4>
           <div className="agent-work-row-content">
             {(["pending", "approved"] as const).map(kind => {
-              const items = work.reviewGroups.flatMap(group => group.items.filter(item => kind === "pending" ? isPending(item) : item.approved !== null).map(item => ({ group, item })));
+              const items = work.reviewGroups.flatMap(group => group.items.filter(item => kind === "pending" ? isPending(item) : item.approved !== null).map(item => ({ group, item })))
+                .sort((a, b) => Number(b.item.role === "video") - Number(a.item.role === "video"));
               return <section key={kind} className={`agent-work-deliveries ${kind}`} aria-label={`${work.title} · ${kind === "pending" ? "未确认" : "已确认"}`}>
                 <div className="agent-delivery-grid">{items.slice(0, 3).map(({ group, item }) => <ReviewContentSummary key={`${group.id}:${item.id}`} active={active} item={item} group={group} source={(kind === "pending" ? item.draft : item.approved)!} approved={kind === "approved"} compact={kind === "approved"} revisions={revisions} onRevisionLoaded={onRevisionLoaded} onOpen={source => openItem(work, group, item, source)} />)}</div>
                 {!items.length ? <p className="agent-lane-empty">{kind === "pending" ? "暂无待确认内容" : "认可后的内容会留在这里"}</p> : null}

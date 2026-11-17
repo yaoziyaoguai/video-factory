@@ -205,7 +205,8 @@ export function WorkStagePanel({
   const itemKey = selectedItem ? `${groupKey}:${selectedItem.id}` : "";
   const groupBusy = reviewBusyKeys.includes(groupKey);
   const continuing = reviewRequests[groupKey];
-  const allItems = work.reviewGroups.flatMap(group => group.items.map(item => ({ group, item })));
+  const allItems = work.reviewGroups.flatMap(group => group.items.map(item => ({ group, item })))
+    .sort((a, b) => Number(b.item.role === "video") - Number(a.item.role === "video"));
   const pending = allItems.filter(({ item }) => item.draft && !approvedCurrent(item));
   const confirmed = allItems.filter(({ item }) => item.approved);
   const waiting = allItems.filter(({ item }) => !item.draft && !item.approved);

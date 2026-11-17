@@ -49,6 +49,23 @@ it("长对话分批显示作品，搜索覆盖未展示作品，空结果可恢�
   expect(screen.getByRole("textbox", { name: "搜索作品和交付内容" })).toHaveValue("");
 });
 
+it("作品总览优先展示真实成片预览，不让较早的多份脚本挤掉已确认视频", async () => {
+  const film = work("film", "太空短片");
+  const group = film.reviewGroups[0]!;
+  const original = group.items[0]!;
+  group.items = Array.from({ length: 10 }, (_, index) => ({ ...original, id: `script-${index}`, label: `已确认脚本${index}`, draft: source("film", 2) }));
+  group.items.push({ ...original, id: "final-video", label: "视频初稿", role: "video", draft: source("film-video", 3), approved: source("film-video", 2) });
+  const revisions = { ...cacheFor([film]), ...Object.fromEntries([2, 3].map(version => [`film-video:film-video-v${version}`, { ...revision("film-video", version), content: { format: "media", blobId: `film-file-v${version}`, mimeType: "video/mp4", durationMs: 90000 } } satisfies ArtifactRevision])) };
+  const props = propsFor([film]);
+  render(<WorkCenter {...props} revisions={revisions} />);
+  const approved = within(screen.getByRole("region", { name: "太空短片 · 已确认" }));
+  const preview = approved.getByRole("button", { name: "查看已确认视频初稿 v2" });
+  expect(preview.querySelector("video")).toHaveAttribute("src", "/api/agent/v1/blobs/film-file-v2/content#t=0.1");
+  expect(approved.getAllByRole("button")[0]).toBe(preview);
+  await userEvent.click(preview);
+  expect(props.onOpenReview).toHaveBeenCalledWith({ workId: "film", groupId: group.id, itemId: "final-video", artifactId: "film-video", revisionId: "film-video-v2" });
+});
+
 it("总览只为进入可见范围的卡片读取修订，失败可重试且不替换为别的版本", async () => {
   let observe: IntersectionObserverCallback | undefined;
   vi.stubGlobal("IntersectionObserver", class { constructor(callback: IntersectionObserverCallback) { observe = callback; } observe() {} disconnect() {} });
