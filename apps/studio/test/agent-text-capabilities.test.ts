@@ -200,7 +200,7 @@ test("DGR-01 真实 SDK 异步 hook 投影新旧图片：空业务上下文、�
       assert.equal(JSON.stringify(session.sessionManager.getEntries()), original, "Session 条目与压缩摘要不变");
       assert.equal(hash(await readFile(sessionFile)), originalJsonl, "原 JSONL 摘要不变");
       assert.deepEqual(await Promise.all(files.map(async file => hash(await readFile(file)))), originalBlobs, "原 blob 字节不变");
-      assert.equal(session.settingsManager.getProviderRetrySettings().timeoutMs, 45_000);
+      assert.equal(session.settingsManager.getProviderRetrySettings().timeoutMs, 120_000);
       assert.equal(session.settingsManager.getProviderRetrySettings().maxRetries, 0);
       if (businessContext !== null) {
         const injected = projected.at(-1)!;

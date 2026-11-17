@@ -37,6 +37,41 @@ const batch = { items: [
 ] };
 const deliver = (id = "tool:provider/unsafe") => fauxAssistantMessage([fauxToolCall("deliver_artifacts", batch, { id })]);
 
+test("长会话在继续前由 Pi 整理历史，不等到 272k 窗口耗尽且不重写原记录", async t => {
+  const { app, id, dataDir } = await fixture(t, { fauxContextWindow: 272_000 });
+  const selection = await app.host.modelForBinding(app.service.bootstrap("local-owner").models[0]!.binding);
+  const seed = await app.host.openConversationSession(id, "s1", undefined, [], selection);
+  for (let index = 0; index < 12; index++) {
+    seed.session.sessionManager.appendMessage({ role: "user", content: `旧讨论 ${index} ` + "历史内容 ".repeat(2000), timestamp: Date.now() });
+    const answer = fauxAssistantMessage(`旧答复 ${index}`);
+    answer.provider = selection.model.provider; answer.model = selection.model.id;
+    answer.usage = { ...answer.usage, input: 140_000, totalTokens: 140_000 };
+    seed.session.sessionManager.appendMessage(answer);
+  }
+  seed.session.dispose();
+  const directory = path.join(dataDir, "pi-sessions", id, "s1");
+  const file = path.join(directory, (await readdir(directory)).find(name => name.endsWith(".jsonl"))!);
+  const before = await readFile(file, "utf8");
+  const statuses: ContextStatus[] = [];
+  app.service.hub().subscribeContextStatus(id, status => statuses.push(status));
+  let summaries = 0;
+  const response: FauxResponseStep = context => {
+    app.faux!.appendResponses([response]);
+    if (isSummary(context)) { summaries++; return fauxAssistantMessage("已整理旧讨论；准确作品与确认以当前业务状态为准。"); }
+    assert.ok(summaries > 0, "必须在本次继续调用前整理过大的历史");
+    const oldTurns = context.messages.filter(message => message.role === "user" && JSON.stringify(message.content).includes("旧讨论"));
+    assert.ok(oldTurns.length < 12, "继续只保留近期原文，旧讨论经原生摘要承接");
+    assert.ok(JSON.stringify(context.messages).includes("核对当前作品，不制作"));
+    return fauxAssistantMessage("已核对，不触发制作。");
+  };
+  app.faux!.setResponses([response]);
+  await send(app, id, "核对当前作品，不制作"); await idle(app, id);
+  assert.ok(statuses.some(status => status.phase === "compacted" && status.reason === "threshold"));
+  assert.equal(app.service.snapshot("local-owner", id).messages.items.find(message => message.role === "user")?.state, "completed");
+  assert.ok((await readFile(file, "utf8")).startsWith(before), "历史原件追加摘要，不覆写旧消息");
+  assert.equal(app.service.snapshot("local-owner", id).runs.items.length, 0);
+});
+
 test("PC 真实步骤进展可重连，新的答复替换前文并与最终持久文字一致", async t => {
   const { app, id } = await fixture(t);
   const progress: RequestProgress[] = [], deltas: TextDelta[] = [];
@@ -53,7 +88,8 @@ test("PC 真实步骤进展可重连，新的答复替换前文并与最终持�
   const requestId = await send(app, id, "交付两份"); await ready;
   const restored: RequestProgress[] = [];
   const unsubscribe = app.service.hub().subscribeProgress(id, step => restored.push(step));
-  assert.equal(restored.length, 1); assert.equal(restored[0]!.phase, "tool_completed");
+  assert.equal(restored.length, 1); assert.equal(restored[0]!.phase, "thinking");
+  assert.equal(restored[0]!.label, "等待模型响应", "工具结束后真实续轮等待不能一直显示已完成的工具");
   assert.equal(restored[0]!.steps?.[0]?.state, "completed");
   assert.equal(restored[0]!.steps?.[0]?.label, "交付新版本"); unsubscribe();
   release(); await idle(app, id);
@@ -92,7 +128,7 @@ test("进展步骤绑定真实作品，重连最多恢复八步且跨会话目�
   const unsubscribe = app.service.hub().subscribeProgress(id, frame => restored.push(frame));
   const last = restored[0]!;
   assert.equal(restored.length, 1); assert.equal(last.steps?.length, 8);
-  assert.equal(last.phase, "tool_failed"); assert.equal(last.workId, undefined);
+  assert.equal(last.phase, "thinking"); assert.equal(last.label, "等待模型响应");
   assert.equal(last.steps!.at(-1)!.state, "failed");
   assert.equal(last.steps!.at(-1)!.workId, undefined);
   assert.ok(last.steps!.slice(0, -1).every(step => step.state === "completed" && step.workId === workId));
