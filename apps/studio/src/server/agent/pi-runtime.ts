@@ -294,9 +294,10 @@ export class PiRuntimeHost {
   }
 
   private compactionSettings(capacity: number) {
-    // 大窗口仍在 64k 整理历史，避免每次继续重放十几万 token；小窗口保留原比例。
+    // 线上整理后仍有约 68k 的工具、业务帧和近期内容；留出续轮余量，避免立即再次摘要。
+    // 大窗口在 96k 整理，仍早于十几万历史反复重放；小窗口保留原比例。
     // 由 Pi 原生摘要追加记录，作品事实仍从数据库注入，不删历史或降低模型档位。
-    const reserveTokens = Math.max(Math.min(16_384, Math.floor(capacity / 4)), capacity - 64_000);
+    const reserveTokens = Math.max(Math.min(16_384, Math.floor(capacity / 4)), capacity - 96_000);
     const keepRecentTokens = Math.min(12_000, Math.floor(capacity / 4));
     return { enabled: true as const, reserveTokens, keepRecentTokens, ...this.options.compaction };
   }
