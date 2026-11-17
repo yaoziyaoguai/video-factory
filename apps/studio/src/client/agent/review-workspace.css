@@ -135,6 +135,9 @@
 .agent-stop svg { width:12px; height:12px; }
 .agent-composer { padding-inline:14px; }
 .agent-composer-tools { gap:4px; }
+.agent-skill-selector { flex:0 1 144px; min-width:min(100%,128px); }
+.agent-skill-selector svg { flex-shrink:0; }
+.agent-skill-selector select { min-width:0; }
 .agent-send-actions { min-width:0; }
 .agent-send-actions>button:first-child:not(.agent-send) { max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-composer-hint { font-size:10px; }
@@ -205,8 +208,7 @@
 .agent-task-updated { color:var(--frame-muted); font-size:11px; padding-top:6px; }
 
 @container (max-width:300px) {
-  .agent-composer-tools { flex-wrap:nowrap; }
-  .agent-skill-selector { min-width:0; max-width:calc(100% - 36px); }
+  .agent-skill-selector { max-width:calc(100% - 36px); }
   .agent-skill-selector select { min-width:0; max-width:100%; }
   .agent-composer-tools>.agent-library-picker-trigger { font-size:0; padding:5px; }
 }
