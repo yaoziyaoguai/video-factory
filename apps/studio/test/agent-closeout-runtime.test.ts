@@ -72,6 +72,47 @@ test("长会话在继续前由 Pi 整理历史，不等到 272k 窗口耗尽且�
   assert.equal(app.service.snapshot("local-owner", id).runs.items.length, 0);
 });
 
+test("大窗口整理后保留工具与业务上下文余量，不在核对续轮立刻重复整理", async t => {
+  const { app, id } = await fixture(t, { fauxContextWindow: 272_000 });
+  const selection = await app.host.modelForBinding(app.service.bootstrap("local-owner").models[0]!.binding);
+  const seed = await app.host.openConversationSession(id, "s1", undefined, [], selection);
+  for (let index = 0; index < 6; index++) {
+    seed.session.sessionManager.appendMessage({ role: "user", content: "旧讨论 ".repeat(5000), timestamp: Date.now() });
+    const answer = fauxAssistantMessage("已有讨论");
+    answer.provider = selection.model.provider; answer.model = selection.model.id;
+    answer.usage = { ...answer.usage, input: 147_000, totalTokens: 147_000 };
+    seed.session.sessionManager.appendMessage(answer);
+  }
+  seed.session.dispose();
+  // 线上整理后工具声明、业务帧和近期内容仍约 68k；这些开销不应立刻触发第二次摘要。
+  const currentFacts = "作品依据 ".repeat(14_000);
+  const { session } = await app.host.openConversationSession(id, "s1", [{ name: "inspect", label: "核对",
+    description: "只读核对", parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: "text" as const, text: "核对结果 ".repeat(6000) }], details: {} }),
+  }], ["inspect"], selection, undefined, () => currentFacts);
+  t.after(() => session.dispose());
+  let compactions = 0, answers = 0;
+  const usages: number[] = [];
+  session.subscribe(event => {
+    if (event.type === "compaction_end" && event.result) compactions++;
+    if (event.type === "message_end" && event.message.role === "assistant") usages.push(event.message.usage.totalTokens);
+  });
+  const respond: FauxResponseStep = async context => {
+    app.faux!.appendResponses([respond]);
+    if (isSummary(context)) return fauxAssistantMessage("保留已确认作品，继续核对。");
+    // 原生 SDK 会忽略时间戳不晚于摘要的旧 usage；真实模型续轮必然发生在摘要之后。
+    await sleep(5);
+    answers++;
+    return answers === 1 ? fauxAssistantMessage([fauxToolCall("inspect", {})]) : fauxAssistantMessage("核对完成。");
+  };
+  app.faux!.setResponses([respond]);
+  await session.prompt("核对作品，不修改");
+  t.diagnostic(JSON.stringify({ compactions, usages, answers }));
+  assert.ok(usages[0]! > 64_000 && usages[0]! < 96_000, "样本须覆盖真实整理后约 68k 的上下文量级");
+  assert.equal(answers, 2, "完成真实工具续轮");
+  assert.equal(compactions, 1, "只整理过大的旧历史，核对步骤后不再次付出摘要等待");
+});
+
 test("PC 真实步骤进展可重连，新的答复替换前文并与最终持久文字一致", async t => {
   const { app, id } = await fixture(t);
   const progress: RequestProgress[] = [], deltas: TextDelta[] = [];
