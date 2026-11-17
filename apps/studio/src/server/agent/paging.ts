@@ -8,7 +8,7 @@ import { AgentError } from "./errors.js";
 type ListCursorPayload = { v: 1; c: string; k: string; p: number; w: number };
 type EventCursorPayload = { v: 1; c: string; s: number };
 
-export type CollectionKind = "conversations" | "messages" | "artifacts" | "proposals" | "runs" | "library";
+export type CollectionKind = "conversations" | "messages" | "artifacts" | "proposals" | "runs" | "library" | "review_approvals";
 
 function encode(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -16,6 +16,7 @@ function encode(value: unknown): string {
 
 function decode(cursor: string): unknown {
   try {
+    if (typeof cursor !== "string" || !cursor.length || cursor.length > 512) throw new Error("Invalid cursor length");
     return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
   } catch {
     throw new AgentError("INVALID_INPUT", "游标格式不正确，请重新获取快照。");
@@ -28,7 +29,7 @@ export function encodeListCursor(payload: ListCursorPayload): string {
 
 export function decodeListCursor(cursor: string, conversationId: string, collection: CollectionKind): ListCursorPayload {
   const value = decode(cursor) as Partial<ListCursorPayload>;
-  if (value.v !== 1 || typeof value.c !== "string" || typeof value.k !== "string"
+  if (!value || typeof value !== "object" || value.v !== 1 || typeof value.c !== "string" || typeof value.k !== "string"
     || typeof value.p !== "number" || typeof value.w !== "number" || !Number.isSafeInteger(value.p) || !Number.isSafeInteger(value.w)) {
     throw new AgentError("INVALID_INPUT", "列表游标格式不正确，请重新获取。");
   }
@@ -44,7 +45,7 @@ export function encodeEventCursor(conversationId: string, seq: number): string {
 
 export function decodeEventCursor(cursor: string, conversationId: string): number {
   const value = decode(cursor) as Partial<EventCursorPayload>;
-  if (value.v !== 1 || typeof value.c !== "string" || typeof value.s !== "number" || !Number.isSafeInteger(value.s) || value.s < 0) {
+  if (!value || typeof value !== "object" || value.v !== 1 || typeof value.c !== "string" || typeof value.s !== "number" || !Number.isSafeInteger(value.s) || value.s < 0) {
     throw new AgentError("INVALID_INPUT", "事件游标格式不正确，请重新获取快照。");
   }
   if (value.c !== conversationId) {

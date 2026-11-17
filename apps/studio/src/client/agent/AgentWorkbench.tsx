@@ -24,6 +24,7 @@ import { hydrateReferences } from "./references.js";
 import { WorkCenter } from "./WorkCenter.js";
 import { TaskProgress } from "./TaskProgress.js";
 import "./agent.css";
+import "./review-workspace.css";
 
 // 增量 A 工作台：会话列表 | 对话 | 产物预览 三栏（后两栏可拖动）。
 // 业务事实只来自 API；事件按 id+版本合并；新产出只提示不抢占预览与输入目标。
@@ -70,7 +71,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const chatWorkspace = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const viewport = window.matchMedia("(max-width:1180px)");
-    const resize = (event: MediaQueryListEvent) => setSidebarHidden(event.matches);
+    const resize = (event: MediaQueryListEvent) => { if (event.matches) setSidebarHidden(true); };
     viewport.addEventListener("change", resize);
     return () => viewport.removeEventListener("change", resize);
   }, []);
@@ -933,8 +934,11 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const materialAdoptDisabled = !canSend || Boolean(skillMutation) || sendingNow || Boolean(conversationId && pendingSend[conversationId]) || Boolean(view.activeRequestId);
   const sortedMessages = useMemo(() => view.messages, [view.messages]);
 
-  const openConversation = (id: string) => { setPage("chat"); navigate(`/agent/${id}`); };
+  const openConversation = (id: string) => { setPage("chat"); setSidebarHidden(true); navigate(`/agent/${id}`); };
   const activeRuns = view.runs.filter(run => !runEnded(run.state));
+  const activeMessage = view.requestMessages.find(message => message.requestId === view.activeRequestId && message.role === "user");
+  const activeWorkId = requestProgress?.requestId === view.activeRequestId ? requestProgress.workId : activeMessage?.reviewContext?.workId;
+  const activeWork = view.works.find(work => work.id === activeWorkId);
   const selectedRun = view.runs.find(run => run.id === inspectedRun);
   if (selectedWorkId) lastSelectedWork.current = selectedWorkId;
   const workMode = view.works.length > 0 && !inspectedRun && !openArtifactHead && !openBatchId;
@@ -974,7 +978,16 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     cancelled: "上下文压缩已取消。",
   } as const)[visibleContextNote.phase] : null;
 
-  return <div className={`agent-root${sidebarHidden || focusPreview ? " sidebar-hidden" : ""}${focusPreview ? " review-focused" : ""}`}>
+  return <div className={`agent-root${sidebarHidden || focusPreview ? " sidebar-hidden" : ""}${focusPreview ? " review-focused" : ""}`}
+    onPointerDownCapture={event => {
+      if (!sidebarHidden && event.target instanceof Element && !event.target.closest(".agent-side,.agent-rail,[aria-label='切换侧栏']")) setSidebarHidden(true);
+    }}
+    onKeyDown={event => {
+      if (event.key === "Escape" && !sidebarHidden) {
+        setSidebarHidden(true);
+        event.currentTarget.querySelector<HTMLButtonElement>("[aria-label='切换侧栏']")?.focus();
+      }
+    }}>
     <nav className="agent-rail" aria-label="主导航">
       <button type="button" className="agent-rail-brand" aria-label="Frame 新对话" title="Frame · 新对话" onClick={() => void createConversation()}>f.</button>
       <button type="button" aria-label="新建对话" title="新建对话" onClick={() => void createConversation()}><Plus /><span className="agent-rail-label">新建</span></button>
@@ -1002,30 +1015,23 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
           <button type="button" className="agent-conversation-rename" aria-label="改名" onClick={() => setRenaming({ id: conversation.id, title: conversation.title })}><Pencil /></button>
         </div>;
       })}{conversationCursor ? <button type="button" onClick={() => void loadMoreConversations()}>更多会话</button> : null}</nav>
-      <nav className="agent-module-nav" aria-label="设置">
-        <button type="button" className={page === "models" ? "active" : ""} onClick={() => setPage("models")}><Cpu />模型配置</button>
-        <button type="button" className={page === "services" ? "active" : ""} onClick={() => setPage("services")}><PlugZap />免费服务</button>
-        <button type="button" className={page === "skills" ? "active" : ""} onClick={() => setPage("skills")}><Sparkles />Skill 管理</button>
-        <button type="button" className={page === "library" ? "active" : ""} onClick={() => setPage("library")}><Film />作品库</button>
-        <button type="button" className={`agent-profile-link ${page === "profile" ? "active" : ""}`} onClick={() => setPage("profile")}><span className="agent-user-avatar">创</span><span><strong>{bootstrap?.displayName ?? "创作者"}</strong><small>用户页</small></span><ChevronRight /></button>
-      </nav>
     </aside>
     <main className="agent-frame">
-      <header className="agent-topbar agent-chat-header">
-        <button type="button" className="agent-icon-button" aria-label="切换侧栏" onClick={() => setSidebarHidden(value => !value)}><PanelLeft /></button>
-        <div className="agent-topbar-title">{renaming?.id === conversationId && conversationId ? <input autoFocus className="agent-rename-input" aria-label="会话名称" value={renaming.title} onChange={event => setRenaming({ id: conversationId, title: event.target.value })} onBlur={() => void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision)} onKeyDown={event => { if (event.key === "Enter") void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision); if (event.key === "Escape") setRenaming(null); }} /> : <h1 onDoubleClick={() => conversationId && setRenaming({ id: conversationId, title })}>{page === "chat" ? title : framePageTitle[page]}</h1>}</div>
-        <button type="button" className="agent-title-rename" aria-label="重命名当前对话" hidden={page !== "chat" || !conversationId} onClick={() => conversationId && setRenaming({ id: conversationId, title })}><Pencil /></button>
-        <span className="agent-runtime-label">{model?.availability === "configured" ? `${model.name}${isSimulated ? " · 模拟媒体" : ""}` : "文本模型待配置"}</span>
-      </header>
+      {page !== "chat" ? <header className="agent-topbar"><button type="button" className="agent-icon-button" aria-label="返回当前对话" onClick={() => setPage("chat")}><ArrowLeft /></button><h1>{framePageTitle[page]}</h1></header> : null}
       <FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} onLibraryBringIn={bringLibraryPicks} libraryBringTarget={conversationId ? "current" : "new"} />
       <div ref={chatWorkspace} className="agent-chat-workspace" hidden={page !== "chat"}>
       {connectionState ? <div role="status" className="agent-connection-state">{connectionState}<button type="button" onClick={() => conversationId && void refreshSnapshot(conversationId, true)}>重新连接</button></div> : null}
       {actionError || bootError ? <div className="agent-action-error" role="alert">{actionError || bootError}<button type="button" onClick={() => setActionError("")}>知道了</button></div> : null}
       {focusPreview ? progressCard(true) : null}
       <Group className="agent-main" orientation="horizontal" id="vf-agent-panels" onLayoutChanged={layout => { if (layout["agent-chat"]) savePanelLayout(layout); }} defaultLayout={panelLayout ?? undefined}>
-        <Panel id="agent-chat" defaultSize="36%" minSize="25%" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
+        <Panel id="agent-chat" defaultSize="28%" minSize="23%" maxSize="42%" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
           <section className="agent-chat" inert={focusPreview}>
-            <div className="agent-chat-title"><MessageSquare />与 Frame 协作</div>
+<header className="agent-topbar agent-conversation-heading">
+        <button type="button" className="agent-icon-button" aria-label="切换侧栏" aria-expanded={!sidebarHidden} onClick={() => setSidebarHidden(value => !value)}><PanelLeft /></button>
+        <div className="agent-topbar-title">{renaming?.id === conversationId && conversationId ? <input autoFocus className="agent-rename-input" aria-label="会话名称" value={renaming.title} onChange={event => setRenaming({ id: conversationId, title: event.target.value })} onBlur={() => void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision)} onKeyDown={event => { if (event.key === "Enter") void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision); if (event.key === "Escape") setRenaming(null); }} /> : <h1 onDoubleClick={() => conversationId && setRenaming({ id: conversationId, title })}>{page === "chat" ? title : framePageTitle[page]}</h1>}</div>
+        <button type="button" className="agent-title-rename" aria-label="重命名当前对话" hidden={page !== "chat" || !conversationId} onClick={() => conversationId && setRenaming({ id: conversationId, title })}><Pencil /></button>
+        <span className="agent-runtime-label agent-sr-only">{model?.availability === "configured" ? `${model.name}${isSimulated ? " · 模拟媒体" : ""}` : "文本模型待配置"}</span>
+      </header>
             <div className="agent-messages" ref={chatScroll} onScroll={onChatScroll}>
               {view.windowAnchor ? <div className="agent-window-banner" role="status">
                 <span>正在查看这条定稿的产出位置，之后的消息未展开</span>
@@ -1059,10 +1065,10 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 {currentDraft.librarySelections.map((pick, index) => <span className="agent-library-chip" key={index}>作品库 · {pick.label}<button type="button" onClick={() => removeLibrarySelection(index)} aria-label={`移除 ${pick.label}`}><X /></button></span>)}
               </div> : null}
               <div className="agent-composer-card">
-                <textarea ref={composerInput} value={currentDraft.text} onChange={event => updateDraftText(event.target.value)} onKeyDown={event => { if (canSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder={view.activeRequestId ? "补充本轮要求，或排队安排下一步…" : "说说想法，改改作品，或换件事聊…"} aria-label="消息输入" aria-describedby="agent-composer-hint" />
+                <textarea ref={composerInput} value={currentDraft.text} onChange={event => updateDraftText(event.target.value)} onKeyDown={event => { if (canSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="继续聊，或开始一件新作品…" aria-label="消息输入" aria-describedby="agent-composer-hint" />
                 <div className="agent-composer-tools"><label className="agent-skill-selector"><Sparkles /><select aria-label="指定 Skill" disabled={!!currentDraft.proposalId || Boolean(skillMutation)} value={skillId ?? ""} onChange={event => { setSkillId(event.target.value || null); setSkillNotice(""); }}><option value="">Skill · 自动选择</option>{bootstrap?.skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
                   <button type="button" className="agent-library-picker-trigger" aria-label="从作品库选择" title="从作品库选择素材或制作文件" disabled={Boolean(skillMutation)} ref={libraryPickerTrigger} onClick={() => { setSkillNotice(""); setLibraryPickerOpen(true); }}><Film aria-hidden="true" />作品库</button>
-                  <div className="agent-send-actions">{view.activeRequestId ? <button type="button" disabled={!!currentDraft.proposalId || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]} onClick={() => void sendMessage("steer")}>干预本轮</button> : null}<button className="agent-send" data-queued={Boolean(view.activeRequestId) || undefined} type="button" aria-label={view.activeRequestId ? "排队发送" : "发送"} title={view.activeRequestId ? "等待当前请求完成后处理" : "发送"} onClick={() => void sendMessage()} disabled={!canSend || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]}>{view.activeRequestId ? <span>排队</span> : null}<ArrowUp /></button></div>
+                  <div className="agent-send-actions">{view.activeRequestId ? <button type="button" disabled={!!currentDraft.proposalId || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]} onClick={() => void sendMessage("steer")} title={activeWork ? `补充正在处理的「${activeWork.title}」` : "补充当前正在处理的请求"}>{activeWork ? `补充「${activeWork.title}」` : "补充当前请求"}</button> : null}<button className="agent-send" data-queued={Boolean(view.activeRequestId) || undefined} type="button" aria-label={view.activeRequestId ? "排队发送" : "发送"} title={view.activeRequestId ? "等待当前请求完成后处理" : "发送"} onClick={() => void sendMessage()} disabled={!canSend || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]}>{view.activeRequestId ? <span>排队</span> : null}<ArrowUp /></button></div>
                 </div>
               </div>
               {canSend ? <span id="agent-composer-hint" className="agent-composer-hint">Enter {view.activeRequestId ? "排队发送" : "发送"} · Shift + Enter 换行</span> : <div id="agent-composer-hint" className="agent-config-note" role="status">{bootstrap ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : "可以先写草稿。"}</div>}
@@ -1074,9 +1080,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
           </section>
         </Panel>
         <Separator className="agent-resizer" aria-label="调整对话与预览的宽度" title="拖动或用左右方向键调整宽度" />
-        <Panel id="agent-preview" minSize="50%">
+        <Panel id="agent-preview" minSize="58%">
           <section className="agent-preview">
-            <div className="agent-workspace-status"><Film /><strong>{focusPreview ? "聚焦审片" : "作品中心"}</strong>{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}<button type="button" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"} title={focusPreview ? "返回聊天与作品" : "展开作品区"} onClick={() => { if (focusPreview) chatPanel.current?.expand(); else chatPanel.current?.collapse(); setFocusPreview(!focusPreview); }}>{focusPreview ? <ArrowLeft /> : <Maximize2 />}{focusPreview ? "返回创作" : "聚焦审片"}</button></div>
+            <div className="agent-workspace-status" data-work-mode={workMode || undefined}><Film /><strong>{focusPreview ? "聚焦审片" : "作品中心"}</strong>{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}<button type="button" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"} title={focusPreview ? "返回聊天与作品" : "展开作品区"} onClick={() => { if (focusPreview) chatPanel.current?.expand(); else chatPanel.current?.collapse(); setFocusPreview(!focusPreview); }}>{focusPreview ? <ArrowLeft /> : <Maximize2 />}{focusPreview ? "返回创作" : "聚焦审片"}</button></div>
             {!workMode && view.artifacts.length ? <div className="agent-artifact-tabs" data-work-mode={workMode || undefined} aria-label="当前会话产物">{view.artifacts.map(artifact => <button type="button" key={artifact.id} aria-label={artifact.title} title={artifact.title} aria-pressed={!inspectedRun && selection?.artifactId === artifact.id} onClick={() => openArtifact(artifact.id)}><span className="agent-artifact-icon"><ArtifactIcon kind={artifact.kind} /></span><span><strong>{artifact.title}</strong><small>{stageOwnedLabel(view.works, artifact)}就绪</small></span>{notices.byConversation.get(conversationId ?? "")?.includes(artifact.id) ? <span className="agent-output-badge">有更新</span> : null}</button>)}{view.artifactCursor ? <button type="button" onClick={() => void loadMoreOutputs("artifacts")}>更多产物</button> : null}</div> : null}
             <div className="agent-workspace-scroll" data-mode={workMode ? "work" : undefined} data-proposals-open={workMode && proposalsOpen || undefined}>
               {selectedRun ? <article className="agent-paper"><header className="agent-preview-header"><h2>制作记录</h2><button type="button" onClick={() => { openIntent.current++; setInspectedRun(null); }}>回到作品</button></header><RunCard key={selectedRun.id} run={selectedRun} onCancel={r => void cancelProduction(r)} onOpen={openArtifact} simulated={isSimulated} proposals={view.proposals} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onRetry={() => void retryReferences()} />
@@ -1131,6 +1137,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 onContinueReview={(work, group, label) => continueReview(work, group, label)}
                 onAdoptPreview={adoptPreview}
                 reviewBusyKeys={reviewBusyKeys} reviewRequests={reviewRequests} canContinueText={canSend}
+                queueHint={view.activeRequestId ? activeWork ? `「${activeWork.title}」正在处理` : "当前请求正在处理" : undefined}
                 onOpenRun={runId => void openRun(runId)}
                 onEnsureRun={runId => void ensureRun(runId)} referenceErrors={referenceErrors}
                 feedback={feedback}

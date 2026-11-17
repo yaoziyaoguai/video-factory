@@ -18,14 +18,14 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 it("总览同时保留各作品未确认 v3 和已确认 v2，打开时传递准确作品、事项和版本", async () => {
   const props = propsFor([work("earth", "轨道之上"), work("coffee", "一杯早晨"), work("city", "夜色上海")]);
   render(<WorkCenter {...props} />);
-  const pending = within(screen.getByRole("region", { name: "未确认" }));
-  const approved = within(screen.getByRole("region", { name: "已确认" }));
+  const pending = within(screen.getByRole("region", { name: "轨道之上 · 未确认" }));
+  const approved = within(screen.getByRole("region", { name: "轨道之上 · 已确认" }));
   expect(pending.getByText("earth第3版正文")).toBeVisible();
   expect(approved.getByText("earth第2版正文")).toBeVisible();
   expect(pending.queryByText("earth第2版正文")).toBeNull();
-  await userEvent.click(approved.getByRole("button", { name: "查看已确认一杯早晨脚本 v2" }));
+  await userEvent.click(screen.getByRole("button", { name: "查看已确认一杯早晨脚本 v2" }));
   expect(props.onOpenReview).toHaveBeenCalledWith({ workId: "coffee", groupId: "group-coffee", itemId: "item-coffee", artifactId: "coffee", revisionId: "coffee-v2" });
-  await userEvent.click(pending.getByRole("button", { name: "审阅夜色上海脚本 v3" }));
+  await userEvent.click(screen.getByRole("button", { name: "审阅夜色上海脚本 v3" }));
   expect(props.onOpenReview).toHaveBeenLastCalledWith({ workId: "city", groupId: "group-city", itemId: "item-city", artifactId: "city", revisionId: "city-v3" });
 });
 
@@ -128,7 +128,7 @@ it("总览进入审阅把焦点交给作品标题，返回搜索后仍保留已�
   await userEvent.click(screen.getByRole("button", { name: "审阅一杯早晨" }));
   expect(screen.getByRole("heading", { name: "一杯早晨详情" })).toHaveFocus();
   await userEvent.type(screen.getByRole("textbox", { name: "审阅草稿" }), "保留草稿");
-  await userEvent.click(screen.getByRole("button", { name: "全部作品 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "全部作品 1 件" }));
   expect(screen.getByRole("textbox", { name: "搜索作品和交付内容" })).toHaveFocus();
   await userEvent.click(screen.getByRole("button", { name: "审阅一杯早晨" }));
   expect(screen.getByRole("textbox", { name: "审阅草稿" })).toHaveValue("保留草稿");
@@ -161,8 +161,7 @@ it("Oracle P2-08 本批没有交付而后面有时解释计数并可直接展开
   const works = Array.from({ length: 9 }, (_, index) => work(`batch-${index}`));
   works.slice(0, 8).forEach(item => { item.reviewGroups = []; });
   render(<WorkCenter {...propsFor(works)} />);
-  const pending = within(screen.getByRole("region", { name: "未确认" }));
-  expect(pending.getByText("这批作品暂无未确认内容，后续作品还有 1 项。")).toBeVisible();
-  await userEvent.click(pending.getByRole("button", { name: "显示后续作品" }));
-  expect(pending.getByText("batch-8第3版正文")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "未确认 1 项" })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: /再显示 1 件作品/ }));
+  expect(screen.getByText("batch-8第3版正文")).toBeVisible();
 });

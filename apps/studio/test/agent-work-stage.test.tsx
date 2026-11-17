@@ -298,18 +298,24 @@ afterEach(() => {
 });
 
 const workPane = () => document.querySelector(".agent-work") as HTMLElement;
+const canvas = () => within(screen.getByRole("region", { name: "草稿与修改" }));
+const findCanvasText = async (text: string) => within(await screen.findByRole("region", { name: "草稿与修改" })).findByText(text);
+const switchWork = async (title: string) => {
+  const select = await screen.findByRole("combobox", { name: "切换作品" });
+  await userEvent.selectOptions(select, within(select).getByRole("option", { name: title }));
+};
 
 it("PC 首次打开定位待审组，后续交付不会抢走未点击过页签的阅读位置", async () => {
   const draft = { kind: "message_text" as const, messageId: "source", text: "当前脚本", author: "user" as const };
   const harness = installStageRoutes({ works: [workFixture({ id: "reading-work", title: "阅读位置", content: { draft } })] });
   renderAt("/agent/conv-w");
-  await screen.findByText("当前脚本");
+  await findCanvasText("当前脚本");
   harness.snapshot.works[0] = workFixture({ id: "reading-work", title: "阅读位置", stage: "plan", revision: 2,
     content: { draft, approved: draft }, plan: { draft: { ...draft, messageId: "new-plan", text: "新方案" } } });
   FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "next-group", kind: "work.changed", entityId: "reading-work", entityVersion: 2 });
-  await screen.findByRole("tab", { name: /画面与声音/ });
-  expect(screen.getByRole("tab", { name: /内容草稿/ })).toHaveAttribute("aria-selected", "true");
-  expect(screen.queryByText("新方案")).toBeNull();
+  await screen.findByRole("option", { name: /画面与声音/ });
+  expect(screen.getByRole("option", { name: /内容草稿/ })).toHaveProperty("selected", true);
+  expect(canvas().queryByText("新方案")).toBeNull();
 });
 
 it("PC 继续在排队期间保持禁用，刷新恢复处理状态且不锁另一作品", async () => {
@@ -326,35 +332,34 @@ it("PC 继续在排队期间保持禁用，刷新恢复处理状态且不锁另�
     return null;
   } });
   const first = renderAt("/agent/conv-w");
-  await userEvent.click(await screen.findByRole("button", { name: "继续" }));
+  await userEvent.click(await screen.findByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ }));
   await waitFor(() => expect(accepted).toBe(true));
-  expect(screen.getByRole("button", { name: "继续" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ })).toBeDisabled();
   expect(await screen.findByText("已加入队列，等待前面的请求完成。")).toBeInTheDocument();
   first.unmount(); renderAt("/agent/conv-w");
-  expect(await screen.findByRole("button", { name: "继续" })).toBeDisabled();
-  await userEvent.click(screen.getByRole("button", { name: /审阅作品 B/ }));
-  expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
+  expect(await screen.findByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ })).toBeDisabled();
+  await switchWork("作品 B");
+  expect(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ })).toBeEnabled();
   expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(1);
 });
 
-it("PC 比较准确两版，键盘切组不发送命令，聚焦审片保留聊天与稿旁意见", async () => {
+it("PC 比较准确两版，选择审阅组不发送命令，聚焦审片保留聊天与稿旁意见", async () => {
   const draft = { kind: "artifact_revision" as const, artifactId: "script", revisionId: "script-rev-2", digest: "sha256:v2" };
   const harness = installStageRoutes({ works: [workFixture({ id: "work-compare", title: "山路", content: { draft }, plan: { draft: null } })] });
   renderAt("/agent/conv-w");
-  await screen.findByText("script 正文 script-rev-2");
+  await findCanvasText("script 正文 script-rev-2");
   await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
   expect(await within(screen.getByRole("region", { name: "上一版内容" })).findByText("script 正文 script-rev-1")).toBeInTheDocument();
   expect(within(screen.getByRole("region", { name: "当前查看版本" })).getByText("script 正文 script-rev-2")).toBeInTheDocument();
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "聊天草稿");
-  await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+  await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
   await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "稿旁意见");
   await userEvent.click(screen.getByRole("button", { name: "展开作品区" }));
   await userEvent.click(await screen.findByRole("button", { name: "返回聊天与作品" }));
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("聊天草稿");
   expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("稿旁意见");
-  const groupTab = screen.getByRole("tab", { name: /内容草稿/ }); groupTab.focus();
-  await userEvent.keyboard("{ArrowRight}");
-  expect(screen.getByRole("tab", { name: /画面与声音/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /画面与声音/ }));
+  expect(screen.getByRole("option", { name: /画面与声音/ })).toHaveProperty("selected", true);
   expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
 });
 
@@ -501,9 +506,9 @@ describe("R2 组审阅工作台", () => {
     const harness = installStageRoutes({ works: [work], artifacts: [artifactFixture("art-script", "城市短片脚本", "art-script-rev-2", 2)] });
     renderAt("/agent/conv-w");
     expect(await screen.findByRole("heading", { name: "城市短片" })).toBeInTheDocument();
-    expect(screen.getByText("待认可 1 项")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /内容草稿/ })).toBeEnabled();
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    expect(within(screen.getByRole("region", { name: "未确认" })).getByText("1 项")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "审阅组" })).toBeNull();
+    await findCanvasText("art-script 正文 art-script-rev-2");
     await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "我还没想好，先留着");
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     const command = harness.calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as Record<string, unknown>;
@@ -525,12 +530,12 @@ describe("R2 组审阅工作台", () => {
     });
     const harness = installStageRoutes({ works: [work], artifacts: [artifactFixture("art-script", "城市短片脚本", "art-script-rev-2", 2)] });
     renderAt("/agent/conv-w");
-    expect(await screen.findByText("这一组已全部认可；想调整时在对话中提出。")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "继续下一步" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "认可整组" })).toBeNull();
     expect(screen.queryByRole("button", { name: "认可并继续" })).toBeNull();
-    expect(screen.getByText("这一组的当前稿已全部确认。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续下一步" })).toBeInTheDocument();
     await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先聊两句别的");
-    await userEvent.click(screen.getByRole("button", { name: "继续" }));
+    await userEvent.click(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ }));
     const command = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
     expect(command.reviewConfirmation).toBeNull();
     expect(command.mode).toBe("new");
@@ -564,11 +569,12 @@ describe("R2 组审阅工作台", () => {
     harness.snapshot.works[0] = workFixture({ id: "work-1", title: "城市短片", stage: "video", revision: 3,
       video: { draft: v2, approved: v1, finalizedSource: v1, approvedAt: "2026-01-01T00:00:00.000Z", confirmationId: "conf-approve" } });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "v2", kind: "work.changed", entityId: "work-1", entityVersion: 3 });
+    await userEvent.click(await screen.findByRole("button", { name: "查看最新稿" }));
     expect(await screen.findByText("新稿待确认")).toBeInTheDocument();
     // v1 仍留在右侧已确认区；新的待确认 v2 在左侧独立出现。
     expect(within(screen.getByRole("region", { name: "已确认成果" })).getByText("video 正文 video-rev-1")).toBeInTheDocument();
-    await screen.findByText("video 正文 video-rev-2");
-    expect(screen.getByRole("button", { name: "以这版「视频初稿」定稿并入库" })).toBeEnabled();
+    await findCanvasText("video 正文 video-rev-2");
+    await waitFor(() => expect(screen.getByRole("button", { name: "以这版「视频初稿」定稿并入库" })).toBeEnabled());
     await userEvent.click(screen.getByRole("button", { name: "以这版「视频初稿」定稿并入库" }));
     command = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
     expect(command.reviewConfirmation).toMatchObject({ action: "finalize_video",
@@ -593,13 +599,15 @@ describe("R2 组审阅工作台", () => {
     const harness = installStageRoutes({ works: [work],
       artifacts: [artifactFixture("art-char", "人物", "char-rev-1", 1), artifactFixture("art-scene", "背景", "scene-rev-2", 2)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-scene 正文 scene-rev-2");
+    await userEvent.click(await screen.findByRole("button", { name: "审阅背景 v2" }));
+    await findCanvasText("art-scene 正文 scene-rev-2");
     // 背景停留在旧版阅读：整组动作禁用并说明原因，人物单项认可不受影响。
     await userEvent.click(screen.getByRole("button", { name: "看上一版" }));
-    await screen.findByText("art-scene 正文 art-scene-rev-1");
-    expect(screen.getByText("「背景」正在看旧版。整组认可暂不可用，单项认可仍可用。")).toBeInTheDocument();
+    await findCanvasText("art-scene 正文 art-scene-rev-1");
+    expect(screen.getByText("「背景」正在看旧版")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "认可整组" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "认可并继续" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "认可并继续" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "审阅人物 v1" }));
     expect(screen.getByRole("button", { name: "认可「人物」" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "认可「人物」" }));
     await waitFor(() => expect(harness.calls.some(call => call.method === "POST" && call.url.endsWith("/messages"))).toBe(true));
@@ -611,8 +619,8 @@ describe("R2 组审阅工作台", () => {
         work.reviewGroups[0]!.items[1]!,
       ] }] };
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "char-ok", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
-    await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
-    await screen.findByText("art-scene 正文 scene-rev-2");
+    await userEvent.click(screen.getByRole("button", { name: "审阅背景 v2" }));
+    await findCanvasText("art-scene 正文 scene-rev-2");
     expect(screen.getByRole("button", { name: "认可整组" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     const command = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
@@ -639,8 +647,8 @@ describe("R2 组审阅工作台", () => {
       onRequest: url => url.endsWith("/revisions/scene-rev-2")
         ? new Promise<RouteResult>(() => { /* 当前稿悬停未加载 */ }) : null });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-char 正文 char-rev-1");
-    expect(screen.getByText("「背景」的最新稿还没打开。整组认可暂不可用，单项认可仍可用。")).toBeInTheDocument();
+    await findCanvasText("art-char 正文 char-rev-1");
+    expect(screen.getByText("「背景」的最新稿还没打开")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "认可整组" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "认可「人物」" })).toBeEnabled();
   });
@@ -655,13 +663,16 @@ describe("R2 组审阅工作台", () => {
       artifacts: [artifactFixture("art-script", "城市短片脚本", "art-script-rev-2", 2)],
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     expect(screen.getByRole("button", { name: "认可整组" })).toBeEnabled();
-    const continueButton = screen.getByRole("button", { name: "认可并继续" });
-    expect(continueButton).toBeDisabled();
-    expect(screen.getByText("继续需要可用的文本模型")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续下一步" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     await waitFor(() => expect(harness.calls.some(call => call.method === "POST" && call.url.endsWith("/messages"))).toBe(true));
+    const item = work.reviewGroups[0]!.items[0]!;
+    harness.snapshot.works[0] = { ...work, revision: 2, reviewGroups: [{ ...work.reviewGroups[0]!, items: [{ ...item, approved: item.draft }] }] };
+    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "approval", kind: "work.changed", entityId: work.id, entityVersion: 2 });
+    expect(await screen.findByRole("button", { name: "继续下一步" })).toBeDisabled();
+    expect(screen.getByText("继续需要可用的文本模型")).toBeInTheDocument();
   });
 
   it("查看旧版本时不能确认；回到最新稿后恢复确认入口", async () => {
@@ -671,16 +682,16 @@ describe("R2 组审阅工作台", () => {
     });
     installStageRoutes({ works: [work], artifacts: [artifactFixture("art-script", "城市短片脚本", "art-script-rev-2", 2)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     await userEvent.click(screen.getByRole("button", { name: "看上一版" }));
-    await screen.findByText("art-script 正文 art-script-rev-1");
+    await findCanvasText("art-script 正文 art-script-rev-1");
     expect(screen.getByText("正在看旧版本，不能在这里确认；请回到最新稿。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "认可「内容草稿」" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveAttribute("readonly");
-    expect(screen.getByText("这是旧稿的未发送意见，可以复制后继续讨论。")).toBeInTheDocument();
+    expect(screen.getByText("旧稿意见仅供查看，可以复制后继续讨论。")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     expect(screen.getByRole("button", { name: "认可「内容草稿」" })).toBeEnabled();
   });
 
@@ -693,31 +704,31 @@ describe("R2 组审阅工作台", () => {
       onRequest: url => url.endsWith(`/revisions/${draft.revisionId}`) && failRead
         ? { status: 503, body: { code: "UNAVAILABLE", message: "暂不可读" } } : null });
     renderAt("/agent/conv-w");
-    await userEvent.click(await screen.findByRole("button", { name: /审阅城市短片/ }));
+    await switchWork("城市短片");
     await screen.findByText("草稿读取失败。");
     failRead = false;
     await userEvent.click(screen.getByRole("button", { name: "重试读取草稿" }));
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     expect(screen.getByRole("region", { name: "已确认成果" })).toBeVisible();
-    // 点过组页签后阅读位置归属用户：新组到达（服务端把待认可组排前）不抢走正在看的组。
-    await userEvent.click(screen.getByRole("tab", { name: /内容草稿/ }));
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    // 唯一组无需选择器；新组到达也不能抢走正在看的事项。
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "结尾我还在想");
     harness.snapshot.works[0] = workFixture({ id: a.id, title: a.title, revision: 2, stage: "plan",
       content: { draft, approved: draft, confirmationId: "conf-content" },
       plan: { draft: { kind: "artifact_revision", artifactId: "art-plan", revisionId: "plan-rev-1", digest: "p" } } });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "plan-arrived", kind: "work.changed", entityId: a.id, entityVersion: 2 });
-    await waitFor(() => expect(screen.getByRole("tab", { name: /画面与声音/ })).toBeInTheDocument());
-    expect(screen.getByRole("tab", { name: /内容草稿/ })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getByRole("option", { name: /画面与声音/ })).toBeInTheDocument());
+    expect(screen.getByRole("option", { name: /内容草稿/ })).toHaveProperty("selected", true);
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("结尾我还在想");
-    await userEvent.click(screen.getByRole("button", { name: /审阅咖啡短片/ }));
-    await userEvent.click(screen.getByRole("button", { name: /审阅城市短片/ }));
+    await switchWork("咖啡短片");
+    await switchWork("城市短片");
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("结尾我还在想");
+    await userEvent.click(screen.getByRole("button", { name: "全部作品 2 件" }));
     await userEvent.click(screen.getByRole("button", { name: "审阅城市短片" }));
     expect(screen.queryByRole("button", { name: "回到创作" })).toBeNull();
     expect(screen.getByRole("region", { name: "草稿与修改" })).toBeVisible();
     expect(screen.getByRole("region", { name: "已确认成果" })).toBeVisible();
-    expect(screen.getByRole("tab", { name: /内容草稿/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: /内容草稿/ })).toHaveProperty("selected", true);
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("结尾我还在想");
   });
 
@@ -735,14 +746,14 @@ describe("R2 组审阅工作台", () => {
     renderAt("/agent/conv-w");
     await waitFor(() => expect(screen.getByRole("button", { name: "以这版「视频初稿」定稿并入库" })).toBeEnabled());
     await waitFor(() => expect(within(screen.getByRole("region", { name: "草稿与修改" })).getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/file-real/content"));
-    await userEvent.click(screen.getByRole("tab", { name: /内容草稿/ }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /内容草稿/ }));
     expect(await within(screen.getByRole("region", { name: "已确认成果" })).findByText(source.text)).toBeInTheDocument();
-    await within(screen.getByRole("region", { name: "已确认成果" })).findByLabelText("视频预览");
+    await waitFor(() => expect(screen.getByRole("region", { name: "已确认成果" }).querySelector("video")).toBeInTheDocument());
     // 成果区保留已认可内容与上一版定稿视频；新版未定稿不进成果区
-    expect(within(screen.getByRole("region", { name: "已确认成果" })).getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/file-approved/content");
-    await userEvent.click(screen.getByRole("tab", { name: /视频初稿/ }));
+    expect(screen.getByRole("region", { name: "已确认成果" }).querySelector("video")).toHaveAttribute("src", "/api/agent/v1/blobs/file-approved/content#t=0.1");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /视频初稿/ }));
     expect(within(screen.getByRole("region", { name: "草稿与修改" })).getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/file-real/content");
-    expect(within(screen.getByRole("region", { name: "已确认成果" })).getByLabelText("视频预览")).toHaveAttribute("src", "/api/agent/v1/blobs/file-approved/content");
+    expect(screen.getByRole("region", { name: "已确认成果" }).querySelector("video")).toHaveAttribute("src", "/api/agent/v1/blobs/file-approved/content#t=0.1");
   });
 
   it("受理门槛由服务端推导：受阻提案只显示原因，不出现确认入口", async () => {
@@ -759,7 +770,7 @@ describe("R2 组审阅工作台", () => {
     expect(screen.queryByRole("button", { name: "确认制作" })).toBeNull();
   });
 
-  it("认可并继续后新组可查看但不抢阅读位置；认可命令按（组,动作,事项）持久可重放", async () => {
+  it("认可后新组可查看但不抢阅读位置；只有明确继续才发继续命令", async () => {
     const source = { kind: "artifact_revision" as const, artifactId: "art-script", revisionId: "art-script-rev-2", digest: "sha256:art-script-rev-2" };
     const work = workFixture({
       id: "work-1", title: "城市短片", stage: "content",
@@ -779,22 +790,27 @@ describe("R2 组审阅工作台", () => {
       },
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-2");
-    await userEvent.click(screen.getByRole("button", { name: "认可并继续" }));
+    await findCanvasText("art-script 正文 art-script-rev-2");
+    await userEvent.click(screen.getByRole("button", { name: "认可「内容草稿」" }));
     const command = harness.calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as Record<string, unknown>;
     expect(command.reviewConfirmation).toMatchObject({
-      workId: "work-1", groupId: "group-content", action: "approve_and_continue",
+      workId: "work-1", groupId: "group-content", action: "approve",
       items: [{ itemId: "item-content", source: { kind: "artifact_revision", artifactId: "art-script", revisionId: "art-script-rev-2", digest: "sha256:art-script-rev-2" } }],
     });
-    // 快照合并后：新组排在最前成为默认阅读组（服务端以排序指示下一步），
-    // 内容事项的已认可状态经组页签可见。
-    await waitFor(() => expect(screen.getByText("待认可 1 项")).toBeInTheDocument());
-    const planTab = screen.getByRole("tab", { name: /画面与声音/ });
-    expect(screen.getByRole("tab", { name: /内容草稿/ })).toHaveAttribute("aria-selected", "true");
-    await userEvent.click(planTab);
-    await screen.findByText("art-plan 正文 art-plan-rev-1");
-    await userEvent.click(screen.getByRole("tab", { name: /内容草稿/ }));
-    expect(screen.getByText("这一组的当前稿已全部确认。")).toBeInTheDocument();
+    // 新组到达后仍保留原内容和未发送意见，认可不隐式发起制作。
+    expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(1);
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "未确认" })).getByText("1 项")).toBeInTheDocument());
+    const planTab = screen.getByRole("option", { name: /画面与声音/ });
+    expect(screen.getByRole("option", { name: /内容草稿/ })).toHaveProperty("selected", true);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), planTab);
+    await findCanvasText("art-plan 正文 art-plan-rev-1");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /内容草稿/ }));
+    expect(screen.getByRole("button", { name: "继续下一步" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续下一步" })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: "继续下一步" }));
+    const continued = harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput;
+    expect(continued.reviewConfirmation).toBeNull();
+    expect(continued.reviewContext).toEqual({ workId: "work-1", groupId: "group-content", intent: "continue" });
     // 成功后命令持久被清理，不留下重放痕迹
     expect(window.localStorage.getItem("vf:agent-review:conv-w:work-1:group-content:approve_and_continue:art-script:art-script-rev-2")).toBeNull();
   });
@@ -850,7 +866,7 @@ describe("R2 组审阅工作台", () => {
       },
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("plan 正文 plan-rev-1");
+    await findCanvasText("plan 正文 plan-rev-1");
     await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "这句先不发送");
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     const result = screen.getByRole("region", { name: "已确认成果" });
@@ -871,48 +887,43 @@ describe("R2 组审阅工作台", () => {
     expect(within(screen.getByRole("region", { name: "已确认成果" })).getByText("plan 正文 plan-rev-1")).toBeInTheDocument();
   });
 
-  it("V1 认可并继续一次发出认可命令；结果未知重试沿用原命令，纯认可命令不串用", async () => {
+  it("认可结果未知重试沿用原命令，成功后明确继续使用独立命令", async () => {
     const source = { kind: "message_text" as const, messageId: "content-message", text: "已确认的内容", author: "user" as const };
     const plan = { kind: "artifact_revision" as const, artifactId: "plan", revisionId: "plan-rev-1", digest: "sha256:plan-rev-1" };
     let postCount = 0;
     const harness = installStageRoutes({ works: [workFixture({ id: "work-1", title: "城市短片", stage: "plan",
       content: { draft: source, approved: source }, plan: { draft: plan } })],
-      artifacts: [artifactFixture("plan", "画面与声音方案", plan.revisionId, 1)],
       onRequest: (url, call) => {
         if (call.method === "POST" && url.endsWith("/messages")) {
-          // 每次发送都结果未知：认可不落库，按钮保留，可观察重试与另一按钮的命令。
           postCount += 1;
-          return { status: 502, body: { code: "UNAVAILABLE", message: "结果未知" } };
+          if (postCount < 3) return { status: 502, body: { code: "UNAVAILABLE", message: "结果未知" } };
+          if ((call.body as MessageInput).reviewConfirmation) harness.snapshot.works[0] = workFixture({ id: "work-1", title: "城市短片", stage: "plan", revision: 2,
+            content: { draft: source, approved: source }, plan: { draft: plan, approved: plan } });
         }
         return null;
       },
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("plan 正文 plan-rev-1");
-    expect(screen.getByRole("button", { name: "认可并继续" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "认可整组" })).toBeEnabled();
-
-    await userEvent.click(screen.getByRole("button", { name: "认可并继续" }));
+    await findCanvasText("plan 正文 plan-rev-1");
+    const approve = () => screen.getByRole("button", { name: "认可「画面与声音」" });
+    await userEvent.click(approve());
     await screen.findByRole("alert");
-    const firstCommand = (harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput);
-    expect(firstCommand.reviewConfirmation).toMatchObject({ workId: "work-1", groupId: "group-plan", action: "approve_and_continue",
-      items: [{ itemId: "item-plan", source: { kind: "artifact_revision", artifactId: "plan", revisionId: "plan-rev-1" } }] });
-    expect(firstCommand.text).toContain("这一组我都认可了，请继续下一步");
-
-    // 结果未知后重试同一意图：沿用原 commandId 原请求，不生成第二条命令。
-    await userEvent.click(screen.getByRole("button", { name: "认可并继续" }));
-    await screen.findByRole("alert");
-    const retriedCommand = (harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput);
-    expect(retriedCommand.commandId).toBe(firstCommand.commandId);
-    expect(retriedCommand.reviewConfirmation?.action).toBe("approve_and_continue");
-
-    // 另一按钮是独立意图：新命令、纯认可动作，不串用继续请求的缓存命令。
-    await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
-    await screen.findByRole("alert");
-    const plainCommand = (harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput);
-    expect(plainCommand.commandId).not.toBe(firstCommand.commandId);
-    expect(plainCommand.reviewConfirmation).toMatchObject({ workId: "work-1", groupId: "group-plan", action: "approve" });
-    expect(postCount).toBe(3);
+    const first = harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput;
+    expect(first.reviewConfirmation).toMatchObject({ action: "approve", workId: "work-1", groupId: "group-plan" });
+    await waitFor(() => expect(approve()).toBeEnabled());
+    await userEvent.click(approve());
+    await waitFor(() => expect(postCount).toBe(2));
+    expect((harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput).commandId).toBe(first.commandId);
+    await waitFor(() => expect(approve()).toBeEnabled());
+    await userEvent.click(approve());
+    const next = await screen.findByRole("button", { name: "继续下一步" });
+    await waitFor(() => expect(next).toBeEnabled());
+    await userEvent.click(next);
+    const continued = harness.calls.filter(call => call.method === "POST").at(-1)!.body as MessageInput;
+    expect(continued.commandId).not.toBe(first.commandId);
+    expect(continued.reviewConfirmation).toBeNull();
+    expect(continued.reviewContext).toEqual({ workId: "work-1", groupId: "group-plan", intent: "continue" });
+    expect(postCount).toBe(4);
   });
 
   it("素材批次按消息引用点开：原始顺序、署名来源许可、空批次如实说明", async () => {
@@ -967,15 +978,15 @@ describe("R2 组审阅工作台", () => {
     const harness = installStageRoutes({ works: [a, b], artifacts: [artifactFixture("art-script", "城市内容", draft.revisionId, 2)] });
     renderAt("/agent/conv-w");
     await waitFor(() => expect(screen.getByRole("region", { name: "创作：事项A" })).toBeInTheDocument());
-    await screen.findByText("art-script 正文 art-script-rev-2");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await findCanvasText("art-script 正文 art-script-rev-2");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "A 的意见");
     await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "聊天草稿还在");
     harness.snapshot.works[1] = workFixture({ id: "work-b", title: "事项B", revision: 2, updatedAt: "2026-01-04T00:00:00.000Z" });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "b-updated", kind: "work.changed", entityId: "work-b", entityVersion: 2 });
     // 页签顺序确实换成了 B 在前，但正在看的仍是 A。
     await waitFor(() => {
-      const tabs = screen.getAllByRole("button").filter(tab => /^审阅事项[AB]$/.test(tab.getAttribute("aria-label") ?? ""));
+      const tabs = within(screen.getByRole("combobox", { name: "切换作品" })).getAllByRole("option");
       expect(tabs[0]?.textContent ?? "").toContain("事项B");
     });
     expect(screen.getByRole("region", { name: "创作：事项A" })).toBeInTheDocument();
@@ -990,18 +1001,18 @@ describe("R2 组审阅工作台", () => {
     const b = workFixture({ id: "work-b", title: "事项B", updatedAt: "2026-01-01T00:00:00.000Z" });
     const harness = installStageRoutes({ works: [a, b], artifacts: [artifactFixture("art-script", "城市内容", draft.revisionId, 2)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     harness.snapshot.works[0] = workFixture({ id: "work-a", title: "事项A", revision: 2,
       content: { draft: { ...draft, revisionId: "art-script-rev-3", digest: "sha256:art-script-rev-3" } } });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "a-new-draft", kind: "work.changed", entityId: "work-a", entityVersion: 2 });
     await screen.findByText("待认可");
     expect(await screen.findByText("正在看旧版本，不能在这里确认；请回到最新稿。")).toBeInTheDocument();
-    expect(screen.getByText("art-script 正文 art-script-rev-2")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项B/ }));
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项A/ }));
-    expect(screen.getByText("art-script 正文 art-script-rev-2")).toBeInTheDocument();
+    expect(canvas().getByText("art-script 正文 art-script-rev-2")).toBeInTheDocument();
+    await switchWork("事项B");
+    await switchWork("事项A");
+    expect(canvas().getByText("art-script 正文 art-script-rev-2")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
-    await screen.findByText("art-script 正文 art-script-rev-3");
+    await findCanvasText("art-script 正文 art-script-rev-3");
   });
 
   it("U02b 跨产物新稿（新制作输出是新产物）：仍读旧产物修订，不出现读取失败；明确点击才跟新产物", async () => {
@@ -1023,17 +1034,17 @@ describe("R2 组审阅工作台", () => {
       },
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-video-1 正文 video-rev-1");
+    await findCanvasText("art-video-1 正文 video-rev-1");
     // 新一版制作输出是另一个产物：正在看的 v1 不被抢走，也不把旧修订号配到新产物上。
     harness.snapshot.works[0] = workFixture({ id: "work-1", title: "夜景短片", stage: "video", revision: 2,
       video: { draft: { kind: "artifact_revision", artifactId: "art-video-2", revisionId: "video-rev-2", digest: "sha256:v2" } } });
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "v-new-output", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
     await screen.findByText("正在看旧版本，不能在这里确认；请回到最新稿。");
-    expect(screen.getByText("art-video-1 正文 video-rev-1")).toBeInTheDocument();
+    expect(canvas().getByText("art-video-1 正文 video-rev-1")).toBeInTheDocument();
     expect(screen.queryByText(/草稿读取失败|视频读取失败/)).not.toBeInTheDocument();
     expect(harness.calls.some(call => call.url.endsWith("/artifacts/art-video-2/revisions/video-rev-1"))).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
-    await screen.findByText("art-video-2 正文 video-rev-2");
+    await findCanvasText("art-video-2 正文 video-rev-2");
   });
 
   it("U05/B03 A/B 各自的稿旁意见跨刷新保留；未发送不产生服务端反馈记录", async () => {
@@ -1044,21 +1055,21 @@ describe("R2 组审阅工作台", () => {
     const harness = installStageRoutes({ works: [a, b],
       artifacts: [artifactFixture("art-a", "A 内容", "art-a-rev-2", 2), artifactFixture("art-b", "B 内容", "art-b-rev-1", 1)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "A 的意见：结尾留两秒");
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项B/ }));
-    await screen.findByText("art-b 正文 art-b-rev-1");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await switchWork("事项B");
+    await findCanvasText("art-b 正文 art-b-rev-1");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "B 的意见：换配乐");
     // 刷新（卸载重挂载，localStorage 保留）：恢复到最后在看的 B，再回 A；各自文字与准确目标仍在。
     cleanup(); renderAt("/agent/conv-w");
-    await screen.findByText("art-b 正文 art-b-rev-1");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await findCanvasText("art-b 正文 art-b-rev-1");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("B 的意见：换配乐");
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项A/ }));
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await switchWork("事项A");
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("A 的意见：结尾留两秒");
     expect(harness.calls.filter(call => call.url.endsWith("/feedback"))).toHaveLength(0);
   });
@@ -1079,21 +1090,21 @@ describe("R2 组审阅工作台", () => {
         return null;
       } });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "A 的意见");
     await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
     await screen.findByRole("alert");
     // A 失败保留；期间 B 的意见成功：只清 B。
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项B/ }));
-    await screen.findByText("art-b 正文 art-b-rev-1");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await switchWork("事项B");
+    await findCanvasText("art-b 正文 art-b-rev-1");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "B 的意见");
     await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue(""));
     // 回到 A：意见框仍开着，失败后的文字原样保留；重试沿用原命令。
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项A/ }));
-    await screen.findByText("art-a 正文 art-a-rev-2");
+    await switchWork("事项A");
+    await findCanvasText("art-a 正文 art-a-rev-2");
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("A 的意见");
     await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue(""));
@@ -1107,18 +1118,18 @@ describe("R2 组审阅工作台", () => {
     const work = workFixture({ id: "work-1", title: "城市短片", content: { draft } });
     installStageRoutes({ works: [work], artifacts: [artifactFixture("art-script", "城市内容", draft.revisionId, 2)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     await userEvent.click(screen.getByRole("button", { name: "看上一版" }));
-    await screen.findByText("art-script 正文 art-script-rev-1");
+    await findCanvasText("art-script 正文 art-script-rev-1");
     await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
-    await screen.findByText("art-script 正文 art-script-rev-2");
+    await findCanvasText("art-script 正文 art-script-rev-2");
     expect(screen.queryByRole("button", { name: "回到创作" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "看上一版" }));
-    await screen.findByText("art-script 正文 art-script-rev-1");
+    await findCanvasText("art-script 正文 art-script-rev-1");
     expect(screen.getByRole("region", { name: "创作：城市短片" })).toBeInTheDocument();
     // 刷新：回到最后真实视图（组审阅工作台 + 原修订），不重新弹出独立产物。
     cleanup(); renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 art-script-rev-1");
+    await findCanvasText("art-script 正文 art-script-rev-1");
     expect(screen.queryByRole("heading", { name: "城市内容" })).toBeNull();
     expect(screen.getByText("正在看旧版本，不能在这里确认；请回到最新稿。")).toBeInTheDocument();
   });
@@ -1267,7 +1278,7 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     await userEvent.click(screen.getByRole("button", { name: "取消针对该片段" }));
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "记录意见" })).toBeDisabled();
-    expect(screen.getByText("这是旧稿的未发送意见，可以复制后继续讨论。")).toBeInTheDocument();
+    expect(screen.getByText("旧稿意见仅供查看，可以复制后继续讨论。")).toBeInTheDocument();
   });
 
   it("视频事项草稿前进时，未发送的片段意见文字带到新稿；提交主目标为新稿、片段为原 run", async () => {
@@ -1363,13 +1374,13 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     expect(screen.getByText(/针对：片段 1/)).toBeInTheDocument();
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "开场太暗");
     // 切到 B：B 的意见框不带 A 的片段针对。
-    await userEvent.click(screen.getByRole("button", { name: /审阅图文创作/ }));
-    await screen.findByText("art-cb 正文 cb-rev-1");
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await switchWork("图文创作");
+    await findCanvasText("art-cb 正文 cb-rev-1");
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     expect(screen.queryByText(/针对：片段/)).toBeNull();
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "B 的整稿意见");
     // 回到 A：片段针对仍在，文字保留，可直接提交原片段意见。
-    await userEvent.click(screen.getByRole("button", { name: /审阅视频创作/ }));
+    await switchWork("视频创作");
     await screen.findByRole("button", { name: /开场片段/ });
     expect(screen.getByText(/针对：片段 1/)).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("开场太暗");
@@ -1397,13 +1408,13 @@ describe("E1 片段阅读身份（AUD-01）", () => {
       },
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
+    await findCanvasText("art-a 正文 art-a-rev-2");
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     // A 在途：A 的单项认可禁用。
     await waitFor(() => expect(screen.getByRole("button", { name: "认可「内容草稿」" })).toBeDisabled());
     // B 不受影响：其单项认可可用并成功提交。
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项B/ }));
-    await screen.findByText("art-b 正文 art-b-rev-1");
+    await switchWork("事项B");
+    await findCanvasText("art-b 正文 art-b-rev-1");
     expect(screen.getByRole("button", { name: "认可「内容草稿」" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "认可「内容草稿」" }));
     await waitFor(() => {
@@ -1413,11 +1424,11 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     });
     release({ status: 202, body: { requestId: "req-a", messageId: "msg-a", state: "completed", replayed: false, runId: null } });
     // A 完成：动作恢复。
-    await userEvent.click(screen.getByRole("button", { name: /审阅事项A/ }));
+    await switchWork("事项A");
     await waitFor(() => expect(screen.getByRole("button", { name: "认可「内容草稿」" })).toBeEnabled());
   });
 
-  it("D3 组指引只在有待办时出现：待认可显示、全认可隐藏、定稿隐藏、定稿后新稿再现", async () => {
+  it("D3 组指引说明认可后的继续动作，认可本身不自动推进", async () => {
     const nextIntent = "认可后我会准备画面与声音方案";
     const pending = { kind: "artifact_revision" as const, artifactId: "art-script", revisionId: "rev-1", digest: "sha256:r1" };
     const approved = { kind: "artifact_revision" as const, artifactId: "art-script", revisionId: "rev-1", digest: "sha256:r1" };
@@ -1433,13 +1444,13 @@ describe("E1 片段阅读身份（AUD-01）", () => {
       artifacts: [artifactFixture("art-script", "脚本", "rev-1", 1)],
     });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 rev-1");
+    await findCanvasText("art-script 正文 rev-1");
     expect(screen.getByText(nextIntent)).toBeInTheDocument();
-    // 全部认可（认可对象即当前稿）：指引隐藏。
+    // 全部认可后仍说明下一步；等待用户明确继续。
     harness.snapshot.works[0] = { ...base, revision: 2, reviewGroups: groupOf(pending, { approved, approvedAt: "2026-01-02T00:00:00.000Z", confirmationId: "conf-1" }) };
     FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "approved", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
-    await screen.findByText("这一组已全部认可；想调整时在对话中提出。");
-    expect(screen.queryByText(nextIntent)).toBeNull();
+    await screen.findByRole("button", { name: "继续下一步" });
+    expect(screen.getByText(nextIntent)).toBeInTheDocument();
   });
 
   it("D3 视频定稿后指引隐藏并标已定稿；新未认可稿到达后指引恢复", async () => {
@@ -1479,6 +1490,7 @@ describe("E1 片段阅读身份（AUD-01）", () => {
       return current!;
     });
     source.emit("business", { eventId: "video-v2", kind: "work.changed", entityId: "work-1", entityVersion: 2 });
+    await userEvent.click(await screen.findByRole("button", { name: "查看最新稿" }));
     await screen.findByText(nextIntent);
     expect(screen.getByText("新稿待确认")).toBeInTheDocument();
   });
@@ -1490,17 +1502,17 @@ describe("E1 片段阅读身份（AUD-01）", () => {
       content: { draft: source, approved: source, approvedAt: "2026-01-02T00:00:00.000Z", confirmationId: "conf-b" } });
     const harness = installStageRoutes({ works: [a, b], artifacts: [artifactFixture("art-script", "脚本", "rev-1", 1)] });
     renderAt("/agent/conv-w");
-    await screen.findByText("art-script 正文 rev-1");
+    await findCanvasText("art-script 正文 rev-1");
     // 双作品同名组：点 B 的继续，消息必须指向 B 的（作品, 组），不靠服务端猜。
-    await userEvent.click(screen.getByRole("button", { name: /审阅城市动画/ }));
-    await screen.findByText("这一组已全部认可；想调整时在对话中提出。");
-    await userEvent.click(screen.getByRole("button", { name: "继续" }));
+    await switchWork("城市动画");
+    await screen.findByRole("button", { name: "继续下一步" });
+    await userEvent.click(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ }));
     const continued = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
     expect(continued.reviewContext).toEqual({ workId: "work-b", groupId: "group-content", intent: "continue" });
     expect(continued.reviewConfirmation).toBeNull();
     // 认可命令走互斥的另一侧：带确认、不带 reviewContext。
-    await userEvent.click(screen.getByRole("button", { name: /审阅山路短片/ }));
-    await screen.findByText("art-script 正文 rev-1");
+    await switchWork("山路短片");
+    await findCanvasText("art-script 正文 rev-1");
     await userEvent.click(screen.getByRole("button", { name: "认可整组" }));
     const confirmed = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
     expect((confirmed.reviewConfirmation as { workId: string }).workId).toBe("work-a");
@@ -1767,8 +1779,8 @@ describe("独立验收反例", () => {
       artifacts:[artifactFixture("art-a","A 内容","art-a-rev-2",2)],
       onRequest:(url,call)=>call.method==="POST"&&url.endsWith("/feedback")?deferred:null});
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button",{name:"提意见"}));
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await userEvent.click(screen.getByRole("textbox",{name:"意见"}));
     const textbox=screen.getByRole("textbox",{name:"意见"});
     await userEvent.type(textbox,"已发送的意见");
     await userEvent.click(screen.getByRole("button",{name:"记录意见"}));
@@ -1787,13 +1799,14 @@ describe("独立验收反例", () => {
       workFixture({id:"work-b",title:"事项B",updatedAt:"2026-01-01T00:00:00.000Z",content:{draft:draftB}})],
       artifacts:[artifactFixture("art-a","A 内容","art-a-rev-2",2),artifactFixture("art-b","B 内容","art-b-rev-2",2)]});
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button",{name:/审阅事项B/}));
-    await screen.findByText("art-b 正文 art-b-rev-2");
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await switchWork("事项B");
+    await findCanvasText("art-b 正文 art-b-rev-2");
+    await userEvent.click(screen.getByRole("button",{name:"全部作品 2 件"}));
     await userEvent.click(screen.getByRole("button",{name:"审阅事项B"}));
-    await screen.findByText("art-b 正文 art-b-rev-2");
+    await findCanvasText("art-b 正文 art-b-rev-2");
     cleanup();renderAt("/agent/conv-w");
-    await screen.findByText("art-b 正文 art-b-rev-2");
+    await findCanvasText("art-b 正文 art-b-rev-2");
     expect(screen.queryByRole("button",{name:"回到创作"})).toBeNull();
     expect(screen.getByRole("region",{name:"创作：事项B"})).toBeInTheDocument();
   });
@@ -1803,17 +1816,17 @@ describe("独立验收反例", () => {
     const harness=installStageRoutes({works:[workFixture({id:"work-a",title:"事项A",content:{draft}})],
       artifacts:[artifactFixture("art-a","A 内容","art-a-rev-2",2)]});
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
-    await userEvent.click(screen.getByRole("button",{name:"提意见"}));
+    await findCanvasText("art-a 正文 art-a-rev-2");
+    await userEvent.click(screen.getByRole("textbox",{name:"意见"}));
     await userEvent.type(screen.getByRole("textbox",{name:"意见"}),"未发送的旧稿意见");
     harness.snapshot.works[0]=workFixture({id:"work-a",title:"事项A",revision:2,content:{draft:{...draft,revisionId:"art-a-rev-3",digest:"sha256:a3"}}});
     FakeEventSource.instances.find(x=>!x.closed)!.emit("business",{eventId:"new-head",kind:"work.changed",entityId:"work-a",entityVersion:2});
     await screen.findByText("正在看旧版本，不能在这里确认；请回到最新稿。");
     cleanup();renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
+    await findCanvasText("art-a 正文 art-a-rev-2");
     const box=screen.queryByRole("textbox",{name:"意见"});
     if(!box){
-      const trigger=screen.getByRole("button",{name:"提意见"});
+      const trigger=screen.getByRole("textbox",{name:"意见"});
       expect(trigger).toBeEnabled();
       await userEvent.click(trigger);
     }
@@ -1825,11 +1838,11 @@ describe("独立验收反例", () => {
     const harness=installStageRoutes({works:[workFixture({id:"work-a",title:"事项A",content:{draft}})],
       artifacts:[artifactFixture("art-a","A 内容","art-a-rev-2",2)]});
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-2");
+    await findCanvasText("art-a 正文 art-a-rev-2");
     cleanup();
     harness.snapshot.works[0]=workFixture({id:"work-a",title:"事项A",revision:2,content:{draft:{...draft,revisionId:"art-a-rev-3",digest:"sha256:a3"}}});
     renderAt("/agent/conv-w");
-    await waitFor(()=>expect(screen.queryByText("art-a 正文 art-a-rev-2")).toBeInTheDocument());
+    await waitFor(()=>expect(canvas().queryByText("art-a 正文 art-a-rev-2")).toBeInTheDocument());
   });
 });
 
@@ -1840,7 +1853,7 @@ describe("草稿成为成果", () => {
     const harness = installStageRoutes({works:[workFixture({id:"work-a",title:"城市短片",content:{draft:v1}})],
       artifacts:[artifactFixture("art-a","脚本",v1.revisionId,1)]});
     renderAt("/agent/conv-w");
-    await screen.findByText("art-a 正文 art-a-rev-1");
+    await findCanvasText("art-a 正文 art-a-rev-1");
     expect(within(screen.getByRole("region",{name:"已确认成果"})).queryByText("art-a 正文 art-a-rev-1")).toBeNull();
     harness.snapshot.works[0]=workFixture({id:"work-a",title:"城市短片",revision:2,content:{draft:v1,approved:v1,confirmationId:"conf-1"}});
     FakeEventSource.instances.find(x=>!x.closed)!.emit("business",{eventId:"approve",kind:"work.changed",entityId:"work-a",entityVersion:2});
@@ -1892,7 +1905,7 @@ it("Oracle P1-01 已认可视频的历史阅读经过总览和刷新仍可回到
   await userEvent.click(await screen.findByRole("button", { name: "审阅已确认视频初稿" }));
   await userEvent.click(await screen.findByRole("button", { name: "看上一版" }));
   await within(screen.getByRole("region", { name: "草稿与修改" })).findByText("movie 正文 movie-rev-2");
-  await userEvent.click(screen.getByRole("button", { name: "全部作品 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "全部作品 1 件" }));
   await userEvent.click(screen.getByRole("button", { name: "审阅历史审片" }));
   expect(screen.getByRole("button", { name: "查看最新稿" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "以这版「视频初稿」定稿并入库" })).toBeDisabled();
@@ -1925,7 +1938,7 @@ it("Oracle P2-02 隐藏详情不读取新增事项或提前固定版本，重新
   const harness = installStageRoutes({ works: [workFixture({ id: "hidden-a", title: "作品甲", content: {} }), workFixture({ id: "shown-b", title: "作品乙", content: {} })] });
   renderAt("/agent/conv-w");
   await screen.findByRole("heading", { name: "作品甲" });
-  await userEvent.click(screen.getByRole("button", { name: "全部作品 2" }));
+  await userEvent.click(screen.getByRole("button", { name: "全部作品 2 件" }));
   await userEvent.type(screen.getByRole("textbox", { name: "搜索作品和交付内容" }), "作品乙");
   const update = (version: number) => {
     harness.snapshot.works[0] = workFixture({ id: "hidden-a", title: "作品甲", revision: version + 1, content: { draft: {
@@ -1940,7 +1953,7 @@ it("Oracle P2-02 隐藏详情不读取新增事项或提前固定版本，重新
   expect(harness.calls.some(call => call.url.includes("/revisions/unseen-rev-"))).toBe(false);
   await userEvent.clear(screen.getByRole("textbox", { name: "搜索作品和交付内容" }));
   await userEvent.click(screen.getByRole("button", { name: "审阅作品甲" }));
-  expect(await screen.findByText("unseen 正文 unseen-rev-2")).toBeVisible();
+  expect(await findCanvasText("unseen 正文 unseen-rev-2")).toBeVisible();
   expect(harness.calls.some(call => call.url.endsWith("/revisions/unseen-rev-1"))).toBe(false);
 });
 
@@ -1954,9 +1967,9 @@ it("Oracle 隐藏审片暂停播放，保留播放位置及稿旁意见", async 
   Object.defineProperty(player, "paused", { configurable: true, get: () => !playing });
   vi.spyOn(player, "pause").mockImplementation(() => { playing = false; });
   player.currentTime = 12;
-  await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+  await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
   await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "保持这条草稿");
-  await userEvent.click(screen.getByRole("button", { name: "全部作品 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "全部作品 1 件" }));
   expect(player.paused).toBe(true); expect(player.isConnected).toBe(true);
   await userEvent.click(screen.getByRole("button", { name: "审阅暂停审片" }));
   expect(player.currentTime).toBe(12); expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("保持这条草稿");
@@ -1981,13 +1994,13 @@ it.each([true, false])("Oracle P1-03 片段意见完整恢复并沿用丢失响�
   let ui = renderAt("/agent/conv-w");
   await screen.findByRole("button", { name: /开场片段/ });
   if (textFirst) {
-    await userEvent.click(screen.getByRole("button", { name: "提意见" }));
+    await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
     await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "开场留白再长一点");
   }
   await userEvent.click(screen.getByRole("button", { name: /开场片段/ }));
   if (!textFirst) await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "开场留白再长一点");
   ui.unmount(); ui = renderAt("/agent/conv-w");
-  await userEvent.click(await screen.findByRole("button", { name: "提意见" }));
+  await userEvent.click(await screen.findByRole("textbox", { name: "意见" }));
   expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("开场留白再长一点");
   expect(screen.getByRole("button", { name: "取消针对该片段" })).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
@@ -2009,13 +2022,19 @@ it("Oracle P2-06 当前修订读取失败时单项认可和混合组定稿都不
   renderAt("/agent/conv-w");
   await screen.findAllByText("草稿读取失败。");
   const approve = screen.getByRole("button", { name: "认可「待审0」" });
+  expect(approve).toBeDisabled();
+  await userEvent.click(approve);
+  await userEvent.click(screen.getByRole("button", { name: "审阅待审1" }));
+  await screen.findByText("草稿读取失败。");
   const finalize = screen.getByRole("button", { name: "以这版「待审1」定稿并入库" });
-  expect(approve).toBeDisabled(); expect(finalize).toBeDisabled();
-  await userEvent.click(approve); await userEvent.click(finalize);
+  expect(finalize).toBeDisabled();
+  await userEvent.click(finalize);
   expect(harness.calls.some(call => call.method === "POST")).toBe(false);
   fail = false;
   for (const retry of screen.getAllByRole("button", { name: "重试读取草稿" })) await userEvent.click(retry);
-  await waitFor(() => { expect(approve).toBeEnabled(); expect(finalize).toBeEnabled(); });
+  await waitFor(() => expect(finalize).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "审阅待审0" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "认可「待审0」" })).toBeEnabled());
 });
 
 it.each(["completed", "failed", "stopped"] as const)("Oracle P1-02 历史消息窗口的继续在 %s 后解除忙态，不移动阅读窗口", async state => {
@@ -2033,11 +2052,11 @@ it.each(["completed", "failed", "stopped"] as const)("Oracle P1-02 历史消息�
     return null;
   } });
   renderAt("/agent/conv-w?anchor=anchor");
-  await userEvent.click(await screen.findByRole("button", { name: "继续" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeDisabled());
+  await userEvent.click(await screen.findByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ })).toBeDisabled());
   continuing.state = state; continuing.revision = 2; harness.snapshot.activeRequestId = null;
   FakeEventSource.instances.find(item => !item.closed)!.emit("business", { eventId: `finish-${state}`, kind: "message.changed", entityId: continuing.id, entityVersion: 2 });
-  await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: /^(继续下一步|已排队|继续处理中)$/ })).toBeEnabled());
   expect(screen.getByText("这是历史阅读位置")).toBeVisible();
   expect(screen.queryByText("窗口之后的继续请求")).toBeNull();
   expect(screen.getByRole("button", { name: "回到最新消息" })).toBeVisible();
@@ -2118,7 +2137,7 @@ it("F2 作品库显示服务端提供的冻结旁白，历史方案不替代它�
   } });
   renderAt("/agent/conv-w?page=library");
   for (const index of [1, 0]) {
-    if (index === 0) await userEvent.click(screen.getByRole("button", { name: "作品库" }));
+    if (index === 0) await userEvent.click(screen.getByRole("button", { name: "打开作品库" }));
     await userEvent.click(await screen.findByRole("button", { name: new RegExp(entries[index]!.title) }));
     await screen.findByLabelText("定稿视频");
     await userEvent.click(screen.getByText("采用的画面与声音方案"));
@@ -2180,4 +2199,57 @@ it("F2 作品库未知音频不从旧方案猜测实际旁白", async () => {
   await userEvent.click(screen.getByText("采用的画面与声音方案"));
   expect(await screen.findByText("这次制作没有可核对的逐字旁白记录。")).toBeInTheDocument();
   expect(screen.queryByText("本次制作旁白")).toBeNull();
+});
+
+it("稳定画布：双击认可只记录一次，保留播放器与意见，之后才明确继续", async () => {
+  const source: ContentSource = { kind: "artifact_revision", artifactId: "stable-video", revisionId: "stable-v3", digest: "v3" };
+  const work = workFixture({ id: "stable-work", title: "稳定审片", stage: "video", video: { draft: source } });
+  const harness = installStageRoutes({ works: [work], onRequest: (url, call) => {
+    if (url.endsWith("/revisions/stable-v3")) return { status: 200, body: { ...videoRevisionFixture("stable-video", "stable-v3", "unused-run", "stable-file"), runId: null } };
+    if (call.method === "POST" && url.endsWith("/messages") && (call.body as MessageInput).reviewConfirmation) {
+      harness.snapshot.works[0] = { ...work, revision: 2, reviewGroups: work.reviewGroups.map(group => ({ ...group, items: group.items.map(item => ({ ...item, approved: item.draft, confirmationId: "stable-approved" })) })) };
+    }
+    return null;
+  } });
+  renderAt("/agent/conv-w");
+  const video = await within(await screen.findByRole("region", { name: "草稿与修改" })).findByLabelText("视频预览") as HTMLVideoElement;
+  video.currentTime = 1.25;
+  await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "这句留着，稍后再讨论");
+  await userEvent.dblClick(screen.getByRole("button", { name: "认可「视频初稿」" }));
+  const next = await screen.findByRole("button", { name: "继续下一步" });
+  await waitFor(() => expect(next).toBeEnabled());
+  expect(canvas().getByLabelText("视频预览")).toBe(video);
+  expect(video.currentTime).toBe(1.25);
+  expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("这句留着，稍后再讨论");
+  expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(1);
+  expect(within(screen.getByRole("region", { name: "未确认" })).getByText("暂无待确认内容")).toBeVisible();
+  expect(within(screen.getByRole("region", { name: "已确认成果" })).getByRole("button", { name: "审阅已确认视频初稿" })).toBeVisible();
+  await userEvent.click(next);
+  const commands = harness.calls.filter(call => call.method === "POST").map(call => call.body as MessageInput);
+  expect(commands).toHaveLength(2);
+  expect(commands[1]!.reviewConfirmation).toBeNull();
+  expect(commands[1]!.reviewContext).toEqual({ workId: work.id, groupId: "group-video", intent: "continue" });
+  expect(commands[1]!.text).not.toContain("这句留着");
+});
+
+it("此前认可的聊天原文按准确来源打开，刷新仍保留旧版且不会认可当前新稿", async () => {
+  const current: ContentSource = { kind: "message_text", messageId: "current-source", text: "目前的第三版原文", author: "assistant" };
+  const prior: ContentSource = { kind: "message_text", messageId: "prior-source", text: "此前实际认可的原文", author: "user" };
+  const work = workFixture({ id: "history-work", title: "原文审阅", content: { draft: current, approved: current, confirmationId: "current-approved" } });
+  const harness = installStageRoutes({ works: [work], onRequest: (url, call) => call.method === "GET" && url.endsWith("/approvals") ? { status: 200, body: { items: [
+    { confirmationId: "current-approved", source: current, revisionNumber: null, action: "approve", approvedAt: "2026-11-17T00:00:00.000Z" },
+    { confirmationId: "prior-approved", source: prior, revisionNumber: null, action: "approve", approvedAt: "2026-11-16T00:00:00.000Z" },
+  ], nextCursor: null } } : null });
+  const first = renderAt("/agent/conv-w");
+  await findCanvasText(current.text);
+  await userEvent.click(screen.getByText("此前认可记录"));
+  await userEvent.click(await screen.findByRole("button", { name: /此前认可 聊天原文/ }));
+  expect(await findCanvasText(prior.text)).toBeVisible();
+  expect(canvas().queryByText(current.text)).toBeNull();
+  expect(screen.queryByRole("button", { name: "认可「内容草稿」" })).toBeNull();
+  first.unmount(); renderAt("/agent/conv-w");
+  expect(await findCanvasText(prior.text)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "查看最新稿" }));
+  expect(await findCanvasText(current.text)).toBeVisible();
+  expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
 });

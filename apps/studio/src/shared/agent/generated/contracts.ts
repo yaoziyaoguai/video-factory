@@ -1046,6 +1046,8 @@ export interface ContractPayloads {
   LibraryProjectFile: LibraryProjectFile;
   RequestProgress: RequestProgress;
   RequestProgressStep: RequestProgressStep;
+  ReviewApprovalHistoryItem: ReviewApprovalHistoryItem;
+  ReviewApprovalHistoryPage: ReviewApprovalHistoryPage;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3675,4 +3677,29 @@ export interface RequestProgressStep {
   state: "running" | "completed" | "failed";
   workId?: Id;
   updatedAt: Time;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ReviewApprovalHistoryItem".
+ */
+export interface ReviewApprovalHistoryItem {
+  confirmationId: Id;
+  source: ContentSource;
+  action: "approve" | "approve_and_continue" | "finalize_video";
+  approvedAt: Time;
+  /**
+   * 准确产物修订的版本号；消息原文为 null。历史列表不需要预读修订正文。
+   */
+  revisionNumber: number | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ReviewApprovalHistoryPage".
+ */
+export interface ReviewApprovalHistoryPage {
+  /**
+   * @maxItems 20
+   */
+  items: ReviewApprovalHistoryItem[];
+  nextCursor: Cursor | null;
 }

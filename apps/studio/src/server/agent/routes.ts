@@ -261,6 +261,12 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return service.readWork(requireOwner(request), params.workId);
   });
 
+  app.get("/works/:workId/groups/:groupId/items/:itemId/approvals", async request => {
+    const params = request.params as { workId: string; groupId: string; itemId: string };
+    const query = request.query as { cursor?: string };
+    return service.listReviewApprovalHistory(requireOwner(request), params.workId, params.groupId, params.itemId, query.cursor);
+  });
+
   app.get("/material-batches/:batchId", async request => {
     const params = request.params as { batchId: string };
     return service.readMaterialBatch(requireOwner(request), params.batchId);

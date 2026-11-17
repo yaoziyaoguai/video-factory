@@ -43,8 +43,8 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
   }, [busy, visible]);
   if (!busy) {
     const latest = messages.filter(message => message.role === "user" && message.requestId).at(-1);
-    return compact && latest && (latest.state === "failed" || latest.state === "stopped")
-      ? <section className="agent-task-progress compact" aria-label="本轮结果"><span role="status">{latest.state === "failed" ? "本轮未完成，消息已保留。" : "本轮已停止，已完成的内容保留。"}</span>{onOpenChat ? <button type="button" onClick={onOpenChat}>查看对话</button> : null}</section>
+    return latest && (latest.state === "failed" || latest.state === "stopped")
+      ? <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="本轮结果"><span role="status">{latest.state === "failed" ? "本轮未完成，消息已保留。" : "本轮已停止，已完成的内容保留。"}</span>{onOpenChat ? <button type="button" onClick={onOpenChat}>查看对话</button> : null}</section>
       : null;
   }
   const current = progress?.requestId === activeRequestId ? progress : null;
@@ -60,11 +60,12 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
     : activeRequestId ? "正在处理请求" : runs.length ? "后台制作中" : "等待开始";
   return <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="当前进展" data-motion-paused={!visible || disconnected || undefined}>
     <details className="agent-task-disclosure" key={activeRequestId ?? "production"}>
-      <summary className="agent-task-current" aria-label={label}>
+      <summary className="agent-task-current" aria-label={label} title={label}>
       {disconnected ? <WifiOff /> : !activeRequestId ? <Clock3 /> : current?.phase === "tool_failed" ? <TriangleAlert /> : <ActivityIndicator label="Agent 正在执行" />}
       <span className="agent-task-heading"><strong role="status">{label}</strong></span><ChevronDown className="agent-task-chevron" />
       </summary>
       <div className="agent-task-detail">
+        {current ? <p className="agent-task-updated">最近进展：{elapsed(current.updatedAt, now)} 前</p> : null}
     {current?.steps?.length ? <ol className="agent-task-steps" aria-label="最近执行步骤">{current.steps.map(step => {
       const owner = works.find(item => item.id === step.workId);
       return <li key={step.id} data-state={step.state}>

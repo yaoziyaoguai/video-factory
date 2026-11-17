@@ -1,6 +1,6 @@
 # Frame v1 的行为约定
 
-本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.43**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
+本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.46**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
 
 1. **会话、作品和版本分开。** 一个会话可容纳闲聊和多件作品。正式开始作品才建 work；选择素材、索要 Prompt、发布工程都不自动建作品或启动制作。`start_work` 的 title-only 调用保持原行为；用户明确开始视频并采用已有文稿时，可选 adoptContent:ContentSourceInput 引用准确已存在文本修订或消息。宿主核对归属和文本来源，以当前真实用户来源在同一事务创建 work、内容采用组/事项及该 work 的真实确认；不复制正文或创建文稿修订，不把独立稿 confirmationId 复用为 work 审批，也不自动制作。工具不能自报认可来源消息、身份或独立认可 ID。新 Work 只写有序 `reviewGroups`，每组有稳定 item 身份与准确 draft/approved。role 表示用途，媒体类型看 ArtifactHead.kind，不以标题猜类型。
 2. **认可精确到单项版本。** ReviewConfirmation / ToolConfirmReview 的旧 work 分支保持无 kind 的 workId/groupId/items/action 形状，显式列出 group、item 与 ContentSourceInput；不加整组版本锁阻止未变化单项。独立稿分支为 `kind=standalone_artifact, artifactId, revisionId, action=approve`，仅认可无 work 的独立 script；不伪造 work，不创建提案或运行。ArtifactHead 的可选只读 standaloneApproval 保存真实 confirmationId、revisionId、approvedAt；改稿后可继续指向已认可旧版，读取旧修订沿用 read_artifact。只提交本次实际认可的项，空 items 不是“继续”。认可不改其他项，也不把新 draft 自动加入确认区；调整组成员、required 或建议内容要发布用户可见的后继组版本。
@@ -26,3 +26,5 @@ PC 工作台的继续按钮发送 `ReviewContext.intent=continue`，仅用于 `m
 SSE `request.progress` 是不带业务游标的暂态真实进展：requestId、单调 sequence、phase、面向用户的 label、updatedAt，不含工具参数、工具结果或思考内容。重连仅重放仍在执行的最新进展；进程重启可能无历史步骤，前端回退到真实请求状态。`text.delta.replace=true` 开始一段新的 assistant 答复，前端应先清除上一段流式文字再追加。最终持久消息保留最后一段非空答复，空错误收尾不覆盖已生成文字。正在执行 submit 的 worker 对外显示 running；持久 submit_started 仍保留未知结果保护，崩溃恢复或真实观测不确定时才显示 unknown，不猜测重发。
 
 0.1.45 进展细节：`request.progress` 的可选 `workId` 仅在工具明确指向且核对属于当前会话时提供，原生文件工具沿已激活作品归属；`start_work` 完成后使用真实返回的作品 ID。`steps` 保留最近八次真实工具执行的当前状态，后续阶段和重连帧继续携带，终态随当前请求暂态进展一起清除。没有可证实的作品归属时省略，不从工具正文推测。
+
+0.1.46 认可历史：`GET /works/{workId}/groups/{groupId}/items/{itemId}/approvals` 只读当前身份下准确事项的真实认可记录，每页最多 20 条，按创建序列倒序。游标固定初次读取水位并绑定作品、组和事项；翻页期间的新认可不混入旧页面。记录包含准确来源、认可动作和时间，不把普通修订历史当作认可，不补写或变更当前 draft/approved。前端在同一画布打开准确旧版本；认可与继续使用两个明确动作，认可成功不自动发送意见草稿或继续制作。
