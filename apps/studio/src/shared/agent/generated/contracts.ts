@@ -1048,6 +1048,7 @@ export interface ContractPayloads {
   RequestProgressStep: RequestProgressStep;
   ReviewApprovalHistoryItem: ReviewApprovalHistoryItem;
   ReviewApprovalHistoryPage: ReviewApprovalHistoryPage;
+  RequestExecution: RequestExecution;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1542,6 +1543,10 @@ export interface Message {
    */
   librarySelections: LibrarySelection[];
   reviewContext?: ReviewContext | null;
+  /**
+   * 该条原始用户请求的执行记录；旧消息未采集时为空或省略。
+   */
+  execution?: RequestExecution | null;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1574,6 +1579,48 @@ export interface FeedbackNote {
   disposition: "noted" | "next_version";
   workId: Id | null;
   contentSource: ContentSource | null;
+}
+/**
+ * 保存在原始用户请求消息上的有界执行记录。只含真实阶段与最近八项工具动作；没有原始命令、参数、输出或模型思考。完成、失败、停止后保留。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RequestExecution".
+ */
+export interface RequestExecution {
+  startedAt: Time;
+  endedAt: Time | null;
+  progress: RequestProgress;
+}
+/**
+ * 真实回合步骤的暂态投影，不包含模型思考、工具参数或原始结果；不推进业务事件游标。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RequestProgress".
+ */
+export interface RequestProgress {
+  requestId: Id;
+  sequence: number;
+  phase: "thinking" | "tool_running" | "tool_completed" | "tool_failed";
+  label: string;
+  updatedAt: Time;
+  workId?: Id;
+  /**
+   * @maxItems 8
+   */
+  steps?: RequestProgressStep[];
+}
+/**
+ * 本回合最近真实工具步骤；执行身份只用于关联开始和结束，不包含参数或结果。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RequestProgressStep".
+ */
+export interface RequestProgressStep {
+  id: string;
+  label: string;
+  state: "running" | "completed" | "failed";
+  workId?: Id;
+  updatedAt: Time;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3646,37 +3693,6 @@ export interface LocalCreationReceipt {
       itemId: Id;
     }[]
   ];
-}
-/**
- * 真实回合步骤的暂态投影，不包含模型思考、工具参数或原始结果；不推进业务事件游标。
- *
- * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "RequestProgress".
- */
-export interface RequestProgress {
-  requestId: Id;
-  sequence: number;
-  phase: "thinking" | "tool_running" | "tool_completed" | "tool_failed";
-  label: string;
-  updatedAt: Time;
-  workId?: Id;
-  /**
-   * @maxItems 8
-   */
-  steps?: RequestProgressStep[];
-}
-/**
- * 本回合最近真实工具步骤；执行身份只用于关联开始和结束，不包含参数或结果。
- *
- * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "RequestProgressStep".
- */
-export interface RequestProgressStep {
-  id: string;
-  label: string;
-  state: "running" | "completed" | "failed";
-  workId?: Id;
-  updatedAt: Time;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema

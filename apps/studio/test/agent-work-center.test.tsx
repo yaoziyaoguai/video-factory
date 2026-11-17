@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkCenter } from "../src/client/agent/WorkCenter.js";
 import { agentApi, subscribeEvents } from "../src/client/agent/api.js";
-import { TaskProgress } from "../src/client/agent/TaskProgress.js";
+import { ExecutionRecord, TaskProgress } from "../src/client/agent/TaskProgress.js";
 import type { ArtifactRevision, ContentSource, Message, RequestProgress, Work } from "../src/shared/agent/generated/contracts.js";
 
 const time = "2026-11-16T10:00:00Z";
@@ -85,6 +85,47 @@ it("总览只为进入可见范围的卡片读取修订，失败可重试且不�
 const message: Message = { id: "message", requestId: "request", role: "user", kind: "chat", text: "继续一杯早晨", state: "running", revision: 1, target: null, feedback: null, librarySelections: [], createdAt: time, createdSequence: 1, references: { artifacts: [], proposalIds: [], runIds: [], materialBatchIds: [] } };
 const progress: RequestProgress = { requestId: "request", sequence: 3, phase: "tool_running", label: "查找素材", updatedAt: time, workId: "coffee", steps: [{ id: "read", label: "核对作品版本", state: "completed", workId: "coffee", updatedAt: time }, { id: "search", label: "查找素材", state: "running", workId: "coffee", updatedAt: time }] };
 const progressProps = () => ({ activeRequestId: "request", messages: [message], progress, runs: [], works: [work("coffee", "一杯早晨")], onStop: vi.fn(async () => true), onOpenRun: vi.fn(), onOpenWork: vi.fn() });
+
+it.each(["completed", "failed", "stopped"] as const)("%s 的真实执行记录可展开，重新挂载后仍可读且不冒充仍在执行", async state => {
+  const saved: Message = { ...message, state, execution: { startedAt: time, endedAt: "2026-11-16T10:01:01Z", progress } };
+  const ui = render(<ExecutionRecord message={saved} />);
+  const result = state === "completed" ? "已完成" : state === "stopped" ? "已停止" : "未完成";
+  await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${result}`));
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toHaveTextContent("核对作品版本已完成");
+  expect(screen.getByText("结束前未取得完成回执", { selector: "small" })).toBeVisible();
+  expect(screen.queryByText("已停止", { selector: "small" })).toBeNull();
+  expect(screen.getByText("01:01")).toBeVisible();
+  expect(screen.queryByRole("progressbar")).toBeNull();
+  ui.unmount();
+  render(<ExecutionRecord message={saved} />);
+  await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${result}`));
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toBeVisible();
+});
+
+it("历史执行步骤沿保存的作品归属显示，同名操作在刷新后仍能区分", async () => {
+  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time, progress: { ...progress,
+    steps: ["coffee", "earth", "unloaded"].map(id => ({ id, label: "编写创作文件", state: "completed", workId: id, updatedAt: time })),
+  } } };
+  const works = [work("coffee", "一杯早晨"), work("earth", "轨道之上")];
+  const ui = render(<ExecutionRecord message={saved} works={works} />);
+  await userEvent.click(screen.getByLabelText("查看本轮执行记录：已完成"));
+  const steps = within(screen.getByRole("list", { name: "本轮实际执行步骤" })).getAllByRole("listitem");
+  expect(steps[0]).toHaveTextContent("一杯早晨");
+  expect(steps[1]).toHaveTextContent("轨道之上");
+  expect(steps[2]).toHaveTextContent("关联作品未载入");
+  ui.unmount();
+  render(<ExecutionRecord message={saved} works={[...works].reverse()} />);
+  await userEvent.click(screen.getByLabelText("查看本轮执行记录：已完成"));
+  expect(within(screen.getByRole("list", { name: "本轮实际执行步骤" })).getAllByRole("listitem")[0]).toHaveTextContent("一杯早晨");
+});
+
+it("旧消息不编造执行记录，运行中刷新沿已保存的阶段恢复", () => {
+  const ui = render(<ExecutionRecord message={{ ...message, state: "completed" }} />);
+  expect(screen.queryByText("执行记录")).toBeNull();
+  ui.rerender(<TaskProgress {...progressProps()} progress={null} messages={[{ ...message, execution: { startedAt: time, endedAt: null, progress } }]} />);
+  expect(screen.getByRole("status")).toHaveTextContent("查找素材");
+  expect(screen.getByRole("list", { name: "最近执行步骤" })).toHaveTextContent("核对作品版本已完成");
+});
 
 it("执行圈有不确定进度语义、真实作品和步骤，断线与终态不会继续假装执行", async () => {
   const props = progressProps();

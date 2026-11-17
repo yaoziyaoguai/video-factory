@@ -248,7 +248,7 @@ export function WorkStagePanel({
           : <div className="agent-stage-empty">这里会显示 Frame 为这件作品交付的审阅内容。</div>}
       </section>
       <aside className="agent-review-index" aria-label="作品确认状态">
-        <section className="agent-review-index-section pending" aria-label="未确认">
+        <section className="agent-review-index-section pending" aria-label="未确认" data-empty={!pending.length && !waiting.length || undefined}>
           <header><span className="agent-lane-marker" /><h3>未确认</h3><span>{pending.length} 项</span></header>
           <div className="agent-review-index-scroll">
             {pending.map(({ group, item }) => <ReviewContentSummary key={`${group.id}:${item.id}`} item={item} group={group} source={item.draft!} approved={false} compact active={active}
@@ -258,7 +258,7 @@ export function WorkStagePanel({
             {waiting.map(({ group, item }) => <button type="button" className="agent-index-waiting" key={`${group.id}:${item.id}`} onClick={() => openItem(group, item, null)}>{item.label}<small>等待产出</small></button>)}
           </div>
         </section>
-        <section className="agent-review-index-section approved" aria-label="已确认成果">
+        <section className="agent-review-index-section approved" aria-label="已确认成果" data-empty={!confirmed.length || undefined}>
           <header><span className="agent-lane-marker"><Check /></span><h3>已确认</h3><span>{confirmed.length} 项</span></header>
           <div className="agent-review-index-scroll">
             {confirmed.map(({ group, item }) => <ReviewContentSummary key={`${group.id}:${item.id}`} item={item} group={group} source={item.approved!} approved compact active={active}

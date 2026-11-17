@@ -72,6 +72,8 @@
 .agent-root .agent-stage-secondary:hover { background:var(--frame-soft); }
 .agent-review-index { border-left:1px solid var(--frame-line); padding-left:16px; display:flex; flex-direction:column; min-height:0; min-width:0; }
 .agent-review-index-section { min-height:80px; flex:1; display:flex; flex-direction:column; }
+.agent-review-index-section[data-empty] { flex:0 0 auto; min-height:0; }
+.agent-review-index-section[data-empty] .agent-index-empty { display:none; }
 .agent-review-index-section+.agent-review-index-section { border-top:1px solid var(--frame-line); margin-top:12px; }
 .agent-review-index-section>header { display:flex; align-items:center; gap:7px; padding:6px 0 12px; flex-shrink:0; }
 .agent-review-index-section h3 { font-size:16px; font-weight:600; }
@@ -206,6 +208,17 @@
 @container (max-width:300px) { .agent-message { font-size:13px; } .agent-messages { padding-inline:12px; } }
 .agent-review-content .agent-stage-body .agent-preview-media :is(video,img) { max-height:max(80px,calc(100cqh - 56px)); object-fit:contain; }
 .agent-task-updated { color:var(--frame-muted); font-size:11px; padding-top:6px; }
+.agent-execution-record { margin:0 0 20px 28px; color:var(--frame-muted); font-size:12px; }
+.agent-execution-record>summary { display:flex; align-items:center; gap:7px; min-height:28px; cursor:pointer; list-style:none; }
+.agent-execution-record>summary::-webkit-details-marker { display:none; }
+.agent-execution-record>summary svg { width:13px; height:13px; flex-shrink:0; }
+.agent-execution-record>summary svg:last-child { margin-left:auto; }
+.agent-execution-record[open]>summary svg:last-child { transform:rotate(180deg); }
+.agent-execution-record>summary:focus-visible { outline:2px solid var(--frame-green); outline-offset:3px; border-radius:4px; }
+.agent-execution-record .agent-task-steps { margin:8px 0 0 6px; border-left:1px solid var(--frame-line); padding-left:12px; }
+.agent-execution-record .agent-task-steps small { white-space:normal; }
+.agent-execution-work { display:block; margin-top:3px; font-size:11px; overflow-wrap:anywhere; }
+.agent-execution-record>p { margin:8px 0 0; font-size:11px; }
 
 @container (max-width:300px) {
   .agent-skill-selector { max-width:calc(100% - 36px); }

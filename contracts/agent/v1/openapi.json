@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.46",
+    "version": "0.1.47",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [

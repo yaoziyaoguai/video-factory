@@ -132,6 +132,10 @@ describe("agent crash recovery (F7 receipt window)", () => {
     const notice = snapshot.body.messages.items.find((item: any) => item.role === "system_notice");
     assert.ok(notice, "中断系统通知已落库");
     assert.ok(notice.text.includes("中断"));
+    const interrupted = snapshot.body.messages.items.find((item: any) => item.role === "user" && item.requestId === sent.body.requestId);
+    assert.equal(interrupted.state, "failed");
+    assert.ok(interrupted.execution?.endedAt, "重启后执行记录保留并结束");
+    assert.equal(interrupted.execution.progress.steps.at(-1)?.state, "running", "尚未收到工具完成回执，不能补造成功");
 
     const db = openAgentDatabase(directory);
     const request = db.prepare("SELECT * FROM requests WHERE id = ?").get(sent.body.requestId) as any;

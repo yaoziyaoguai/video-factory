@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import {
@@ -22,7 +22,7 @@ import { FrameSettings, framePageTitle, type FramePage } from "./FrameSettings.j
 import { LibraryPickerDialog } from "./WorkLibrary.js";
 import { hydrateReferences } from "./references.js";
 import { WorkCenter } from "./WorkCenter.js";
-import { TaskProgress } from "./TaskProgress.js";
+import { ExecutionRecord, TaskProgress } from "./TaskProgress.js";
 import "./agent.css";
 import "./review-workspace.css";
 
@@ -1039,7 +1039,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               </div> : null}
               {view.olderCursor ? <button className="agent-load-older" type="button" onClick={() => void loadOlder()}>加载更早的消息</button> : null}
               {!sortedMessages.length ? <FrameWelcome onChoose={text => { updateDraftText(text); composerInput.current?.focus(); }} /> : null}
-              {sortedMessages.map(message => <MessageRow works={view.works} key={message.id} message={message} anchored={view.windowAnchor?.messageId === message.id} onOpenArtifact={openArtifact} artifacts={view.artifacts} proposals={view.proposals} runs={view.runs} onOpenRun={runId => void openRun(runId)} onOpenBatch={openBatch} materialBatches={view.materialBatches} onAccept={proposal => void acceptProposal(proposal)} onReply={proposal => { replyToProposal(proposal); composerInput.current?.focus(); }} accepting={accepting} revisions={revisionCache} errors={referenceErrors} onRetry={() => void retryReferences()} />)}
+              {sortedMessages.map(message => <Fragment key={message.id}><MessageRow works={view.works} message={message} anchored={view.windowAnchor?.messageId === message.id} onOpenArtifact={openArtifact} artifacts={view.artifacts} proposals={view.proposals} runs={view.runs} onOpenRun={runId => void openRun(runId)} onOpenBatch={openBatch} materialBatches={view.materialBatches} onAccept={proposal => void acceptProposal(proposal)} onReply={proposal => { replyToProposal(proposal); composerInput.current?.focus(); }} accepting={accepting} revisions={revisionCache} errors={referenceErrors} onRetry={() => void retryReferences()} /><ExecutionRecord message={message} works={view.works} /></Fragment>)}
               {visibleContextNote ? <div className="agent-context-note" role="status" data-phase={visibleContextNote.phase} data-testid="context-status">{contextNoteText}</div> : null}
               {visibleDrafts.map(visibleDraft => <div key={visibleDraft.draftId} className="agent-message assistant draft" data-testid="artifact-draft" aria-live="polite">
                 <span className="agent-assistant-avatar">f·</span>

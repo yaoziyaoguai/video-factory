@@ -227,6 +227,7 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
     ? { status: 200, body: message } : null });
   renderAt("/agent/progress");
   await screen.findByText("继续制作");
+  await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
   const source = FakeEventSource.instances.find(item => !item.closed)!;
   const snapshotsBefore = calls.filter(call => call.url.endsWith("/snapshot")).length;
   for (let index = 0; index < 6; index++) source.emit("business", { eventId: `change-${index}`, kind: "message.changed", entityId: message.id, entityVersion: index + 2 });
@@ -259,6 +260,17 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
   expect(screen.queryByText("先前说明")).toBeNull();
   source.emit("request.progress", { requestId: message.requestId, sequence: 0, phase: "thinking", label: "旧步骤", updatedAt: new Date().toISOString() });
   expect(screen.queryByText("正在旧步骤")).toBeNull();
+  message.state = "completed"; message.revision = 8; snapshot.activeRequestId = null;
+  message.execution = { startedAt: message.createdAt, endedAt: new Date().toISOString(), progress: {
+    requestId: message.requestId!, sequence: 3, phase: "thinking", label: "生成回复", updatedAt: new Date().toISOString(),
+    steps: [{ id: "read", label: "核对作品版本", state: "completed", updatedAt: new Date().toISOString() }],
+  } };
+  source.emit("business", { eventId: "request-finished", kind: "message.changed", entityId: message.id, entityVersion: 8 });
+  const record = await screen.findByLabelText("查看本轮执行记录：已完成");
+  expect(record.closest(".agent-messages")).not.toBeNull();
+  await userEvent.click(record);
+  expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toHaveTextContent("核对作品版本已完成");
+  await waitFor(() => expect(screen.queryByRole("region", { name: "当前进展" })).toBeNull());
 });
 
 const REVISION_FIXTURE: ArtifactRevision = {

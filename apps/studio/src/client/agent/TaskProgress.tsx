@@ -47,7 +47,7 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
       ? <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="本轮结果"><span role="status">{latest.state === "failed" ? "本轮未完成，消息已保留。" : "本轮已停止，已完成的内容保留。"}</span>{onOpenChat ? <button type="button" onClick={onOpenChat}>查看对话</button> : null}</section>
       : null;
   }
-  const current = progress?.requestId === activeRequestId ? progress : null;
+  const current = progress?.requestId === activeRequestId ? progress : active?.execution?.progress ?? null;
   const workId = current ? current.workId : active?.reviewContext?.workId;
   const work = works.find(item => item.id === workId);
   const scope = work ? `「${work.title}」` : "";
@@ -100,4 +100,25 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
       if (!await onStop()) setStopping(false);
     }}><Square />{stopping ? "正在停止…" : "停止本轮"}</button> : null}</div>
   </section>;
+}
+
+export function ExecutionRecord({ message, works = [] }: { message: Message; works?: Work[] }) {
+  const execution = message.execution;
+  if (message.role !== "user" || !execution || message.state === "running" || message.state === "queued") return null;
+  const result = message.state === "completed" ? "已完成" : message.state === "stopped" ? "已停止" : "未完成";
+  const steps = execution.progress.steps ?? [];
+  const duration = execution.endedAt ? elapsed(execution.startedAt, Date.parse(execution.endedAt)) : null;
+  return <details className="agent-execution-record">
+    <summary aria-label={`查看本轮执行记录：${result}`}>
+      {message.state === "completed" ? <Check /> : message.state === "stopped" ? <Square /> : <TriangleAlert />}
+      <span>执行记录</span><span>{result}</span>{duration ? <time>{duration}</time> : null}<ChevronDown />
+    </summary>
+    {steps.length ? <ol className="agent-task-steps" aria-label="本轮实际执行步骤">{steps.map(step => <li key={step.id} data-state={step.state}>
+      {step.state === "completed" ? <Check /> : step.state === "failed" ? <TriangleAlert /> : <Square />}
+      <span>{step.label}<small>{step.state === "completed" ? "已完成" : step.state === "failed" ? "未完成" : "结束前未取得完成回执"}</small>
+        {step.workId ? <span className="agent-execution-work">{works.find(work => work.id === step.workId)?.title ?? "关联作品未载入"}</span> : null}
+      </span>
+    </li>)}</ol> : <p>这轮没有执行工具操作。</p>}
+    {steps.length === 8 ? <p>保留最近 8 项实际操作。</p> : null}
+  </details>;
 }

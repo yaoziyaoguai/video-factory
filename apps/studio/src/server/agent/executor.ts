@@ -10,7 +10,7 @@ import type {
 } from "../../shared/agent/generated/contracts.js";
 import {
   claimNextRequest, emptyReferences, finalizeRequestMessages, getConversation, insertMessage,
-  markRequestTerminal, nextSeq, touchConversation, saveAssistantMessage, type RequestRow,
+  markRequestTerminal, nextSeq, touchConversation, saveAssistantMessage, recordRequestProgress, type RequestRow,
 } from "./conversation-store.js";
 import { listArtifactRows, getProposalRow, rowToProposal } from "./artifact-store.js";
 import { getWorkRow, listWorkRows, relatedWorkFeedback, workProjection } from "./creative-work.js";
@@ -243,10 +243,13 @@ export class ConversationRunner {
     this.reportProgress("thinking", label, this.currentCreativeContext()?.workId ?? undefined);
   }
   private reportProgress(phase: RequestProgress["phase"], label: string, workId?: string): void {
-    if (this.current) this.options.hub.emitProgress(this.conversationId, {
+    if (!this.current) return;
+    const progress: RequestProgress = {
       requestId: this.current.requestId, sequence: this.progressSequence++, phase, label, updatedAt: this.options.clock(),
       steps: this.progressSteps, ...(workId ? { workId } : {}),
-    });
+    };
+    recordRequestProgress(this.options.db, this.current.requestId, this.current.epoch, progress);
+    this.options.hub.emitProgress(this.conversationId, progress);
   }
   private compactionFailed = false;
   private assistantEnd: { text: string; stopReason: string; errorMessage?: string } | null = null;
@@ -415,40 +418,40 @@ export class ConversationRunner {
     this.current = { requestId: request.id, epoch, abortReason: null };
     this.assistantEnd = null; this.contextSequence = 0; this.compactionFailed = false;
     this.progressSequence = 0; this.progressSteps = []; this.replaceDelta = true;
-    this.reportProgress("thinking", "准备请求");
-    this.draftStream = new ArtifactDraftStream(request.id, draft => this.options.hub.emitDraft(this.conversationId, draft));
-    this.holder.current = {
-      actorId: request.owner_id,
-      conversationId: this.conversationId,
-      requestId: request.id,
-      executionEpoch: epoch,
-      target: request.target_json ? (JSON.parse(request.target_json) as Target) : null,
-      actionSourceMessageId: request.message_id,
-    };
-    this.pendingSteerSources.length = 0;
-
-    // §11.7 来源7：动作来源消息明确指向作品时，回合开始即补齐该作品的选材输入
-    // （覆盖“先发送选材、之后回合才明确作品”）；无明确指向的只读回退不写入任何作品。
-    // 准备失败如实告警并继续：上下文只披露实际已准备的输入，需要工作区的操作会在自身边界失败。
-    if (this.options.prepareLibraryInputs) {
-      const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
-        .get(request.message_id) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
-      const workId = message ? this.explicitWorkId(request, message, request.message_id) : null;
-      if (workId) {
-        try {
-          await this.options.prepareLibraryInputs(request.owner_id, this.conversationId, workId);
-        } catch (error) {
-          process.emitWarning(`agent turn ${request.id} 作品库输入准备失败（work ${workId}）: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
-
     let outcome: "completed" | "stopped" | "failed" = "completed";
     let assistantText = "";
     let abortReason: AbortReason = null;
     // 仅接收本应用在解析冻结配置时明确构造的错误说明；供应商未知正文仍走通用失败出口。
     let failureNotice: string | null = null;
     try {
+      this.reportProgress("thinking", "准备请求");
+      this.draftStream = new ArtifactDraftStream(request.id, draft => this.options.hub.emitDraft(this.conversationId, draft));
+      this.holder.current = {
+        actorId: request.owner_id,
+        conversationId: this.conversationId,
+        requestId: request.id,
+        executionEpoch: epoch,
+        target: request.target_json ? (JSON.parse(request.target_json) as Target) : null,
+        actionSourceMessageId: request.message_id,
+      };
+      this.pendingSteerSources.length = 0;
+
+      // §11.7 来源7：动作来源消息明确指向作品时，回合开始即补齐该作品的选材输入
+      // （覆盖“先发送选材、之后回合才明确作品”）；无明确指向的只读回退不写入任何作品。
+      // 准备失败如实告警并继续：上下文只披露实际已准备的输入，需要工作区的操作会在自身边界失败。
+      if (this.options.prepareLibraryInputs) {
+        const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
+          .get(request.message_id) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
+        const workId = message ? this.explicitWorkId(request, message, request.message_id) : null;
+        if (workId) {
+          try {
+            await this.options.prepareLibraryInputs(request.owner_id, this.conversationId, workId);
+          } catch (error) {
+            process.emitWarning(`agent turn ${request.id} 作品库输入准备失败（work ${workId}）: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+
       // 领取后按请求冻结绑定解析模型与推理档位；绑定缺失或版本不存在都如实失败，不猜默认、不暗换当前配置。
       const binding = request.model_binding_json ? JSON.parse(request.model_binding_json) as ModelBinding : null;
       if (!binding) throw new Error("请求缺少冻结的模型绑定，不能执行；请重新发送消息。");
