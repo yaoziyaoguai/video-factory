@@ -973,23 +973,27 @@ it.each([false, true])("审计 F5：末次费用事件补读失败保留重连�
   const run = { ...f.run, state: "succeeded" as const, finance: { state: "pending_reconciliation" as const, currency: "CNY" as const, reservedMinor: 0, pendingUnknownMinor: 1200, settledMinor: 0, priceKind: "bounded" as const } };
   f.snapshot.runs.items = [run];
   f.snapshot.messages.items.push(messageFixture({ id: "finished-run", role: "system_notice", text: "执行结束，费用待核", references: { artifacts: [], proposalIds: [], runIds: [run.id], materialBatchIds: [] } }));
-  let failReads = 0;
+  let failReads = false;
   let latest: Run = run;
   installWorkbenchRoutes({ conversations: [conv], snapshots: { [conv.id]: f.snapshot }, onRequest: url => {
-    if (url.endsWith(`/runs/${run.id}`)) { if (failReads > 0) { failReads--; throw new TypeError("once offline"); } return { status: 200, body: latest }; }
+    if (url.endsWith(`/runs/${run.id}`)) { if (failReads) throw new TypeError("offline until restored"); return { status: 200, body: latest }; }
     return null;
   } });
   renderAt(`/agent/${conv.id}`); await screen.findByRole("heading", { name: "费用同步" });
   await userEvent.click(screen.getByRole("button", { name: "制作记录 · 1" }));
   await screen.findByText(/供应商账单待核对/);
   await waitFor(() => expect(FakeEventSource.instances.some(s => !s.closed)).toBe(true));
-  failReads = outsideFirstPage ? 2 : 1;
+  // 自动补读与手动重连可交错；按网络状态失败，不假定谁先消耗第几次读取。
+  failReads = true;
   latest = { ...run, revision: 2, finance: { state: "settled", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 0, settledMinor: 1200, priceKind: "bounded" } };
   f.snapshot.runs.items = outsideFirstPage ? [] : [latest];
   FakeEventSource.instances.find(s => !s.closed)!.emit("business", { eventId: "last-billing", kind: "run.changed", entityId: run.id, entityVersion: 2 });
-  await userEvent.click(await screen.findByRole("button", { name: "重新连接" }));
+  const reconnect = await screen.findByRole("button", { name: "重新连接" });
+  if (!outsideFirstPage) failReads = false;
+  await userEvent.click(reconnect);
   if (outsideFirstPage) {
     await screen.findByText(/部分最新状态尚未同步/);
+    failReads = false;
     await userEvent.click(screen.getByRole("button", { name: "重新连接" }));
   }
   expect(await screen.findByText(/费用已核对/)).toBeInTheDocument();
