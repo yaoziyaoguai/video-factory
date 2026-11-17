@@ -80,7 +80,9 @@ it("执行圈有不确定进度语义、真实作品和步骤，断线与终态�
   ui.rerender(<TaskProgress {...props} disconnected />);
   expect(screen.queryByRole("progressbar")).toBeNull();
   expect(screen.getByRole("status")).toHaveTextContent("进展暂未同步");
-  expect(screen.getByRole("button", { name: "停止本轮" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "停止本轮" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "停止本轮" }));
+  expect(props.onStop).toHaveBeenCalledTimes(1);
   ui.rerender(<TaskProgress {...props} activeRequestId={null} messages={[{ ...message, state: "completed" }]} />);
   expect(screen.queryByRole("region", { name: "当前进展" })).toBeNull();
 });
