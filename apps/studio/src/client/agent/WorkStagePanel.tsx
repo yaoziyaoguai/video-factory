@@ -4,7 +4,7 @@ import { LastReviewFeedback } from "./LastReviewFeedback.js";
 import { ReviewApprovalHistory } from "./ReviewApprovalHistory.js";
 import { ReviewContentSummary } from "./ReviewContentSummary.js";
 import { agentApi } from "./api.js";
-import { sameSource, useStageRevision } from "./review-content.js";
+import { blobUrl, sameSource, useStageRevision } from "./review-content.js";
 export { sameSource, useStageRevision } from "./review-content.js";
 import { MATERIAL_PROVIDER_LABELS } from "./material-labels.js";
 import { MarkdownText } from "./markdown.js";
@@ -28,7 +28,6 @@ export interface ReviewEntry { itemId: string; source: ContentSourceInput; }
 export type AdoptPreview = (work: Work, group: ReviewGroup, item: ReviewItem, source: RevisionRef) => Promise<boolean>;
 
 const SEGMENT_STATE_LABEL = { pending: "等待中", running: "制作中", succeeded: "已生成", failed: "未完成", cancelled: "已停止" } as const;
-const blobContentUrl = (blobId: string) => `/api/agent/v1/blobs/${encodeURIComponent(blobId)}/content`;
 
 // 认可按钮的 subject 只按输入合同组装：消息原文去掉服务端派生的 author 字段。
 export function contentSubjectInput(source: ContentSource): ContentSourceInput {
@@ -551,7 +550,7 @@ function ReviewItemCard({ work, group, item, groupPicker, revisions, runs, simul
 function SegmentCard({ segment, index, selected, onSelect }: {
   segment: RunSegment; index: number; selected: boolean; onSelect: () => void;
 }) {
-  const url = segment.media ? blobContentUrl(segment.media.blobId) : null;
+  const url = segment.media ? blobUrl(segment.media.blobId) : null;
   const endMs = segment.startMs != null && segment.durationMs != null ? segment.startMs + segment.durationMs : null;
   const visual = url && segment.media?.mimeType.startsWith("video/")
     ? <video controls preload="none" src={url} aria-label={`片段 ${index + 1} 预览`}

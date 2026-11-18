@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ArtifactHead, ArtifactRevision, AudioSummary, CreativeProjectContent, FileContent, InputRef, MediaContent, OperationSpec, Proposal, RenderParameters, Run, Work } from "../../shared/agent/generated/contracts.js";
 import { AudioSummaryView, MediaSourceDetails } from "./AudioSummaryView.js";
+import { blobUrl } from "./review-content.js";
 import { MarkdownBody } from "./markdown.js";
 
 export const runEnded = (state: Run["state"]) => ["succeeded", "failed", "cancelled"].includes(state);
@@ -270,10 +271,10 @@ function MediaSources({ sources }: { sources: MediaContent["sources"] }) {
 }
 
 export function MediaPreview({ content, simulated, onTimeUpdate, initialTime }: { content: MediaContent; simulated: boolean; onTimeUpdate?: ((seconds: number) => void) | undefined; initialTime?: number | undefined }) {
-  const url = `/api/agent/v1/blobs/${encodeURIComponent(content.blobId)}/content`;
+  const url = blobUrl(content.blobId);
   const [dimensions, setDimensions] = useState<{ blobId: string; width: number; height: number } | null>(null);
   return <div className="agent-preview-media">
-    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)}
+    {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} poster={blobUrl(content.blobId, "poster")} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)}
       onLoadedMetadata={event => { if (initialTime) event.currentTarget.currentTime = Math.min(initialTime, event.currentTarget.duration); }} />
       : content.mimeType.startsWith("image/") ? <img src={url} alt="图片产出" onLoad={event => {
         const image = event.currentTarget;
@@ -291,7 +292,7 @@ export function MediaPreview({ content, simulated, onTimeUpdate, initialTime }: 
 // §11.7 来源5：作品库文件卡——文本类按原字节读回渲染（与服务端 read_artifact 同一截断上限），
 // 二进制只给事实与下载链接，不在同源页面解释或执行。
 export function FilePreview({ content }: { content: FileContent }) {
-  const url = `/api/agent/v1/blobs/${encodeURIComponent(content.blobId)}/content`;
+  const url = blobUrl(content.blobId);
   const textual = content.mimeType.startsWith("text/") || content.mimeType === "application/json";
   const [text, setText] = useState<{ value: string; truncated: boolean } | null>(null);
   const [failed, setFailed] = useState(false);

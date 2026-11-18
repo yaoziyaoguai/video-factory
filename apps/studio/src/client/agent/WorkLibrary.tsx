@@ -8,7 +8,7 @@ import { MarkdownBody, MarkdownText } from "./markdown.js";
 import { AudioSummaryView } from "./AudioSummaryView.js";
 import { RevisionBody } from "./ProductionCards.js";
 import { RevisionCover } from "./RevisionCover.js";
-import { useNearViewport, useStageRevision } from "./review-content.js";
+import { blobUrl, useNearViewport, useStageRevision } from "./review-content.js";
 
 // 作品库（§6）：只收用户定稿的最终视频，条目身份是 video.revisionId；
 // 列表只给缩略图/标题/定稿时间，详情给播放/下载、采用的文稿与方案、回到对话。
@@ -52,10 +52,6 @@ function buildLibraryPicks(entry: LibraryVideo, pickedKeys: string[]): LibraryPi
 
 function formatFinalized(iso: string): string {
   return new Date(iso).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
-function blobUrl(blobId: string): string {
-  return `/api/agent/v1/blobs/${encodeURIComponent(blobId)}/content`;
 }
 
 interface LoadState { phase: "loading" | "ready" | "failed"; items: LibraryVideo[]; nextCursor: string | null }
@@ -162,7 +158,7 @@ function LibraryDetail({ entry, bringTarget, onBringIn, onBack }: { entry: Libra
     <div className="agent-preview-body">
       {video.revision && video.revision.content.format === "media"
         ? <div className="agent-preview-media">
-          <video controls preload="metadata" src={blobUrl(video.revision.content.blobId)} aria-label="定稿视频" />
+          <video controls preload="metadata" src={blobUrl(video.revision.content.blobId)} poster={blobUrl(video.revision.content.blobId, "poster")} aria-label="定稿视频" />
           <a href={blobUrl(video.revision.content.blobId)} download>下载文件</a>
         </div>
         : video.failed ? <p className="agent-field-error" role="alert">这条定稿的视频读取失败，请刷新重试。</p>
@@ -254,7 +250,7 @@ function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
   return <details className="agent-library-material-preview" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>预览与下载</summary>
     {open ? "kind" in source ? <div className="agent-preview-media">
-      {material.kind === "video" ? <video controls preload="metadata" src={blobUrl(source.blobId)} aria-label="视频预览" />
+      {material.kind === "video" ? <video controls preload="metadata" src={blobUrl(source.blobId)} poster={blobUrl(source.blobId, "poster")} aria-label="视频预览" />
         : material.kind === "image" ? <img src={blobUrl(source.blobId)} alt={material.label} loading="lazy" />
         : material.kind === "audio" ? <audio controls preload="metadata" src={blobUrl(source.blobId)} aria-label="音频预览" /> : null}
       <a href={blobUrl(source.blobId)} download>下载文件</a>

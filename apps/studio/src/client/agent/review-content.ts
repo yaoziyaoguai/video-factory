@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { ArtifactRevision, ContentSource, RevisionRef } from "../../shared/agent/generated/contracts.js";
 import { agentApi } from "./api.js";
 
+export function blobUrl(id: string, kind: "content" | "poster" = "content") {
+  return `/api/agent/v1/blobs/${encodeURIComponent(id)}/${kind}`;
+}
+
 export function useNearViewport<T extends HTMLElement>() {
   const element = useRef<T>(null);
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");

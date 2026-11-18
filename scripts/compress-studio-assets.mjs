@@ -8,7 +8,7 @@ let originalBytes = 0, brotliBytes = 0, gzipBytes = 0;
 for (const file of files) {
   const target = path.join(root, file);
   const source = await readFile(target);
-  const brotli = brotliCompressSync(source, { params: { [constants.BROTLI_PARAM_QUALITY]: 9 } });
+  const brotli = brotliCompressSync(source, { params: { [constants.BROTLI_PARAM_QUALITY]: 11 } });
   const gzip = gzipSync(source, { level: 9 });
   // 保留原文件供不支持压缩的客户端使用；woff2和媒体已有压缩，不重复处理。
   if (brotli.length < source.length) await writeFile(`${target}.br`, brotli);

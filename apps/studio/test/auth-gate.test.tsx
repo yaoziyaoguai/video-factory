@@ -22,7 +22,7 @@ describe("AuthGate", () => {
     expect(screen.getByRole("img", { name: "暗房里投影机映出的光束" })).toHaveAttribute("src", "/media/atelier/projector.webp");
     await user.type(screen.getByLabelText("用户名"), "owner");
     await user.type(screen.getByLabelText("密码"), "correct password");
-    await user.click(screen.getByRole("button", { name: "进入 帧间 Frame" }));
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
     expect(login).toHaveBeenCalledWith("owner", "correct password");
     expect(await screen.findByText("创作台 owner")).toBeInTheDocument();

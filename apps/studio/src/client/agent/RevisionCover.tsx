@@ -1,3 +1,4 @@
+import { blobUrl } from "./review-content.js";
 import { useState } from "react";
 import { FileText, ImageOff, Music2 } from "lucide-react";
 import type { ArtifactRevision, ContentSource } from "../../shared/agent/generated/contracts.js";
@@ -21,8 +22,7 @@ export function RevisionCover({ revision, source, unavailable = false }: {
   const content = revision?.content;
   const media = content?.format === "media" ? content : null;
   const [failed, setFailed] = useState("");
-  const path = media ? `/api/agent/v1/blobs/${encodeURIComponent(media.blobId)}` : "";
-  const url = media?.mimeType.startsWith("video/") ? path + "/poster" : media?.mimeType.startsWith("image/") ? path + "/content" : "";
+  const url = media?.mimeType.startsWith("video/") ? blobUrl(media.blobId, "poster") : media?.mimeType.startsWith("image/") ? blobUrl(media.blobId) : "";
   const excerpt = revisionExcerpt(revision, source);
   return <span className="agent-revision-cover">
     {url && failed !== url ? <img src={url} alt="" loading="lazy" decoding="async" onError={() => setFailed(url)} />
