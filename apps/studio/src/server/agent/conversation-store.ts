@@ -2,7 +2,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent, type EventHub } from "./event-log.js";
 import { canonicalJson, digestOf, newAgentId } from "./util.js";
-import type { Conversation, Message, MessageReferences, RequestProgress, RequestReceipt, ReviewConfirmation, Target } from "../../shared/agent/generated/contracts.js";
+import type { Conversation, Message, MessageReferences, RequestExecution, RequestProgress, RequestReceipt, ReviewConfirmation, Target } from "../../shared/agent/generated/contracts.js";
 
 // 会话、请求队列与消息的持久操作。全部为短事务内可调用的同步函数；
 // 策略（确认短句、目标绑定、限额）在 AgentService，不在这里。
@@ -272,10 +272,11 @@ export function markRequestTerminal(
   now: string,
   request: RequestRow,
   state: "completed" | "stopped" | "failed",
+  completionReason?: RequestExecution["completionReason"],
 ): void {
   db.prepare("UPDATE requests SET state = ?, updated_at = ? WHERE id = ?").run(state, now, request.id);
-  db.prepare("UPDATE messages SET execution_json = json_set(execution_json, '$.endedAt', ?) WHERE id = ? AND execution_json IS NOT NULL")
-    .run(now, request.message_id);
+  db.prepare("UPDATE messages SET execution_json = json_patch(execution_json, ?) WHERE id = ? AND execution_json IS NOT NULL")
+    .run(canonicalJson({ endedAt: now, completionReason: completionReason ?? null }), request.message_id);
 }
 
 // 活动流不推进业务游标；同一份受控摘要随原始用户消息持久化，终态由正常消息事件发布。

@@ -137,7 +137,7 @@ const app = buildFrameApp({ logger: true, ...(auth ? { auth } : {}), maintenance
 app.addHook("onClose", runtime.close);
 const distDir = path.join(repositoryRoot, "apps/studio/dist/client");
 if (existsSync(distDir)) {
-  await app.register(fastifyStatic, { root: distDir, wildcard: false });
+  await app.register(fastifyStatic, { root: distDir, wildcard: false, preCompressed: true });
   app.setNotFoundHandler((request, reply) => {
     if (request.method !== "GET" || request.url.startsWith("/api/")) return reply.code(404).send({ error: "未找到资源。" });
     return reply.sendFile("index.html");

@@ -1,7 +1,7 @@
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent } from "./event-log.js";
-import { missingRequiredApprovals } from "./artifact-store.js";
+import { missingApprovalText, missingRequiredApprovals } from "./artifact-store.js";
 import { getMessageRow, type MessageRow } from "./conversation-store.js";
 import { canonicalJson, newAgentId } from "./util.js";
 import type { WorkFeedbackView } from "../../shared/agent/ports.js";
@@ -321,7 +321,7 @@ export function recordWorkReviewConfirmation(
           revisions: binding.inputSources.flatMap(source => source.kind === "artifact_revision" ? [source] : []),
           projects: [binding.projectRevision, ...(binding.projectRevisions ?? [])].filter(ref => ref != null),
         });
-        if (missing.length) throw new AgentError("INVALID_INPUT", `定稿前，「${missing.join("」「")}」这一版还未获得认可。`);
+        if (missing.length) throw new AgentError("INVALID_INPUT", `定稿前，「${missingApprovalText(missing).join("」「")}」这一版还未获得认可。`);
       }
     } else if (item.draft) {
       // 认可作用于事项准确当前稿：旧版本或其他来源一律拒绝，当前引用不倒退。

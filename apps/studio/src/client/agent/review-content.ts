@@ -2,6 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import type { ArtifactRevision, ContentSource, RevisionRef } from "../../shared/agent/generated/contracts.js";
 import { agentApi } from "./api.js";
 
+export function useNearViewport<T extends HTMLElement>() {
+  const element = useRef<T>(null);
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    if (visible || !element.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: "160px" });
+    observer.observe(element.current);
+    return () => observer.disconnect();
+  }, [visible]);
+  return [element, visible] as const;
+}
+
 export function sameSource(left: ContentSource | null, right: ContentSource | null): boolean {
   if (!left || !right) return false;
   if (left.kind !== right.kind) return false;

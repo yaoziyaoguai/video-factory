@@ -549,6 +549,9 @@
 .agent-library-source { border:1px solid var(--frame-line); border-radius:8px; background:#fbfcfa; margin-top:16px; }
 .agent-library-source summary { cursor:pointer; padding:11px 14px; font-size:13px; color:#4d6b53; }
 .agent-library-text { padding:2px 16px 14px; font-size:13px; max-height:340px; overflow:auto; }
+.agent-library-review-sources { list-style:none; margin:0; padding:6px 14px 12px; display:grid; gap:10px; }
+.agent-library-review-sources > li > .agent-stage-muted { font-size:11px; margin:0 0 2px; }
+.agent-library-review-sources > li > .agent-library-text { padding:2px 0 0; max-height:220px; }
 .agent-root .agent-library-back { background:var(--frame-green); color:white; padding:8px 18px; font-size:13px; }
 .agent-root .agent-library-back:hover { background:#28573f; }
 .agent-root .agent-library-back:disabled { background:#a9bfb0; cursor:default; }

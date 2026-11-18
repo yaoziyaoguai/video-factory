@@ -273,7 +273,6 @@ export function MediaPreview({ content, simulated, onTimeUpdate, initialTime }: 
   const url = `/api/agent/v1/blobs/${encodeURIComponent(content.blobId)}/content`;
   const [dimensions, setDimensions] = useState<{ blobId: string; width: number; height: number } | null>(null);
   return <div className="agent-preview-media">
-    {simulated ? <p>模拟样片，仅验证制作流程</p> : null}
     {content.mimeType.startsWith("video/") ? <video key={url} controls preload="metadata" src={url} aria-label="视频预览" onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)}
       onLoadedMetadata={event => { if (initialTime) event.currentTarget.currentTime = Math.min(initialTime, event.currentTarget.duration); }} />
       : content.mimeType.startsWith("image/") ? <img src={url} alt="图片产出" onLoad={event => {
@@ -283,6 +282,7 @@ export function MediaPreview({ content, simulated, onTimeUpdate, initialTime }: 
         onTimeUpdate={event => onTimeUpdate?.(event.currentTarget.currentTime)} onLoadedMetadata={event => { if (initialTime) event.currentTarget.currentTime = Math.min(initialTime, event.currentTarget.duration); }} />}
     {content.mimeType.startsWith("image/") && dimensions?.blobId === content.blobId && dimensions.width > 0 && dimensions.height > 0
       ? <span className="agent-stage-muted">实际尺寸 {dimensions.width}×{dimensions.height}</span> : null}
+    {simulated ? <small className="agent-stage-muted">模拟媒体连接</small> : null}
     <a href={url} download>下载文件</a>
     <MediaSources sources={content.sources} />
   </div>;

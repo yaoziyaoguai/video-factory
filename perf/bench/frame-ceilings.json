@@ -1,0 +1,100 @@
+{
+  "baseline": "compressed-r6-candidate",
+  "profile": "Fast4G 20ms/4Mbps/3Mbps, CPUx1, cache off",
+  "gates": {
+    "open::ready_p75": 544.8,
+    "open::fontReady_p75": 2390.6,
+    "open::inputReadyMs_p75": 588.5
+  },
+  "reference": {
+    "open::jsBytes": 516157,
+    "open::cssBytes": 302814,
+    "open::fontBytes": 933256,
+    "open::requests": 21
+  },
+  "note": "reference 为观察字段，不设门槛",
+  "history": [
+    {
+      "baseline": "545ccf2e099ad52a3bf34593f65b941e7f373163",
+      "date": "2026-11-17",
+      "gates": {
+        "open::ready_p75": 1755.3,
+        "open::fontReady_p75": 3623.9
+      },
+      "source": "初始基线 545ccf2 配对（perf/.local/paired-compression.json）",
+      "n": 10
+    },
+    {
+      "baseline": "compressed-545ccf2+E01",
+      "date": "2026-11-17T18:03:41.290Z",
+      "gates": {
+        "open::ready_p75": 551.6
+      },
+      "from": 1755.3,
+      "computedFromB": 551.6,
+      "source": "perf/.local/paired-rerun-1440.json",
+      "n": 10,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "compressed-545ccf2+E01",
+      "date": "2026-11-17T18:03:41.290Z",
+      "gates": {
+        "open::fontReady_p75": 2403.5
+      },
+      "from": 3623.9,
+      "computedFromB": 2403.5,
+      "source": "perf/.local/paired-rerun-1440.json",
+      "n": 10,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "compressed-545ccf2+E01",
+      "date": "2026-11-17T18:03:41.290Z",
+      "gates": {
+        "open::inputReadyMs_p75": 622.1
+      },
+      "from": null,
+      "computedFromB": 622.1,
+      "source": "perf/.local/paired-rerun-1440.json",
+      "n": 10,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "compressed-r6-candidate",
+      "date": "2026-11-17T21:09:03.603Z",
+      "gates": {
+        "open::ready_p75": 544.8
+      },
+      "from": 551.6,
+      "computedFromB": 544.8,
+      "source": "perf/.local/paired-r6-v3.json",
+      "n": 20,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "compressed-r6-candidate",
+      "date": "2026-11-17T21:09:03.603Z",
+      "gates": {
+        "open::fontReady_p75": 2390.6
+      },
+      "from": 2403.5,
+      "computedFromB": 2390.6,
+      "source": "perf/.local/paired-r6-v3.json",
+      "n": 20,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "compressed-r6-candidate",
+      "date": "2026-11-17T21:09:03.603Z",
+      "gates": {
+        "open::inputReadyMs_p75": 588.5
+      },
+      "from": 622.1,
+      "computedFromB": 588.5,
+      "source": "perf/.local/paired-r6-v3.json",
+      "n": 20,
+      "method": "min(old, pct(B raw samples, 0.75))"
+    }
+  ]
+}

@@ -181,12 +181,25 @@ export function finalOutputIsVideo(final: { kind: OperationSpec["kind"]; paramet
 // 只对本作品 required 审阅事项上的精确修订产生义务；无关草稿、未采用候选、素材与工程
 // 内部文件不产生，也不把库引用的其他作品审批义务搬给本次制作。认可事实只查
 // work_review_confirmations 真实行，不以模型另报的 reviewInputs 清单代替。
+
+// 缺失认可条目：带组/事项定位与准确版本号，供提示定位到具体依据，而不是只报事项名。
+export interface MissingApproval {
+  groupId: string; itemId: string; artifactId: string; revisionId: string; label: string;
+  groupTitle: string | null; revisionNumber: number | null;
+}
+
+// 各提示文案共用的展示串：组标题·事项·v N；无组名或修订行缺失时如实降级，不虚构。
+export function missingApprovalText(entries: readonly MissingApproval[]): string[] {
+  return entries.map(entry => [entry.groupTitle, entry.label, entry.revisionNumber !== null ? `v${entry.revisionNumber}` : null]
+    .filter((part): part is string => part !== null && part !== "").join("·"));
+}
+
 export function missingRequiredApprovals(
   db: AgentDatabase,
   scope: { ownerId: string; conversationId: string },
   workId: string,
   consumed: { revisions: { artifactId: string; revisionId: string }[]; projects: { artifactId: string; revisionId: string }[] },
-): string[] {
+): MissingApproval[] {
   const work = getWorkRow(db, scope.ownerId, workId);
   if (!work || work.conversation_id !== scope.conversationId) return [];
   const state = parseCreationState(work);
@@ -197,7 +210,7 @@ export function missingRequiredApprovals(
     const subject = JSON.parse(row.subject_json) as ContentSource;
     if (subject.kind === "artifact_revision") confirmed.add(`${row.group_id}:${row.item_id}:${subject.artifactId}:${subject.revisionId}`);
   }
-  const missing = new Map<string, string>();
+  const missing = new Map<string, MissingApproval>();
   const seenRevisions = new Set<string>();
   const seenProjects = new Set<string>();
   type ApprovedHistory = { artifactId: string; revisionId: string; groupId: string; itemId: string; ancestors: Set<string> };
@@ -207,7 +220,11 @@ export function missingRequiredApprovals(
   ];
   const owe = (groupId: string, itemId: string, artifactId: string, revisionId: string, label: string): void => {
     if (confirmed.has(`${groupId}:${itemId}:${artifactId}:${revisionId}`)) return;
-    missing.set(`${groupId}:${itemId}:${artifactId}:${revisionId}`, label);
+    missing.set(`${groupId}:${itemId}:${artifactId}:${revisionId}`, {
+      groupId, itemId, artifactId, revisionId, label,
+      groupTitle: state.groups.find(group => group.id === groupId)?.title ?? null,
+      revisionNumber: getRevisionRow(db, artifactId, revisionId)?.revision_number ?? null,
+    });
   };
   while (queue.length > 0) {
     const entry = queue.shift()!;
@@ -958,7 +975,7 @@ export function acceptanceBlockerFor(db: AgentDatabase, ownerId: string, row: Pr
       if (spec.workId !== null) {
         const missing = missingRequiredApprovals(db, { ownerId, conversationId: row.conversation_id }, spec.workId, specConsumedSources(spec));
         if (missing.length > 0) {
-          return { code: "INPUT_APPROVAL_REQUIRED", message: `正式制作采用的「${missing.join("」「")}」这一版还未获得认可，请先认可实际采用的版本。`, action: "review_inputs" };
+          return { code: "INPUT_APPROVAL_REQUIRED", message: `正式制作采用的「${missingApprovalText(missing).join("」「")}」这一版还未获得认可，请先认可实际采用的版本。`, action: "review_inputs" };
         }
       }
     }

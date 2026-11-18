@@ -378,6 +378,7 @@ test("S1-13 白名单、不合法工具后换调用、停止后无迟到草稿�
   const stopped = app.service.snapshot("local-owner", id).messages.items.find(message => message.requestId === requestId && message.role === "user")!;
   assert.equal(stopped.state, "stopped");
   assert.ok(stopped.execution?.endedAt, "停止后仍保留本轮执行记录");
+  assert.equal(stopped.execution.completionReason, undefined);
 });
 
 test("S1-05 原生 threshold 自动压缩后最后答复正确，继续闲聊与单目标改稿", async t => {

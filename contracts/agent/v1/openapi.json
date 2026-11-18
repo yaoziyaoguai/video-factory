@@ -165,7 +165,8 @@
                 "incompetech",
                 "douyin-music",
                 "tiktok-sounds",
-                "newsnow"
+                "newsnow",
+                "edge-tts"
               ]
             },
             "description": "Free service discriminator: 免费素材、平台热歌榜或 NewsNow 资讯来源。"
@@ -229,7 +230,8 @@
                 "incompetech",
                 "douyin-music",
                 "tiktok-sounds",
-                "newsnow"
+                "newsnow",
+                "edge-tts"
               ]
             },
             "description": "Free service discriminator: 免费素材、平台热歌榜或 NewsNow 资讯来源。"
@@ -2367,6 +2369,109 @@
             }
           }
         ]
+      }
+    },
+    "/blobs/{blobId}/poster": {
+      "get": {
+        "operationId": "readVideoPoster",
+        "description": "读取归属已校验的不可变视频的缩略帧。",
+        "parameters": [
+          {
+            "name": "blobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "JPEG 视频封面",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "封面未变更"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        }
+      }
+    },
+    "/works/{workId}/groups/{groupId}/items/{itemId}/latest-feedback": {
+      "get": {
+        "operationId": "latestReviewFeedback",
+        "description": "按作品和事项查找最近一次已记录的修改意见，包含历史修订。",
+        "parameters": [
+          {
+            "name": "workId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "itemId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "最近意见的原始消息，无记录时为 null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "message"
+                  ],
+                  "properties": {
+                    "message": {
+                      "oneOf": [
+                        {
+                          "$ref": "./contracts.schema.json#/$defs/Message"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          }
+        }
       }
     }
   },

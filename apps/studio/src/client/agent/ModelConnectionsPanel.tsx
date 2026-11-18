@@ -154,6 +154,21 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
 
   const capability = current ? settings?.modelStatuses.find(item => item.modelEntryId === current.model.id)?.thinking ?? null : null;
   const kindLabel = kinds.find(item => item.id === kind)!.label;
+  // A06：方向键/Home/End 在用途页签间移动并即时聚焦（roving tabindex）；鼠标点击行为不变。
+  const tabRefs = useRef<Partial<Record<ConnectionModel["kind"], HTMLButtonElement | null>>>({});
+  const onTabsKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = kinds.findIndex(item => item.id === kind);
+    const move = (delta: number) => {
+      event.preventDefault();
+      const next = kinds[(index + delta + kinds.length) % kinds.length]!;
+      switchKind(next.id);
+      tabRefs.current[next.id]?.focus();
+    };
+    if (event.key === "ArrowRight") move(1);
+    else if (event.key === "ArrowLeft") move(-1);
+    else if (event.key === "Home") { event.preventDefault(); switchKind(kinds[0]!.id); tabRefs.current[kinds[0]!.id]?.focus(); }
+    else if (event.key === "End") { event.preventDefault(); const last = kinds[kinds.length - 1]!; switchKind(last.id); tabRefs.current[last.id]?.focus(); }
+  };
   const pickChoices = pickConnection ? modelsOfKind(pickConnection) : [];
   const applyDisabled = !pickModel || Boolean(statusOf(pickModel.id)) || pickModel.id === current?.model.id;
   const actionsDisabled = busy || pending !== null;
@@ -174,11 +189,12 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
         </button>
         : null}
     </div>
-    <div className="agent-settings-tabs agent-model-tabs" role="tablist" aria-label="模型用途">
-      {kinds.map(item => <button key={item.id} type="button" role="tab" aria-selected={kind === item.id} onClick={() => switchKind(item.id)}>
+    <div className="agent-settings-tabs agent-model-tabs" role="tablist" aria-label="模型用途" onKeyDown={onTabsKeyDown}>
+      {kinds.map(item => <button key={item.id} type="button" role="tab" aria-selected={kind === item.id} id={`model-tab-${item.id}`} aria-controls="model-panel" tabIndex={kind === item.id ? 0 : -1} ref={element => { tabRefs.current[item.id] = element; }} onClick={() => switchKind(item.id)}>
         <item.icon aria-hidden="true" />{item.label}
       </button>)}
     </div>
+    <div id="model-panel" role="tabpanel" aria-labelledby={`model-tab-${kind}`}>
     {error ? <p role="alert" className="agent-field-error">{error}<button onClick={() => void load()}>重新读取</button></p> : null}
     {!settings && !error ? <p className="agent-settings-note">正在读取模型配置…</p> : null}
     {notice ? <p role="status" className="agent-settings-note">{notice}
@@ -350,6 +366,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
       </div> : null}
       <p className="agent-service-footnote">连接共用 Key。切换当前模型只影响新的请求与方案，正在制作的版本不变。</p>
     </> : null}
+    </div>
     {editing && settings ? <ConnectionEditor mode={editing.mode} connectionId={editing.connectionId} modelId={editing.modelId}
       onRemoveCurrent={current && editing.modelId === current.model.id ? () => { setEditing(null); trigger.current?.focus(); setRemoving(current.model); } : undefined}
       settings={settings} onSaved={async () => { setEditing(null); trigger.current?.focus(); setNotice("配置已保存，未发起生成调用。"); await load(); try { await onCatalogRefresh(); } catch { setError("配置已保存，但工作台状态刷新失败，请刷新页面。"); } }}

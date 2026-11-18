@@ -1,4 +1,4 @@
-import { ArrowRight, Clapperboard, LoaderCircle, LockKeyhole } from "lucide-react";
+import { ArrowRight, LoaderCircle, Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { authApi, subscribeToAuthenticationLoss, type StudioAuthSession } from "../auth-api.js";
 
@@ -29,7 +29,7 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
     return (
       <main className="auth-stage">
         <section className="auth-panel auth-error-panel">
-          <span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span>
+          <span className="auth-mark">f.</span>
           <h1>暂时无法进入创作台</h1>
           <p>{loadError}</p>
           <button className="button button-primary" type="button" onClick={() => void load()}>重新连接</button>
@@ -77,34 +77,47 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
     }
   };
 
-  return (
-    <main className="auth-stage">
-      <div className="auth-layout">
-        <section className="auth-panel" aria-labelledby="auth-title">
-          <div className="auth-brand"><span className="auth-mark"><Clapperboard aria-hidden="true" size={20} /></span><strong>帧间 Frame</strong></div>
-          <div className="auth-copy">
-            <span className="auth-eyebrow">私人影像创作工作室</span>
-            <h1 id="auth-title">回到创作现场</h1>
-            <p>你的对话、作品与创作记录都在这里。</p>
-          </div>
-          <form className="auth-form" onSubmit={(event) => void submit(event)}>
-            <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
-            <label><span>密码</span><input name="password" type="password" autoComplete="current-password" required /></label>
-            {error ? <p className="auth-error" role="alert">{error}</p> : null}
-            <button className="auth-submit" type="submit" disabled={pending}>
-              {pending ? <LoaderCircle className="auth-spinner-inline" aria-hidden="true" size={18} /> : <LockKeyhole aria-hidden="true" size={18} />}
-              <span>{pending ? "正在进入" : "进入 帧间 Frame"}</span>
-              {!pending ? <ArrowRight aria-hidden="true" size={18} /> : null}
-            </button>
-          </form>
-        </section>
-        <aside className="auth-filmboard" aria-label="影像创作主题图片">
-          <figure className="auth-frame">
-            <img src="/media/atelier/projector.webp" alt="暗房里投影机映出的光束" width={1400} height={933} />
-            <figcaption><strong>从一个想法，<br />到一部作品。</strong><p>记录灵感，打磨故事，留住值得被看见的瞬间。</p></figcaption>
-          </figure>
-        </aside>
-      </div>
-    </main>
-  );
+  return <main className="auth-stage">
+    <div className="auth-layout">
+      <LoginFilm />
+      <section className="auth-panel" aria-labelledby="auth-title">
+        <h1 id="auth-title">回到创作现场</h1>
+        <form className="auth-form" onSubmit={event => void submit(event)}>
+          <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
+          <label><span>密码</span><input name="password" type="password" autoComplete="current-password" required /></label>
+          {error ? <p className="auth-error" role="alert">{error}</p> : null}
+          <button className="auth-submit" type="submit" disabled={pending}>
+            <span>{pending ? "正在进入" : "进入工作台"}</span>
+            {pending ? <LoaderCircle className="auth-spinner-inline" aria-hidden="true" size={18} /> : <ArrowRight aria-hidden="true" size={18} />}
+          </button>
+        </form>
+      </section>
+    </div>
+  </main>;
+}
+
+function LoginFilm() {
+  const [paused, setPaused] = useState(false);
+  const [ended, setEnded] = useState(false);
+  const [take, setTake] = useState(0);
+  const [hidden, setHidden] = useState(() => document.hidden);
+  useEffect(() => {
+    const onVisibility = () => setHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+  const label = ended ? "重播片头" : paused ? "继续播放片头" : "暂停片头";
+  return <aside className="auth-filmboard" aria-label="帧间 Frame">
+    <figure className="auth-frame">
+      <img key={take} src="/media/atelier/projector.webp" alt="暗房里投影机映出的光束" width={1400} height={933}
+        style={{ animationPlayState: paused || hidden ? "paused" : "running" }} onAnimationEnd={() => setEnded(true)} />
+      <div className="auth-brand"><span aria-hidden="true">f.</span> 帧间 Frame</div>
+      <figcaption><div><strong>放映之前</strong><small>00:04 · 无声片头</small></div>
+        <button type="button" aria-label={label} title={label} onClick={() => {
+          if (ended) { setTake(n => n + 1); setEnded(false); setPaused(false); }
+          else setPaused(value => !value);
+        }}>{ended ? <RotateCcw /> : paused ? <Play /> : <Pause />}</button>
+      </figcaption>
+    </figure>
+  </aside>;
 }

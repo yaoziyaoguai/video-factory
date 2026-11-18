@@ -10722,6 +10722,39 @@
     }
   },
   {
+    "name": "finished legacy execution record without a known outcome reason",
+    "schema": "RequestExecution",
+    "valid": true,
+    "value": {
+      "startedAt": "2026-11-16T10:00:00Z",
+      "endedAt": "2026-11-16T10:00:30Z",
+      "progress": {
+        "requestId": "request-1",
+        "sequence": 1,
+        "phase": "thinking",
+        "label": "等待模型响应",
+        "updatedAt": "2026-11-16T10:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "execution record retains turn timeout after refresh",
+    "schema": "RequestExecution",
+    "valid": true,
+    "value": {
+      "startedAt": "2026-11-16T10:00:00Z",
+      "endedAt": "2026-11-16T10:00:30Z",
+      "completionReason": "timeout",
+      "progress": {
+        "requestId": "request-1",
+        "sequence": 1,
+        "phase": "thinking",
+        "label": "等待模型响应",
+        "updatedAt": "2026-11-16T10:00:00Z"
+      }
+    }
+  },
+  {
     "name": "review approval history preserves exact earlier source",
     "schema": "ReviewApprovalHistoryPage",
     "valid": true,

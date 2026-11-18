@@ -60,7 +60,8 @@ it("作品总览优先展示真实成片预览，不让较早的多份脚本挤�
   render(<WorkCenter {...props} revisions={revisions} />);
   const approved = within(screen.getByRole("region", { name: "太空短片 · 已确认" }));
   const preview = approved.getByRole("button", { name: "查看已确认视频初稿 v2" });
-  expect(preview.querySelector("video")).toHaveAttribute("src", "/api/agent/v1/blobs/film-file-v2/content#t=0.1");
+  expect(screen.getByRole("button", { name: "审阅太空短片" }).querySelector("img")).toHaveAttribute("src", "/api/agent/v1/blobs/film-file-v3/poster");
+  expect(preview.querySelector("video")).toBeNull();
   expect(approved.getAllByRole("button")[0]).toBe(preview);
   await userEvent.click(preview);
   expect(props.onOpenReview).toHaveBeenCalledWith({ workId: "film", groupId: group.id, itemId: "final-video", artifactId: "film-video", revisionId: "film-video-v2" });
@@ -89,7 +90,7 @@ const progressProps = () => ({ activeRequestId: "request", messages: [message], 
 it.each(["completed", "failed", "stopped"] as const)("%s 的真实执行记录可展开，重新挂载后仍可读且不冒充仍在执行", async state => {
   const saved: Message = { ...message, state, execution: { startedAt: time, endedAt: "2026-11-16T10:01:01Z", progress } };
   const ui = render(<ExecutionRecord message={saved} />);
-  const result = state === "completed" ? "已完成" : state === "stopped" ? "已停止" : "未完成";
+  const result = state === "completed" ? "本轮已结束" : state === "stopped" ? "已停止" : "未完成";
   await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${result}`));
   expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toHaveTextContent("核对作品版本已完成");
   expect(screen.getByText("结束前未取得完成回执", { selector: "small" })).toBeVisible();
@@ -102,8 +103,23 @@ it.each(["completed", "failed", "stopped"] as const)("%s 的真实执行记录�
   expect(screen.getByRole("list", { name: "本轮实际执行步骤" })).toBeVisible();
 });
 
+it.each([
+  ["finished", "已完成"],
+  ["timeout", "已提前结束（超过时间上限）"],
+  ["tool_limit", "已提前结束（达到工具调用上限）"],
+] as const)("终态 %s 在刷新后的零工具记录保留真实结果", async (completionReason, label) => {
+  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time,
+    completionReason, progress: { ...progress, steps: [] } } };
+  const first = render(<ExecutionRecord message={saved} />);
+  expect(screen.getByLabelText(`查看本轮执行记录：${label}`)).toBeVisible();
+  first.unmount();
+  render(<ExecutionRecord message={structuredClone(saved)} />);
+  await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${label}`));
+  expect(screen.getByText("这轮没有执行工具操作。")).toBeVisible();
+});
+
 it("历史执行步骤沿保存的作品归属显示，同名操作在刷新后仍能区分", async () => {
-  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time, progress: { ...progress,
+  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time, completionReason: "finished", progress: { ...progress,
     steps: ["coffee", "earth", "unloaded"].map(id => ({ id, label: "编写创作文件", state: "completed", workId: id, updatedAt: time })),
   } } };
   const works = [work("coffee", "一杯早晨"), work("earth", "轨道之上")];
@@ -186,7 +202,7 @@ it("总览进入审阅把焦点交给作品标题，返回搜索后仍保留已�
   }
   render(<Harness />);
   await userEvent.click(screen.getByRole("button", { name: "审阅一杯早晨" }));
-  expect(screen.getByRole("heading", { name: "一杯早晨详情" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "一杯早晨" })).toHaveFocus();
   await userEvent.type(screen.getByRole("textbox", { name: "审阅草稿" }), "保留草稿");
   await userEvent.click(screen.getByRole("button", { name: "全部作品 1 件" }));
   expect(screen.getByRole("textbox", { name: "搜索作品和交付内容" })).toHaveFocus();
@@ -223,5 +239,5 @@ it("Oracle P2-08 本批没有交付而后面有时解释计数并可直接展开
   render(<WorkCenter {...propsFor(works)} />);
   expect(screen.getByRole("heading", { name: "未确认 1 项" })).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: /再显示 1 件作品/ }));
-  expect(screen.getByText("batch-8第3版正文")).toBeVisible();
+  expect(within(screen.getByRole("region", { name: "batch-8 · 未确认" })).getByText("batch-8第3版正文")).toBeVisible();
 });

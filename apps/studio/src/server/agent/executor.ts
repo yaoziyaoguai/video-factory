@@ -20,6 +20,7 @@ import { listMaterialBatches } from "./material-store.js";
 import { StockClient } from "./stock-providers.js";
 import { contextProductionIndex } from "./production-index.js";
 import type { AgentClock } from "./util.js";
+import { NativeTurnTiming, turnDiagnostics, type TurnDiagnostic } from "./turn-diagnostics.js";
 
 // 每会话一个 runner：串行领取队列（单前台写入者），持有一个 Pi 会话。
 // steer/stop 都先在事务里验证再作用到内存状态；current 在 prompt 返回后同步清空，
@@ -103,12 +104,13 @@ export class ConversationRunner {
 
   private async loop(): Promise<void> {
     while (!this.closing) {
+      const claimedAt = this.options.clock();
       const claimed = this.options.db.transaction(() =>
-        claimNextRequest(this.options.db, this.options.clock(), this.conversationId))();
+        claimNextRequest(this.options.db, claimedAt, this.conversationId))();
       if (!claimed) return;
       // 崩溃窗口：领取已提交、检查点尚未写入。
       this.options.crashPoint?.("after-claim");
-      await this.runTurn(claimed.row, claimed.epoch);
+      await this.runTurn(claimed.row, claimed.epoch, claimedAt);
     }
   }
 
@@ -155,6 +157,16 @@ export class ConversationRunner {
     const current = this.current;
     if (!current) return;
     const { requestId } = current;
+    const toolLabel = event.type === "tool_execution_start" || event.type === "tool_execution_end"
+      ? (Object.hasOwn(TOOL_PROGRESS_LABELS, event.toolName) ? TOOL_PROGRESS_LABELS[event.toolName] : "处理创作步骤") : undefined;
+    this.nativeTiming?.observe(event, toolLabel);
+    // 最近事件仅用于告警定位；turn_end 等收尾事件无法确定失败发生在哪一层。
+    if (event.type === "turn_start" || event.type === "turn_end" || event.type === "message_start"
+      || event.type === "message_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end"
+      || event.type === "compaction_start" || event.type === "compaction_end") {
+      const role = event.type === "message_start" || event.type === "message_end" ? `:${event.message.role}` : "";
+      this.lastNativeBoundary = { type: `${event.type}${role}`, at: performance.now() };
+    }
     // steering 的真实来源只在 Pi 原生接收这条用户消息时绑定；未被接收的 steer 不冒用。
     if (event.type === "message_start" && event.message.role === "user" && this.holder.current) {
       const text = userMessageText(event.message);
@@ -185,7 +197,7 @@ export class ConversationRunner {
       if (delta.type === "toolcall_start") this.reportModelProgress("准备工具操作");
     }
     if (!current.abortReason && (event.type === "tool_execution_start" || event.type === "tool_execution_end")) {
-      const label = TOOL_PROGRESS_LABELS[event.toolName] ?? "处理创作步骤";
+      const label = toolLabel!;
       const prior = this.progressSteps.find(step => step.id === event.toolCallId);
       const candidate: unknown = event.type === "tool_execution_start"
         ? event.args?.workId ?? (["read", "write", "edit", "bash"].includes(event.toolName) ? this.currentCreativeContext()?.workId : undefined)
@@ -211,8 +223,12 @@ export class ConversationRunner {
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const text = event.message.content.filter(block => block.type === "text").map(block => block.text).join("");
+      // durationMs/timestamp 是 pi-ai 在消息体上原生携带的单次请求时长（单调钟）；缺失就不猜。
+      const timing = event.message as { durationMs?: unknown };
       this.assistantEnd = { text: text.trim() ? text : this.assistantEnd?.text ?? "",
-        stopReason: event.message.stopReason, ...(event.message.errorMessage !== undefined ? { errorMessage: event.message.errorMessage } : {}) };
+        stopReason: event.message.stopReason,
+        ...(event.message.errorMessage !== undefined ? { errorMessage: event.message.errorMessage } : {}),
+        ...(typeof timing.durationMs === "number" ? { durationMs: timing.durationMs } : {}) };
     }
     if ((event.type === "compaction_start" || event.type === "compaction_end") && event.reason !== "manual") {
       const status: ContextStatus = event.type === "compaction_start"
@@ -252,7 +268,10 @@ export class ConversationRunner {
     this.options.hub.emitProgress(this.conversationId, progress);
   }
   private compactionFailed = false;
-  private assistantEnd: { text: string; stopReason: string; errorMessage?: string } | null = null;
+  private assistantEnd: { text: string; stopReason: string; errorMessage?: string; durationMs?: number } | null = null;
+  /** 本回合最近一次原生边界事件（失败归因用；见 onSessionEvent 顶部说明）。 */
+  private lastNativeBoundary: { type: string; at: number } | null = null;
+  private nativeTiming: NativeTurnTiming | null = null;
   private readonly deltaSequences = new Map<string, number>();
   private readonly toolCallCounts = new Map<string, number>();
   /** 已持久化、尚未被 Pi 原生接收的 steering 及其真实消息ID；接收/拒绝时按文本一一摘除。 */
@@ -413,16 +432,19 @@ export class ConversationRunner {
     return `[frame-current-state]${JSON.stringify(context)}\n这是本请求的当前业务状态，历史状态记录不代表当前事实；业务工具仍以数据库校验为准，模型输出不是制作授权。`;
   }
 
-  private async runTurn(request: RequestRow, epoch: number): Promise<void> {
+  private async runTurn(request: RequestRow, epoch: number, claimedAt: string): Promise<void> {
     const conversation = getConversation(this.options.db, request.owner_id, this.conversationId)!;
     this.current = { requestId: request.id, epoch, abortReason: null };
     this.assistantEnd = null; this.contextSequence = 0; this.compactionFailed = false;
     this.progressSequence = 0; this.progressSteps = []; this.replaceDelta = true;
+    this.lastNativeBoundary = null;
+    const timing = this.nativeTiming = turnDiagnostics.hasSubscribers ? new NativeTurnTiming() : null;
     let outcome: "completed" | "stopped" | "failed" = "completed";
     let assistantText = "";
     let abortReason: AbortReason = null;
     // 仅接收本应用在解析冻结配置时明确构造的错误说明；供应商未知正文仍走通用失败出口。
     let failureNotice: string | null = null;
+    let turnElapsedMs: number | null = null;
     try {
       this.reportProgress("thinking", "准备请求");
       this.draftStream = new ArtifactDraftStream(request.id, draft => this.options.hub.emitDraft(this.conversationId, draft));
@@ -498,16 +520,26 @@ export class ConversationRunner {
                 requestId: request.id, executionEpoch: epoch, conversationId: this.conversationId,
                 sessionSeq: conversation.pi_session_id, queueSeq: request.queue_seq,
               }), this.conversationId);
-            await session.prompt(skill ? `/skill:${skill.name} ${prompt}` : prompt);
+            const promptStarted = performance.now();
+            timing?.startPrompt(promptStarted);
+            try {
+              await session.prompt(skill ? `/skill:${skill.name} ${prompt}` : prompt);
+            } finally {
+              turnElapsedMs = Math.round(performance.now() - promptStarted);
+            }
           }
           // 答案以 message_end 事件为准：压缩会重建 Pi 会话消息数组，
           // 事后切片取不到正确窗口；最后一条 assistant 消息胜出。
-          const end = this.assistantEnd as { text: string; stopReason: string } | null;
+          const end = this.assistantEnd as { text: string; stopReason: string; errorMessage?: string; durationMs?: number } | null;
           // 自身超限/停止引发的中止可能以 error stopReason 收尾，不算供应商失败；结局由下方 abortReason 归类。
           const selfAborted = this.current?.requestId === request.id && this.current.abortReason !== null;
           if (end) {
             assistantText = end.text;
-            if (!selfAborted && (end.stopReason === "error" || end.stopReason === "length")) outcome = "failed";
+            if (!selfAborted && (end.stopReason === "error" || end.stopReason === "length")) {
+              outcome = "failed";
+              // stopReason=error 可能来自模型、运行时或回调。只记录 SDK 的已知固定文本。
+              process.emitWarning(`agent turn ${request.id} 失败: ${end.stopReason === "length" ? "输出长度超限" : safeErrorText(end.errorMessage)}${turnFailureDetail(epoch, turnElapsedMs, this.lastNativeBoundary, end.durationMs)}`);
+            }
           }
         } catch (error) {
           // prompt 抛出时上面的赋值未到达，这里按当前回合状态直接判定。
@@ -515,7 +547,7 @@ export class ConversationRunner {
           const aborted = this.current?.requestId === request.id && this.current.abortReason !== null;
           if (!aborted) {
             outcome = "failed";
-            process.emitWarning(`agent turn ${request.id} 失败: ${providerFailureSummary(error, this.assistantEnd)}`);
+            process.emitWarning(`agent turn ${request.id} 失败: ${safeErrorText(error instanceof Error ? error.message : undefined)}${turnFailureDetail(epoch, turnElapsedMs, this.lastNativeBoundary, undefined, error)}`);
           }
         } finally {
           clearTimeout(timer);
@@ -538,6 +570,7 @@ export class ConversationRunner {
       this.pendingSteerSources.length = 0;
       // 同步摘除当前回合上下文：之后的 steer 不可能落进本回合，工具调用立刻失去上下文。
       if (this.current?.requestId === request.id) this.current = null;
+      this.nativeTiming = null;
       this.holder.current = null;
       this.draftStream?.close(); this.draftStream = null;
       this.deltaSequences.delete(request.id);
@@ -546,7 +579,15 @@ export class ConversationRunner {
 
       // 崩溃窗口：回合事实已产生、finalize 事务尚未执行。
       this.options.crashPoint?.("before-finalize");
-      this.finalizeTurn(request, epoch, outcome, assistantText, abortReason, failureNotice);
+      const finalizedAt = this.finalizeTurn(request, epoch, outcome, assistantText, abortReason, failureNotice);
+      if (timing && finalizedAt) {
+        turnDiagnostics.publish({
+          requestId: request.id, messageId: request.message_id, epoch, outcome, abortReason,
+          acceptedAt: request.created_at, claimedAt, finalizedAt,
+          queueMs: Date.parse(claimedAt) - Date.parse(request.created_at),
+          promptStartedAt: timing.promptStartedAt, turnElapsedMs, native: timing.native,
+        } satisfies TurnDiagnostic);
+      }
     }
   }
 
@@ -558,13 +599,16 @@ export class ConversationRunner {
     request: RequestRow, epoch: number,
     outcome: "completed" | "stopped" | "failed", assistantText: string, abortReason: AbortReason,
     failureNotice: string | null = null,
-  ): void {
+  ): string | undefined {
     const now = this.options.clock();
-    this.options.db.transaction(() => {
+    const committed = this.options.db.transaction(() => {
       const fresh = this.freshRequest(request.id);
-      if (!fresh || fresh.state !== "running" || fresh.execution_epoch !== epoch) return;
+      if (!fresh || fresh.state !== "running" || fresh.execution_epoch !== epoch) return false;
+      const completionReason = outcome === "completed"
+        ? abortReason === "timeout" || abortReason === "tool_limit" ? abortReason : "finished"
+        : undefined;
       saveAssistantMessage(this.options.db, now, request, assistantText, outcome);
-      markRequestTerminal(this.options.db, now, request, outcome);
+      markRequestTerminal(this.options.db, now, request, outcome, completionReason);
       finalizeRequestMessages(this.options.db, now, request, outcome);
       const notice = failureNotice ?? noticeFor(outcome, abortReason, this.assistantEnd?.errorMessage) ?? (this.compactionFailed ? "上下文整理未完成；本回合已完成的答复和成果保留，可以继续讨论。" : null);
       if (notice) {
@@ -576,8 +620,10 @@ export class ConversationRunner {
         });
       }
       touchConversation(this.options.db, now, this.conversationId);
+      return true;
     })();
     this.options.hub.notifyCommitted(this.conversationId);
+    return committed ? now : undefined;
   }
 
   // steer：只在会话确实流式时生效；否则返回未运行且不落任何消息。
@@ -653,15 +699,24 @@ function noticeFor(outcome: "completed" | "stopped" | "failed", abortReason: Abo
   return null;
 }
 
-// 供应商错误正文可能原样回显敏感内容（例如把 Key 拼进报错）：
-// 日志出口对供应商失败映射固定原因，不透传原始错误文本；其余异常保留原文以便定位。
-function providerFailureSummary(error: unknown, assistantEnd: { errorMessage?: string } | null): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const providerMessage = assistantEnd?.errorMessage;
-  if (providerMessage !== undefined && (message === providerMessage || message.endsWith(providerMessage))) {
-    return `模型供应商请求失败（stopReason=error）`;
+// 供应商正文和回调错误都可能回显凭据或私有内容。日志只放行 SDK 固定错误文本。
+const SAFE_ERROR_TEXTS = new Set(["Request timed out.", "Connection error.", "Request was aborted."]);
+function safeErrorText(message: string | undefined): string {
+  return message !== undefined && SAFE_ERROR_TEXTS.has(message) ? message : "本回合执行失败";
+}
+
+function turnFailureDetail(epoch: number, turnElapsedMs: number | null, lastBoundary: { type: string; at: number } | null, assistantDurationMs?: number, error?: unknown): string {
+  const parts = [`epoch=${epoch}`, `turnElapsedMs=${turnElapsedMs ?? "unknown"}`];
+  if (lastBoundary) parts.push(`lastEvent=${lastBoundary.type}`, `sinceLastEventMs=${Math.round(performance.now() - lastBoundary.at)}`);
+  if (assistantDurationMs !== undefined) parts.push(`assistantDurationMs=${assistantDurationMs}`);
+  if (error instanceof Error) {
+    parts.push(`errorName=${error.constructor.name}`);
+    if (error.cause instanceof Error) {
+      parts.push(`cause=${error.cause.constructor.name}`);
+      if (error.cause.cause instanceof Error) parts.push(`cause2=${error.cause.cause.constructor.name}`);
+    }
   }
-  return message;
+  return ` (${parts.join(" ")})`;
 }
 
 export class ConversationRunnerRegistry {

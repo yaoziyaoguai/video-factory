@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FrameSettings } from "../src/client/agent/FrameSettings.js";
@@ -395,6 +395,70 @@ describe("T3 免费服务列表与配置面板", () => {
     await userEvent.type(screen.getByLabelText("搜索服务"), "zzz不存在");
     await userEvent.click(screen.getByRole("tab", { name: /视频选题/ }));
     expect(await screen.findByRole("switch", { name: "允许 Agent 使用 国内平台榜单" })).toBeVisible();
+  });
+
+  // R4/A06：页签键盘可达——方向键/Home/End 切换并聚焦，roving tabindex 只让选中页签停靠 Tab，面板与页签互相指向。
+  it("R4 服务页签支持方向键/Home/End 与 roving tabindex，tabpanel 与选中页签互相关联", async () => {
+    installRoutes();
+    renderServicesPage();
+    await screen.findByRole("switch", { name: "允许 Agent 使用 Pexels" });
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map(tab => tab.getAttribute("tabindex"))).toEqual(["-1", "0", "-1", "-1", "-1"]);
+    expect(tabs[1]).toHaveAttribute("aria-controls", "service-panel");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "service-tab-image");
+    await userEvent.click(tabs[1]!);
+    await userEvent.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "视频素材" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "service-tab-video");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "视频素材" }));
+    await userEvent.keyboard("{Home}");
+    expect(screen.getByRole("tab", { name: "视频选题" })).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "视频选题" }));
+    await userEvent.keyboard("{ArrowLeft}"); // 第一项向左回绕到最后一项
+    expect(screen.getByRole("tab", { name: "配音" })).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "配音" }));
+    await userEvent.keyboard("{End}");
+    expect(screen.getByRole("tab", { name: "配音" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.keyboard("{ArrowRight}"); // 最后一项向右回绕到第一项
+    expect(screen.getByRole("tab", { name: "视频选题" })).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "视频选题" }));
+  });
+
+  // R4/A06/P3：Pexels 配置有未保存编辑时，Esc/点背景先确认再丢弃；关闭后草稿 Key 不残留 DOM/localStorage。
+  it("R4 Pexels 配置面板：dirty 时 Esc/背景先确认，确认丢弃才关闭；关闭后草稿 Key 不残留且焦点回触发按钮", async () => {
+    const { state } = installRoutes();
+    state.settings.pexels = { ...UNCONFIGURED_PEXELS, revision: 1, credentialConfigured: true, apiKey: "saved-key" };
+    renderServicesPage();
+    await userEvent.click(await screen.findByRole("button", { name: "配置 Pexels" }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 Pexels" });
+    const keyInput = within(dialog).getByLabelText("API Key");
+    expect(keyInput).toHaveValue("saved-key");
+    // 未编辑时 Esc 直接关闭
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "配置 Pexels" }));
+    const reopened = await screen.findByRole("dialog", { name: "配置 Pexels" });
+    // 编辑未保存：Esc 只出现确认，不直接丢弃
+    const draftInput = within(reopened).getByLabelText("API Key");
+    await userEvent.clear(draftInput);
+    await userEvent.type(draftInput, "draft-key-new");
+    await userEvent.keyboard("{Escape}");
+    expect(await within(reopened).findByText("本次编辑尚未保存，关闭会放弃这些修改。")).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "配置 Pexels" })).toBeInTheDocument();
+    // 继续编辑收回确认；再点背景同样只确认不丢
+    await userEvent.click(within(reopened).getByRole("button", { name: "继续编辑" }));
+    expect(screen.queryByText("本次编辑尚未保存，关闭会放弃这些修改。")).toBeNull();
+    fireEvent.mouseDown(reopened.parentElement!, { target: reopened.parentElement! });
+    expect(await within(reopened).findByText("本次编辑尚未保存，关闭会放弃这些修改。")).toBeVisible();
+    // 确认丢弃才关闭：焦点回触发按钮，草稿 Key 不残留 DOM 与 localStorage
+    await userEvent.click(within(reopened).getByRole("button", { name: "放弃本次编辑并关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "配置 Pexels" }));
+    expect(Array.from(document.querySelectorAll("input")).map(input => input.value)).not.toContain("draft-key-new");
+    expect(screen.getByLabelText("Pexels API Key")).toHaveValue("saved-key");
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      for (let index = 0; index < storage.length; index++) expect(storage.getItem(storage.key(index)!)).not.toContain("draft-key-new");
+    }
   });
 });
 
