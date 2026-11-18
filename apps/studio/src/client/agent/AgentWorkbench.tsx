@@ -1020,7 +1020,11 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     else { chatPanel.current?.expand(); setFocusPreview(false); }
   };
   const closeChat = () => { setChatDrawer(false); chatToggle.current?.focus(); };
-  const progressCard = (compact = false) => <TaskProgress activeRequestId={view.activeRequestId} messages={view.requestMessages} progress={requestProgress} runs={activeRuns}
+  const submission = sendingNow && sending.current.has(conversationId ?? "new")
+    ? conversationId ? "正在提交请求" : "正在创建会话"
+    : reviewBusyKeys.some(key => (selectedWorkId && key.startsWith(`${selectedWorkId}:`)) || (openArtifactHead && key === `standalone:${openArtifactHead.id}`))
+      ? "正在提交审阅操作" : null;
+  const progressCard = (compact = false) => <TaskProgress submission={submission} activeRequestId={view.activeRequestId} messages={view.requestMessages} progress={requestProgress} runs={activeRuns}
     contextStatus={contextNote} works={view.works} disconnected={streamDisconnected} compact={compact} showIdle={workMode && !!view.conversation.id} onStop={stopActive} onOpenRun={runId => void openRun(runId)} onOpenWork={selectWork}
     onOpenChat={() => { showChat(); if (view.windowAnchor) navigate(`/agent/${conversationId}`); }} />;
   const focusButton = <button type="button" className="agent-focus-toggle" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"}

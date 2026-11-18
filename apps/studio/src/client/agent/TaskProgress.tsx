@@ -16,9 +16,9 @@ export function ActivityIndicator({ label }: { label: string }) {
   </span>;
 }
 
-export function TaskProgress({ activeRequestId, messages, progress, contextStatus, runs, works = [], disconnected = false, compact = false, showIdle = false, onStop, onOpenRun, onOpenWork, onOpenChat }: {
+export function TaskProgress({ submission, activeRequestId, messages, progress, contextStatus, runs, works = [], disconnected = false, compact = false, showIdle = false, onStop, onOpenRun, onOpenWork, onOpenChat }: {
   activeRequestId: string | null; messages: Message[]; progress: RequestProgress | null; runs: Run[]; works?: Work[];
-  contextStatus?: ContextStatus | null;
+  contextStatus?: ContextStatus | null; submission?: string | null;
   disconnected?: boolean; compact?: boolean; showIdle?: boolean; onStop: () => Promise<boolean>; onOpenRun: (runId: string) => void;
   onOpenWork: (workId: string) => void;
   onOpenChat?: () => void;
@@ -42,6 +42,10 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
     return () => window.clearInterval(timer);
   }, [busy, visible]);
   if (!busy) {
+    // HTTP 受理前，只展示客户端正在做的事。真实队列或 Pi 有进展后由下面的状态接管。
+    if (submission) return <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="提交状态">
+      <ActivityIndicator label={submission} /><span role="status">{submission}</span>
+    </section>;
     if (disconnected) return <span className="agent-quiet-state" role="status"><WifiOff />进展暂未同步</span>;
     const latest = messages.filter(message => message.role === "user" && message.requestId).at(-1);
     return latest && (latest.state === "failed" || latest.state === "stopped")
