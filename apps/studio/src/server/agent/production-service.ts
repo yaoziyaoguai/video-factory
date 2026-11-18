@@ -7,7 +7,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { type EventHub, insertEvent } from "./event-log.js";
 import {
-  acceptanceBlockerFor, finalOutputIsVideo, getArtifactRow, getProposalRow, getRevisionRow, missingRequiredApprovals,
+  acceptanceBlockerFor, finalOutputIsVideo, getArtifactRow, getProposalRow, getRevisionRow, missingApprovalText, missingRequiredApprovals,
   normalizeOperationInputs, validateProductionAudio, verifyReviewInput, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import {
@@ -223,7 +223,7 @@ export class ProductionService {
           ]),
         });
         if (missing.length > 0) {
-          throw new AgentError("INVALID_INPUT", `正式渲染采用的「${missing.join("」「")}」这一版还未获得认可，请先认可实际采用的版本。`);
+          throw new AgentError("INVALID_INPUT", `正式渲染采用的「${missingApprovalText(missing).join("」「")}」这一版还未获得认可，请先认可实际采用的版本。`);
         }
       }
       // 目标解析/分配：existing 必须已存在；create 的 key 只在本次受理内分配一次并写入作品状态。

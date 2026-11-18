@@ -16,10 +16,10 @@ export function ActivityIndicator({ label }: { label: string }) {
   </span>;
 }
 
-export function TaskProgress({ activeRequestId, messages, progress, contextStatus, runs, works = [], disconnected = false, compact = false, onStop, onOpenRun, onOpenWork, onOpenChat }: {
+export function TaskProgress({ submission, activeRequestId, messages, progress, contextStatus, runs, works = [], disconnected = false, compact = false, showIdle = false, onStop, onOpenRun, onOpenWork, onOpenChat }: {
   activeRequestId: string | null; messages: Message[]; progress: RequestProgress | null; runs: Run[]; works?: Work[];
-  contextStatus?: ContextStatus | null;
-  disconnected?: boolean; compact?: boolean; onStop: () => Promise<boolean>; onOpenRun: (runId: string) => void;
+  contextStatus?: ContextStatus | null; submission?: string | null;
+  disconnected?: boolean; compact?: boolean; showIdle?: boolean; onStop: () => Promise<boolean>; onOpenRun: (runId: string) => void;
   onOpenWork: (workId: string) => void;
   onOpenChat?: () => void;
 }) {
@@ -42,13 +42,18 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
     return () => window.clearInterval(timer);
   }, [busy, visible]);
   if (!busy) {
+    // HTTP 受理前，只展示客户端正在做的事。真实队列或 Pi 有进展后由下面的状态接管。
+    if (submission) return <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="提交状态">
+      <ActivityIndicator label={submission} /><span role="status">{submission}</span>
+    </section>;
+    if (disconnected) return <span className="agent-quiet-state" role="status"><WifiOff />进展暂未同步</span>;
     const latest = messages.filter(message => message.role === "user" && message.requestId).at(-1);
     return latest && (latest.state === "failed" || latest.state === "stopped")
       ? <section className={`agent-task-progress${compact ? " compact" : ""}`} aria-label="本轮结果"><span role="status">{latest.state === "failed" ? "本轮未完成，消息已保留。" : "本轮已停止，已完成的内容保留。"}</span>{onOpenChat ? <button type="button" onClick={onOpenChat}>查看对话</button> : null}</section>
-      : null;
+      : showIdle ? <span className="agent-quiet-state" role="status"><span />当前空闲</span> : null;
   }
   const current = progress?.requestId === activeRequestId ? progress : active?.execution?.progress ?? null;
-  const workId = current ? current.workId : active?.reviewContext?.workId;
+  const workId = current?.workId ?? active?.reviewContext?.workId;
   const work = works.find(item => item.id === workId);
   const scope = work ? `「${work.title}」` : "";
   const compacting = contextStatus?.requestId === activeRequestId && contextStatus?.phase === "compacting";
@@ -102,16 +107,27 @@ export function TaskProgress({ activeRequestId, messages, progress, contextStatu
   </section>;
 }
 
+const completedResults = {
+  finished: { label: "已完成", Icon: Check },
+  timeout: { label: "已提前结束（超过时间上限）", Icon: TriangleAlert },
+  tool_limit: { label: "已提前结束（达到工具调用上限）", Icon: TriangleAlert },
+  unknown: { label: "本轮已结束", Icon: Clock3 },
+};
+
 export function ExecutionRecord({ message, works = [] }: { message: Message; works?: Work[] }) {
   const execution = message.execution;
   if (message.role !== "user" || !execution || message.state === "running" || message.state === "queued") return null;
-  const result = message.state === "completed" ? "已完成" : message.state === "stopped" ? "已停止" : "未完成";
+  const { label, Icon } = message.state === "completed" ? completedResults[execution.completionReason ?? "unknown"]
+    : message.state === "stopped" ? { label: "已停止", Icon: Square } : { label: "未完成", Icon: TriangleAlert };
   const steps = execution.progress.steps ?? [];
+  const last = steps.at(-1);
+  const owner = works.find(work => work.id === (last?.workId ?? message.reviewContext?.workId));
+  const summary = last ? [owner?.title, last.label, `${steps.length} 项操作`].filter(Boolean).join(" · ") : "执行记录";
   const duration = execution.endedAt ? elapsed(execution.startedAt, Date.parse(execution.endedAt)) : null;
   return <details className="agent-execution-record">
-    <summary aria-label={`查看本轮执行记录：${result}`}>
-      {message.state === "completed" ? <Check /> : message.state === "stopped" ? <Square /> : <TriangleAlert />}
-      <span>执行记录</span><span>{result}</span>{duration ? <time>{duration}</time> : null}<ChevronDown />
+    <summary aria-label={`查看本轮执行记录：${label}`} aria-description={summary} title={summary}>
+      <Icon />
+      <span className="agent-execution-summary">{summary}</span><span>{label}</span>{duration ? <time>{duration}</time> : null}<ChevronDown />
     </summary>
     {steps.length ? <ol className="agent-task-steps" aria-label="本轮实际执行步骤">{steps.map(step => <li key={step.id} data-state={step.state}>
       {step.state === "completed" ? <Check /> : step.state === "failed" ? <TriangleAlert /> : <Square />}

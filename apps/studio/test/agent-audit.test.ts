@@ -5,7 +5,8 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import { assembleOfflineAgent, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
-import type { MessageInput, OperationRequest, ProductionIntent } from "../src/shared/agent/generated/contracts.js";
+import type { Message, MessageInput, OperationRequest, ProductionIntent, Snapshot } from "../src/shared/agent/generated/contracts.js";
+import { validatorFor } from "../src/server/agent/validate.js";
 import { inlineSchema } from "../src/server/agent/pi-tools.js";
 
 test("Pi 原生工具入口执行 canonical 正反例，业务层不重复解析同一结构", async () => {
@@ -199,27 +200,58 @@ test("A-24 普通装配工具白名单随合同同步；Skill 读取不再有间
 });
 
 test("A-16 timeout ends the turn and the next queued request still completes", async t => {
-  const a = await fixture(t, { limits: { turnMs: 20, maxToolCalls: 32 }, fauxTokensPerSecond: 100 });
+  const a = await fixture(t, { limits: { turnMs: 100, maxToolCalls: 32 }, fauxTokensPerSecond: 100 });
   const id = create(a, "timeout");
-  a.faux!.setResponses([fauxAssistantMessage("long response that must be interrupted"), fauxAssistantMessage("")]);
-  await a.service.sendMessage("local-owner", id, input("slow"));
-  await a.service.sendMessage("local-owner", id, input("next"));
+  a.faux!.setResponses([fauxAssistantMessage("long response that must be interrupted ".repeat(10)), fauxAssistantMessage("")]);
+  const slow = await a.service.sendMessage("local-owner", id, input("slow"));
+  const next = await a.service.sendMessage("local-owner", id, input("next"));
   await done(a, id);
-  assert.match(snap(a, id).messages.items.filter(message => message.role === "system_notice").map(message => message.text).join(" "), /时间上限/);
+  const messages = snap(a, id).messages.items;
+  assert.match(messages.find(message => message.role === "system_notice" && message.requestId === slow.receipt.requestId)?.text ?? "", /时间上限/);
+  const limited = messages.find(message => message.id === slow.receipt.messageId)!;
+  const later = messages.find(message => message.id === next.receipt.messageId)!;
+  assert.equal(limited.state, "completed");
+  assert.equal(limited.execution?.completionReason, "timeout");
+  assert.ok(limited.execution?.endedAt);
+  assert.equal(later.state, "completed");
+  assert.equal(later.execution?.completionReason, "finished");
+  assert.deepEqual(later.execution?.progress.steps, []);
   assert.equal((a.database.prepare("SELECT state FROM requests WHERE conversation_id=? ORDER BY queue_seq DESC LIMIT 1").get(id) as { state: string }).state, "completed");
+
+  const reread = await a.app.inject({ method: "GET", url: `/api/agent/v1/messages/${limited.id}` });
+  assert.equal(reread.statusCode, 200);
+  assert.deepEqual(validatorFor("Message")(reread.json()), { ok: true });
+  assert.deepEqual(reread.json<Message>().execution, limited.execution);
+  const refreshed = await a.app.inject({ method: "GET", url: `/api/agent/v1/conversations/${id}/snapshot` });
+  assert.equal(refreshed.statusCode, 200);
+  assert.deepEqual(refreshed.json<Snapshot>().messages.items.find(message => message.id === limited.id)?.execution, limited.execution);
 });
 
 test("A-16 the 33rd tool cannot execute; no retry or automatic next turn", async t => {
   const a = await fixture(t), id = create(a, "tool limit");
   a.faux!.setResponses([fauxAssistantMessage(Array.from({ length: 33 }, (_, i) => fauxToolCall("list_production", { kind: "proposals" }, { id: `call-${i}` })))]);
-  await a.service.sendMessage("local-owner", id, input("many tools")); await done(a, id);
+  const { receipt } = await a.service.sendMessage("local-owner", id, input("many tools")); await done(a, id);
   const handle = await a.host.openConversationSession(id, "s1", undefined, [], await a.host.modelForBinding(a.service.bootstrap("local-owner").models[0]!.binding));
   try {
     const results = handle.session.messages.filter(message => message.role === "toolResult" && !message.isError);
     assert.equal(results.length, 32);
     assert.match(snap(a, id).messages.items.filter(message => message.role === "system_notice").map(message => message.text).join(" "), /工具调用上限/);
+    const limited = a.service.readMessage("local-owner", receipt.messageId);
+    assert.equal(limited.state, "completed");
+    assert.equal(limited.execution?.completionReason, "tool_limit");
     assert.equal((a.database.prepare("SELECT COUNT(*) AS n FROM requests WHERE conversation_id=?").get(id) as { n: number }).n, 1);
   } finally { handle.session.dispose(); }
+});
+
+test("A-16 provider failure remains failed without a completion reason", async t => {
+  const a = await fixture(t), id = create(a, "provider failure");
+  a.faux!.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "Service unavailable" })]);
+  const { receipt } = await a.service.sendMessage("local-owner", id, input("模型失败"));
+  await done(a, id);
+  const failed = a.service.readMessage("local-owner", receipt.messageId);
+  assert.equal(failed.state, "failed");
+  assert.ok(failed.execution?.endedAt);
+  assert.equal(failed.execution.completionReason, undefined);
 });
 
 test("A-25 busy/readonly SQLite has no successful receipt or event fallback", async t => {

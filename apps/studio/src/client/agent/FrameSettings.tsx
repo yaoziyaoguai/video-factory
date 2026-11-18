@@ -22,8 +22,8 @@ export function FrameSettings({ page, bootstrap, conversations, onConversation, 
 }) {
   const [skillsVisited, setSkillsVisited] = useState(page === "skills");
   useEffect(() => { if (page === "skills") setSkillsVisited(true); }, [page]);
-  return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"}><div className="agent-settings-content">
-    <header className="agent-settings-heading"><h2>{framePageTitle[page]}</h2>{page === "models" ? <button type="button" className="agent-text-link" onClick={() => onPage("chat")}>返回对话</button> : null}</header>
+  return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"} data-page={page}><div className="agent-settings-content">
+    <header className="agent-settings-heading"><h1>{framePageTitle[page]}</h1><button type="button" className="agent-text-link" onClick={() => onPage("chat")}>返回对话</button></header>
     {page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : page === "services" ? <ServicesDirectory />
       : page === "library" && onLibraryBringIn ? <WorkLibrary onBringIn={onLibraryBringIn} bringTarget={libraryBringTarget ?? "new"} /> : page === "profile" ? <ProfileEditor bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} /> : null}
     {skillsVisited || page === "skills" ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}
@@ -158,6 +158,18 @@ function ServicesDirectory() {
   const enabledCount = SERVICE_CATALOG.filter(row => inGroup(row) && loadOf(row.id).settings?.enabled).length;
   const catalog = SERVICE_GROUPS.find(item => item.id === group)!;
 
+  // A06：方向键/Home/End 在页签间移动并即时聚焦（roving tabindex——只有选中页签停靠 Tab 键）。
+  const tabRefs = useRef<Partial<Record<ServiceGroup, HTMLButtonElement | null>>>({});
+  const switchGroup = (next: ServiceGroup) => { setGroup(next); setQuery(""); tabRefs.current[next]?.focus(); };
+  const onTabsKeyDown = (event: ReactKeyboardEvent) => {
+    const index = SERVICE_GROUPS.findIndex(item => item.id === group);
+    const move = (delta: number) => { event.preventDefault(); switchGroup(SERVICE_GROUPS[(index + delta + SERVICE_GROUPS.length) % SERVICE_GROUPS.length]!.id); };
+    if (event.key === "ArrowRight") move(1);
+    else if (event.key === "ArrowLeft") move(-1);
+    else if (event.key === "Home") { event.preventDefault(); switchGroup(SERVICE_GROUPS[0]!.id); }
+    else if (event.key === "End") { event.preventDefault(); switchGroup(SERVICE_GROUPS[SERVICE_GROUPS.length - 1]!.id); }
+  };
+
   const savedDetails = (row: ServiceRow) => {
     const settings = loadOf(row.id).settings;
     if (!settings) return null;
@@ -170,9 +182,10 @@ function ServicesDirectory() {
 
   return <>
     <div className="agent-settings-toolbar agent-services-toolbar">
-      <div className="agent-settings-tabs" role="tablist" aria-label="服务类型">{SERVICE_GROUPS.map(item => <button type="button" role="tab" aria-selected={group === item.id} key={item.id} onClick={() => { setGroup(item.id); setQuery(""); }}><item.icon aria-hidden="true" />{item.label}</button>)}</div>
+      <div className="agent-settings-tabs" role="tablist" aria-label="服务类型" onKeyDown={onTabsKeyDown}>{SERVICE_GROUPS.map(item => <button type="button" role="tab" aria-selected={group === item.id} key={item.id} id={`service-tab-${item.id}`} aria-controls="service-panel" tabIndex={group === item.id ? 0 : -1} ref={element => { tabRefs.current[item.id] = element; }} onClick={() => { setGroup(item.id); setQuery(""); }}><item.icon aria-hidden="true" />{item.label}</button>)}</div>
       <label className="agent-settings-search"><Search aria-hidden="true" /><input aria-label="搜索服务" placeholder="搜索名称或用途" value={query} onChange={event => setQuery(event.target.value)} /></label>
     </div>
+    <div id="service-panel" role="tabpanel" aria-labelledby={`service-tab-${group}`}>
     <p className="agent-category-context">{catalog.purpose}<span>{enabledCount} 个来源已选用</span></p>
     {notice ? <p className="agent-field-error" role="alert">{notice}</p> : null}
     {togglePending ? <div className="agent-inline-actions"><button type="button" disabled={toggleSaving} onClick={() => void toggle(togglePending.row, togglePending)}>重试保存</button><button type="button" disabled={toggleSaving} onClick={async () => {
@@ -198,6 +211,7 @@ function ServicesDirectory() {
     </div>
     {!rows.length ? <div className="agent-settings-empty"><Search aria-hidden="true" /><h3>没有匹配的服务</h3><button type="button" onClick={() => setQuery("")}>清除搜索</button></div> : null}
     <p className="agent-service-footnote">{group === "trend" ? <>海外选题参考：<a href={TIKTOK_CREATIVE_CENTER} target="_blank" rel="noreferrer">TikTok 热门标签与视频 ↗</a>{" · "}<a href={GOOGLE_TRENDS} target="_blank" rel="noreferrer">Google 地区搜索热度 ↗</a></> : catalog.footnote}</p>
+    </div>
     {configTarget?.kind === "newsnow" ? <NewsNowConfigDialog onClose={closeConfig} onSaved={settings => setLoads(prev => ({ ...prev, newsnow: { phase: "ready", settings } }))} /> : null}
     {configTarget?.kind === "edgetts" ? <EdgeTtsConfigDialog onClose={closeConfig} onSaved={settings => setLoads(prev => ({ ...prev, "edge-tts": { phase: "ready", settings } }))} /> : null}
     {configTarget?.kind === "keyed" ? <KeyedServiceConfigDialog row={configTarget} onClose={closeConfig} onSaved={() => void loadService(configTarget.id)} /> : null}
@@ -215,6 +229,8 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState<SavePexelsSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  // A06/P3：有未保存编辑时关闭先确认，避免 Esc/点背景无声丢弃；saving/结果未知维持既有语义直接关闭。
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [conflictReadFailed, setConflictReadFailed] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
@@ -238,8 +254,13 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
   useEffect(() => { if (phase === "editing") keyInput.current?.focus(); }, [phase]);
 
   const close = () => { active.current = false; setApiKey(""); setPending(null); onClose(); };
+  const dirty = phase === "editing" && settings !== null && (enabled !== settings.enabled || apiKey !== (settings.apiKey ?? ""));
+  const requestClose = () => {
+    if (!saving && !pending && dirty) { setConfirmDiscard(true); setNotice(""); return; }
+    close();
+  };
   const onKeyDown = (event: ReactKeyboardEvent) => {
-    if (event.key === "Escape") { event.preventDefault(); close(); return; }
+    if (event.key === "Escape") { event.preventDefault(); if (confirmDiscard) setConfirmDiscard(false); else requestClose(); return; }
     if (event.key !== "Tab") return;
     const focusables = dialog.current?.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled])');
     if (!focusables?.length) return;
@@ -248,7 +269,7 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
 
-  const editKey = (value: string) => { setApiKey(value); setPending(null); setNotice(""); setKeyError(""); };
+  const editKey = (value: string) => { setApiKey(value); setPending(null); setNotice(""); setKeyError(""); setConfirmDiscard(false); };
   const readConflict = async () => {
     setConflict(true);
     try {
@@ -282,16 +303,16 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
     } finally { setSaving(false); }
   };
 
-  return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
+  return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose(); }}>
     <div className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-labelledby={`${row.id}-config-title`} ref={dialog} onKeyDown={onKeyDown}>
       <header className="agent-modal-header">
         <div><h3 id={`${row.id}-config-title`}>配置 {row.name}</h3><p>Key 保存在本机，可在此查看与编辑 · 保存不发起调用</p></div>
-        <button type="button" className="agent-icon-button" aria-label="关闭配置" onClick={close}><X aria-hidden="true" /></button>
+        <button type="button" className="agent-icon-button" aria-label="关闭配置" onClick={requestClose}><X aria-hidden="true" /></button>
       </header>
       {phase === "loading" ? <p className="agent-config-note">正在读取配置…</p> : phase === "loadFailed" ? <div className="agent-config-note">
         <p>配置读取失败，无法编辑。</p><button type="button" onClick={() => void load()}>重试读取</button>
       </div> : <form onSubmit={event => { event.preventDefault(); void submit(pending); }}>
-        <label className="agent-config-check"><input disabled={saving} type="checkbox" checked={enabled} onChange={event => { setEnabled(event.target.checked); setPending(null); setNotice(""); }} /><span>允许 Agent 使用这个来源</span></label>
+        <label className="agent-config-check"><input disabled={saving} type="checkbox" checked={enabled} onChange={event => { setEnabled(event.target.checked); setPending(null); setNotice(""); setConfirmDiscard(false); }} /><span>允许 Agent 使用这个来源</span></label>
         <div className="agent-config-field">
           <label htmlFor={`${row.id}-config-key`}>{row.access}</label>
           <input disabled={saving} id={`${row.id}-config-key`} type="text" value={apiKey} onChange={event => editKey(event.target.value)} autoComplete="off" spellCheck={false} ref={keyInput}
@@ -306,8 +327,12 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
         {notice ? <p className="agent-field-error" role="alert">{notice}</p> : null}
         {conflict && !conflictReadFailed ? <aside className="agent-config-note" aria-label={`当前已保存 ${row.name} 配置`}><strong>当前已保存</strong><p>{settings?.enabled ? "已选用" : "已停用"} · {settings?.credentialConfigured ? "Key 已保存" : "未配置 Key"}</p></aside> : null}
         {conflictReadFailed ? <button type="button" onClick={() => void readConflict()}>重试读取最新配置</button> : null}
+        {confirmDiscard ? <p role="status" className="agent-config-note">本次编辑尚未保存，关闭会放弃这些修改。
+          <button type="button" disabled={saving} onClick={() => { setConfirmDiscard(false); close(); }}>放弃本次编辑并关闭</button>
+          <button type="button" disabled={saving} onClick={() => setConfirmDiscard(false)}>继续编辑</button>
+        </p> : null}
         <footer className="agent-modal-actions">
-          <button type="button" className="agent-secondary-button" onClick={close}>取消</button>
+          <button type="button" className="agent-secondary-button" onClick={requestClose}>取消</button>
           <button type="submit" className="agent-primary-button" disabled={saving || conflictReadFailed}>{pending ? "重试保存" : saving ? "保存中…" : "保存"}</button>
         </footer>
       </form>}

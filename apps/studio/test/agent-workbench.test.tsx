@@ -207,6 +207,7 @@ it("Oracle P2-01 SSE 仍连接时局部补读失败不禁用停止", async () =>
   } });
   renderAt(`/agent/${conversation.id}`);
   await screen.findByRole("button", { name: "停止本轮" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
   const stream = FakeEventSource.instances.find(source => !source.closed)!;
   fail = true;
   stream.emit("business", { eventId: "partial-read", kind: "message.changed", entityId: request.id, entityVersion: 1 });
@@ -261,7 +262,7 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
   source.emit("request.progress", { requestId: message.requestId, sequence: 0, phase: "thinking", label: "旧步骤", updatedAt: new Date().toISOString() });
   expect(screen.queryByText("正在旧步骤")).toBeNull();
   message.state = "completed"; message.revision = 8; snapshot.activeRequestId = null;
-  message.execution = { startedAt: message.createdAt, endedAt: new Date().toISOString(), progress: {
+  message.execution = { startedAt: message.createdAt, endedAt: new Date().toISOString(), completionReason: "finished", progress: {
     requestId: message.requestId!, sequence: 3, phase: "thinking", label: "生成回复", updatedAt: new Date().toISOString(),
     steps: [{ id: "read", label: "核对作品版本", state: "completed", updatedAt: new Date().toISOString() }],
   } };
@@ -739,6 +740,473 @@ it("A-34 A 的迟到快照与旧流不会覆盖 B 的预览和输入", async () 
   expect(FakeEventSource.instances.filter(source => !source.closed)).toHaveLength(1);
 });
 
+// —— R3 后台补读最小复现矩阵（execution-pack R3 表六行）——
+// 观测面：GET /conversations/{id}/snapshot 的调用计数（每 2s interval 一次）；
+// 迟到覆盖/单 SSE/断网恢复由既有 A-34(:669/:724)、A-33/35(:1015)、PC(:156) 用例承载。
+
+const snapshotGetCount = (calls: FetchCall[], id: string) =>
+  calls.filter(call => call.method === "GET" && call.url.endsWith(`/conversations/${id}/snapshot`)).length;
+
+it("R3-1 静止会话（无 active/queued、run 终态且账务结清）离开后不持续轮询", async () => {
+  const a = conversationFixture("quiet", "已收尾"), b = conversationFixture("busy-b", "进行中");
+  const f = productionFixture(a);
+  f.snapshot.activeRequestId = null;
+  f.snapshot.runs.items = [{ ...f.run, state: "succeeded", revision: 2, finance: { state: "settled", currency: "CNY", reservedMinor: 0, pendingUnknownMinor: 0, settledMinor: 1200, priceKind: "bounded" } }];
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { quiet: f.snapshot, "busy-b": snapshotFixture(b) } });
+  renderAt("/agent/quiet");
+  await screen.findByRole("heading", { name: "已收尾" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  await userEvent.click(screen.getByRole("button", { name: "进行中" }));
+  await screen.findByRole("heading", { name: "进行中" });
+  const initial = snapshotGetCount(calls, "quiet");
+  expect(initial).toBeGreaterThanOrEqual(1);
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(snapshotGetCount(calls, "quiet")).toBe(initial);
+}, 15_000);
+
+it("R3-2 真正在途的会话有界跟踪，事实完成后停止", async () => {
+  const a = conversationFixture("live", "在途会话"), b = conversationFixture("watch-b", "旁观会话");
+  let finished = false;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { "watch-b": snapshotFixture(b) }, onRequest: url => {
+    if (url.endsWith("/live/snapshot")) return { status: 200, body: { ...snapshotFixture(a), activeRequestId: finished ? null : "req-live" } };
+    return null;
+  } });
+  renderAt("/agent/live");
+  await screen.findByRole("heading", { name: "在途会话" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  finished = true;
+  await userEvent.click(screen.getByRole("button", { name: "旁观会话" }));
+  await screen.findByRole("heading", { name: "旁观会话" });
+  await waitFor(() => expect(snapshotGetCount(calls, "live")).toBeGreaterThanOrEqual(2), { timeout: 3500 });
+  const stabilized = snapshotGetCount(calls, "live");
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(snapshotGetCount(calls, "live")).toBe(stabilized);
+}, 15_000);
+
+it("R3-3 终态 run 待账务核实时保留查询，settled 后停止且不靠单实体读刷量", async () => {
+  const a = conversationFixture("billing", "待结算"), b = conversationFixture("peer-b", "同伴会话");
+  const f = productionFixture(a);
+  const unsettled = { ...f.run, state: "succeeded" as const, revision: 1, finance: { state: "pending_reconciliation" as const, currency: "CNY" as const, reservedMinor: 0, pendingUnknownMinor: 1200, settledMinor: 0, priceKind: "bounded" as const } };
+  const settled = { ...unsettled, revision: 2, finance: { state: "settled" as const, currency: "CNY" as const, reservedMinor: 0, pendingUnknownMinor: 0, settledMinor: 1200, priceKind: "bounded" as const } };
+  let done = false;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { "peer-b": snapshotFixture(b) }, onRequest: url => {
+    if (url.endsWith("/billing/snapshot")) {
+      const snapshot = { ...f.snapshot, activeRequestId: null as string | null };
+      snapshot.runs.items = [done ? settled : unsettled];
+      return { status: 200, body: snapshot };
+    }
+    return null;
+  } });
+  renderAt("/agent/billing");
+  await screen.findByRole("heading", { name: "待结算" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  await userEvent.click(screen.getByRole("button", { name: "同伴会话" }));
+  await screen.findByRole("heading", { name: "同伴会话" });
+  await waitFor(() => expect(snapshotGetCount(calls, "billing")).toBeGreaterThanOrEqual(2), { timeout: 3500 });
+  done = true;
+  await waitFor(() => expect(snapshotGetCount(calls, "billing")).toBeGreaterThanOrEqual(3), { timeout: 3500 });
+  const stabilized = snapshotGetCount(calls, "billing");
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(snapshotGetCount(calls, "billing")).toBe(stabilized);
+  // 账务事实在快照首页内：不应退化为每 tick 单实体读 run。
+  expect(calls.filter(call => call.url.endsWith(`/runs/${f.run.id}`))).toHaveLength(0);
+}, 20_000);
+
+it("R3-4 旧 queued 消息离开最新快照页后取得真实终态，不永久轮询（修前缺陷）", async () => {
+  const a = conversationFixture("stale", "离页排队"), b = conversationFixture("fresh-b", "新会话");
+  const queued = messageFixture({ id: "msg-stale", role: "user", state: "queued", requestId: "req-stale", text: "还在排队" });
+  const completed = messageFixture({ id: "msg-stale", role: "user", state: "completed", requestId: "req-stale", text: "还在排队", revision: 2 });
+  let left = false;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { "fresh-b": snapshotFixture(b) }, onRequest: url => {
+    if (url.endsWith("/stale/snapshot")) {
+      return { status: 200, body: left ? { ...snapshotFixture(a), activeRequestId: null } : { ...snapshotFixture(a, { messages: [queued] }), activeRequestId: "req-stale" } };
+    }
+    if (url.endsWith("/messages/msg-stale")) return { status: 200, body: completed };
+    return null;
+  } });
+  renderAt("/agent/stale");
+  await screen.findByRole("heading", { name: "离页排队" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  left = true;
+  await userEvent.click(screen.getByRole("button", { name: "新会话" }));
+  await screen.findByRole("heading", { name: "新会话" });
+  // 离页 queued 只能靠单实体读取取回真实终态（复用 message.changed 的合并缝）。
+  await waitFor(() => expect(calls.some(call => call.url.endsWith("/messages/msg-stale"))).toBe(true), { timeout: 6500 });
+  const stabilized = snapshotGetCount(calls, "stale");
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(snapshotGetCount(calls, "stale")).toBe(stabilized);
+  expect(calls.filter(call => call.url.endsWith("/messages/msg-stale"))).toHaveLength(1);
+}, 20_000);
+
+it("R3-7 A→B→A 快速往返：在途离页补读不被代际守卫吞掉，真实终态回到列表（修前缺陷）", async () => {
+  const a = conversationFixture("race", "竞态会话"), b = conversationFixture("race-b", "落脚会话");
+  const queued = messageFixture({ id: "msg-race", role: "user", state: "queued", requestId: "req-race", text: "排队中的那句" });
+  const completed = messageFixture({ id: "msg-race", role: "user", state: "completed", requestId: "req-race", text: "排队中的那句", revision: 2 });
+  type Deferred = (value: RouteResult) => void;
+  const deferreds: Deferred[] = [];
+  let left = false;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { "race-b": snapshotFixture(b) }, onRequest: url => {
+    if (url.endsWith("/race/snapshot")) {
+      return { status: 200, body: left ? { ...snapshotFixture(a), activeRequestId: null } : { ...snapshotFixture(a, { messages: [queued] }), activeRequestId: "req-race" } };
+    }
+    if (url.endsWith("/messages/msg-race")) return new Promise<RouteResult>(resolve => { deferreds.push(resolve); });
+    return null;
+  } });
+  vi.useFakeTimers();
+  // 假时钟下 user-event 的指针延时会挂起；fireEvent 无定时器依赖。
+  const click = (name: string | RegExp) => act(async () => { fireEvent.click(screen.getByRole("button", { name })); });
+  try {
+    renderAt("/agent/race");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(screen.getByRole("heading", { name: "竞态会话" })).toBeInTheDocument();
+    expect(screen.getByText("排队中的那句")).toBeInTheDocument();
+    left = true;
+    await click("落脚会话");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(screen.getByRole("heading", { name: "落脚会话" })).toBeInTheDocument();
+    // 离开后首个 tick：快照显示 msg-race 已离页 → 记录 queuedOffPage 并发起单实体补读（挂起）。
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(deferreds).toHaveLength(1);
+    // 补读在途时快速切回 A：latest 重建丢掉 messages 里的 queued 条目，代际 +1。
+    // 推进超过一个轮询周期，确保重建落定，尚未返回的补读也没有被重复发出。
+    await click(/竞态会话/);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+    expect(screen.getByRole("heading", { name: "竞态会话" })).toBeInTheDocument();
+    // 重建后消息列表不再有该条，但请求仍在排队条以「已等待」显示——等待补读给真实终态。
+    expect(screen.getByText(/已等待/)).toBeInTheDocument();
+    // 补读此刻返回真实终态。修前：代际守卫吞掉合并 → 排队条永久「已等待」，消息不回列表且无重试路径。
+    await act(async () => { deferreds[0]!({ status: 200, body: completed }); await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText("排队中的那句")).toBeInTheDocument();
+    // 合并触发的批量快照（120ms 节流）落定后，排队条消失、无「已排队」状态残留。
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(screen.queryByText(/已等待/)).toBeNull();
+    expect(screen.queryByText("已排队")).toBeNull();
+    // 终态稳定：不再对该会话轮询或重复补读。
+    const stabilized = snapshotGetCount(calls, "race");
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    expect(snapshotGetCount(calls, "race")).toBe(stabilized);
+    expect(deferreds).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+  }
+}, 20_000);
+
+it("R3-8 离页消息补读失败后重新出现在快照中仍排队，读到终态才停止补读", async () => {
+  const a = conversationFixture("r3-retry-a", "后台重试 A"), b = conversationFixture("r3-retry-b", "当前对话 B");
+  const queued = messageFixture({ id: "r3-retry-message", role: "user", requestId: "r3-retry-request", state: "queued", text: "A 的排队请求" });
+  const terminal: Message = { ...queued, state: "stopped", revision: 2 };
+  const latest = messageFixture({ id: "r3-retry-latest", role: "assistant", text: "A 的最新消息" });
+  const bMessage = messageFixture({ id: "r3-retry-peer", role: "assistant", text: "B 的对话消息" });
+  const onPage = snapshotFixture(a, { messages: [queued, latest] });
+  const snapshots = { [a.id]: onPage, [b.id]: snapshotFixture(b, { messages: [bMessage] }) };
+  const messageUrl = `/api/agent/v1/messages/${queued.id}`;
+  let attempts = 0;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots, onRequest: url => {
+    if (url !== messageUrl) return null;
+    if (++attempts === 1) return { status: 503, body: { code: "UNAVAILABLE", message: "消息暂时不可读取" } };
+    return { status: 200, body: terminal };
+  } });
+  const messageReads = () => calls.filter(call => call.method === "GET" && call.url === messageUrl).length;
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const switchTo = (title: string) => act(async () => { fireEvent.click(within(screen.getByRole("navigation", { name: "会话列表" })).getByRole("button", { name: title })); });
+
+  vi.useFakeTimers();
+  try {
+    renderAt(`/agent/${a.id}`);
+    await advance(0);
+    expect(screen.getByText("已排队")).toBeInTheDocument();
+    const initialAStream = FakeEventSource.instances[0]!;
+    expect(initialAStream.url).toBe(`/api/agent/v1/conversations/${a.id}/events?cursor=cursor-${a.id}`);
+    await switchTo(b.title);
+    const bStream = FakeEventSource.instances.at(-1)!;
+    expect(initialAStream.closed).toBe(true);
+    expect(bStream.url).toBe(`/api/agent/v1/conversations/${b.id}/events?cursor=cursor-${b.id}`);
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "B 的草稿" } });
+
+    snapshots[a.id] = snapshotFixture(a, { messages: [latest] });
+    await advance(2000);
+    expect(snapshotGetCount(calls, a.id)).toBe(2);
+    expect(messageReads()).toBe(1);
+    snapshots[a.id] = onPage;
+    await advance(2000);
+    expect(snapshotGetCount(calls, a.id)).toBe(3);
+    expect(messageReads(), "仍然 queued 的快照不能取消上次失败的定向读取").toBe(2);
+
+    await advance(6000);
+    expect(messageReads()).toBe(2);
+    expect(snapshotGetCount(calls, a.id)).toBe(3);
+    expect(FakeEventSource.instances).toEqual([initialAStream, bStream]);
+    expect(bStream.closed).toBe(false);
+    expect(screen.getByText(bMessage.text)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("B 的草稿");
+    expect(screen.queryByText(queued.text)).toBeNull();
+    expect(screen.queryByText(latest.text)).toBeNull();
+    expect(screen.queryByText("消息暂时不可读取")).toBeNull();
+
+    // 切回 A 时最新窗口重建，返回的快照仍带较旧的 queued 修订。
+    await switchTo(a.title);
+    expect(snapshotGetCount(calls, a.id)).toBe(4);
+    expect(screen.getByRole("region", { name: "本轮结果" })).toHaveTextContent("本轮已停止");
+    expect(screen.getByText(queued.text).closest("[data-message-id]")).toHaveTextContent("已停止");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("R3-9 切回后重连采用快照游标，迟到的旧页和消息事件不覆盖补读终态", async () => {
+  const a = conversationFixture("r3-cursor-a", "重连对话 A"), b = conversationFixture("r3-cursor-b", "临时对话 B");
+  const history = messageFixture({ id: "r3-cursor-history", role: "assistant", text: "A 的更早消息" });
+  const queued = messageFixture({ id: "r3-cursor-message", role: "user", requestId: "r3-cursor-request", state: "queued", text: "A 的待处理消息" });
+  const running: Message = { ...queued, state: "running", revision: 2 };
+  const terminal: Message = { ...queued, state: "stopped", revision: 3 };
+  const latest = messageFixture({ id: "r3-cursor-latest", role: "assistant", text: "A 的当前页消息" });
+  const offPage = snapshotFixture(a, { messages: [latest] });
+  offPage.messages.nextCursor = "history-page / 2";
+  let aResponse: RouteResult = { status: 200, body: snapshotFixture(a, { messages: [queued] }) };
+  let finishMessage!: (value: RouteResult) => void, finishOldRead!: (value: RouteResult) => void, finishPage!: (value: RouteResult) => void;
+  const messageResult = new Promise<RouteResult>(resolve => { finishMessage = resolve; });
+  const oldReadResult = new Promise<RouteResult>(resolve => { finishOldRead = resolve; });
+  const pageResult = new Promise<RouteResult>(resolve => { finishPage = resolve; });
+  const messageUrl = `/api/agent/v1/messages/${queued.id}`;
+  const pageUrl = `/api/agent/v1/conversations/${a.id}/messages?cursor=history-page%20%2F%202`;
+  let messageReads = 0;
+  const calls = installWorkbenchRoutes({ conversations: [a, b], onRequest: url => {
+    if (url.endsWith(`/${a.id}/snapshot`)) return aResponse;
+    if (url === pageUrl) return pageResult;
+    if (url === messageUrl) {
+      messageReads++;
+      if (messageReads === 1) return messageResult;
+      if (messageReads === 2) return oldReadResult;
+    }
+    return null;
+  } });
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const click = (name: string) => act(async () => { fireEvent.click(screen.getByRole("button", { name })); });
+
+  vi.useFakeTimers();
+  try {
+    renderAt(`/agent/${a.id}`);
+    await advance(0);
+    expect(screen.getByText("已排队")).toBeInTheDocument();
+    await click(b.title);
+    aResponse = { status: 200, body: offPage };
+    await advance(2000);
+    expect(messageReads).toBe(1);
+
+    await click(a.title);
+    const interrupted = FakeEventSource.instances.at(-1)!;
+    expect(interrupted.url).toBe(`/api/agent/v1/conversations/${a.id}/events?cursor=cursor-${a.id}`);
+    expect(screen.getByText(latest.text)).toBeInTheDocument();
+    expect(screen.getByText("1 条请求排队")).toBeInTheDocument();
+    expect(screen.queryByText("已排队")).toBeNull();
+    await click("加载更早的消息");
+    expect(calls.filter(call => call.method === "GET" && call.url === pageUrl)).toHaveLength(1);
+    aResponse = { status: 503, body: { code: "UNAVAILABLE", message: "SSE 重连暂不可用" } };
+    interrupted.emit("reset_required", { reason: "cursor_expired" });
+    await advance(0);
+    expect(screen.getByText("SSE 重连暂不可用")).toBeInTheDocument();
+    expect(FakeEventSource.instances.filter(source => !source.closed)).toHaveLength(0);
+    aResponse = { status: 200, body: { ...offPage, eventCursor: "resume/A + 17" } };
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    const resumed = FakeEventSource.instances.at(-1)!;
+    expect(FakeEventSource.instances.filter(source => !source.closed)).toEqual([resumed]);
+    expect(resumed.url).toBe(`/api/agent/v1/conversations/${a.id}/events?cursor=resume%2FA%20%2B%2017`);
+    const streamCount = FakeEventSource.instances.length;
+
+    const olderEvent = { eventId: "r3-old-event", cursor: "older-event", conversationId: a.id, kind: "message.changed", entityId: queued.id, entityVersion: 1, notification: "quiet", createdAt: queued.createdAt };
+    resumed.emit("business", olderEvent);
+    expect(messageReads).toBe(2);
+    // 当前的 A 流使用真实游标，在 B 发起的补读此时才返回。
+    await act(async () => { finishMessage({ status: 200, body: terminal }); });
+    expect(screen.getByText("已停止")).toBeInTheDocument();
+    expect(FakeEventSource.instances).toHaveLength(streamCount);
+    expect(resumed.closed).toBe(false);
+
+    interrupted.emit("business", { ...olderEvent, eventId: "r3-retired-stream-event" });
+    expect(messageReads).toBe(2);
+    await act(async () => { finishOldRead({ status: 200, body: running }); });
+    expect(screen.getByText("已停止")).toBeInTheDocument();
+    expect(screen.queryByText("处理中")).toBeNull();
+
+    await act(async () => { finishPage({ status: 200, body: { items: [history, queued], nextCursor: null, watermark: "history-watermark" } }); });
+    await advance(120);
+    expect(screen.getByText(history.text)).toBeInTheDocument();
+    expect(screen.getAllByText(queued.text)).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "加载更早的消息" })).toBeNull();
+    expect(screen.getByText("已停止")).toBeInTheDocument();
+    expect(screen.queryByText("已排队")).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(streamCount);
+    expect(resumed.closed).toBe(false);
+
+    await click(b.title);
+    const stable = snapshotGetCount(calls, a.id);
+    await advance(6000);
+    expect(messageReads).toBe(2);
+    expect(snapshotGetCount(calls, a.id)).toBe(stable);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("R3-10 切回 A 后在途离页补读失败一次，留在 A 自动取回终态", async () => {
+  const a = conversationFixture("retry-return-a", "原对话 A"), b = conversationFixture("retry-return-b", "临时对话 B");
+  const queued = messageFixture({ id: "retry-return-message", role: "user", requestId: "retry-return-request", state: "queued", text: "A 留在上一页的请求" });
+  const completed: Message = { ...queued, state: "completed", revision: 2 };
+  const bMessage = messageFixture({ id: "retry-return-peer", role: "assistant", text: "B 的独立回复" });
+  const snapshots = { [a.id]: snapshotFixture(a, { messages: [queued] }), [b.id]: snapshotFixture(b, { messages: [bMessage] }) };
+  const messageUrl = `/api/agent/v1/messages/${queued.id}`;
+  const responses: ((value: RouteResult) => void)[] = [];
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots, onRequest: url => url === messageUrl
+    ? new Promise<RouteResult>(resolve => { responses.push(resolve); }) : null });
+  const messageReads = () => calls.filter(call => call.method === "GET" && call.url === messageUrl).length;
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const switchTo = (title: string) => act(async () => { fireEvent.click(within(screen.getByRole("navigation", { name: "会话列表" })).getByRole("button", { name: title })); });
+
+  vi.useFakeTimers();
+  try {
+    renderAt(`/agent/${a.id}`);
+    await advance(0);
+    const composer = () => screen.getByRole("textbox", { name: "消息输入" });
+    fireEvent.change(composer(), { target: { value: "A 的草稿" } });
+    await switchTo(b.title);
+    fireEvent.change(composer(), { target: { value: "B 的草稿" } });
+    snapshots[a.id] = snapshotFixture(a);
+    await advance(2000);
+    expect(messageReads()).toBe(1);
+
+    await switchTo(a.title);
+    expect(screen.getByText(/已等待/)).toBeInTheDocument();
+    expect(composer()).toHaveValue("A 的草稿");
+    const stream = FakeEventSource.instances.at(-1)!;
+    const snapshotCount = snapshotGetCount(calls, a.id);
+    await advance(4000);
+    expect(messageReads()).toBe(1);
+    await act(async () => { responses[0]!({ status: 503, body: { code: "UNAVAILABLE", message: "暂不可读取" } }); });
+    await advance(2000);
+    expect(messageReads()).toBe(2);
+    expect(snapshotGetCount(calls, a.id)).toBe(snapshotCount);
+    await advance(4000);
+    expect(messageReads()).toBe(2);
+    await act(async () => { responses[1]!({ status: 200, body: completed }); });
+    expect(screen.queryByText(/已等待/)).toBeNull();
+    expect(screen.getByText(queued.text).closest("[data-message-id]")).toHaveAttribute("data-state", "completed");
+    await advance(120);
+    const settledSnapshots = snapshotGetCount(calls, a.id);
+    await advance(6000);
+    expect(messageReads()).toBe(2);
+    expect(snapshotGetCount(calls, a.id)).toBe(settledSnapshots);
+    expect(FakeEventSource.instances.filter(source => !source.closed)).toEqual([stream]);
+
+    await switchTo(b.title);
+    expect(composer()).toHaveValue("B 的草稿");
+    expect(screen.getByText(bMessage.text)).toBeInTheDocument();
+    expect(screen.queryByText(queued.text)).toBeNull();
+    expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("R3-11 刷新直达历史消息时，最新快照游标跨过的终态仍可按消息 ID 补读", async () => {
+  const conversation = conversationFixture("retry-anchor", "定位旧请求");
+  const queued = messageFixture({ id: "retry-anchor-message", role: "user", requestId: "retry-anchor-request", state: "queued", text: "定位的旧请求" });
+  const completed: Message = { ...queued, state: "completed", revision: 2 };
+  const newer = messageFixture({ id: "retry-anchor-newer", role: "assistant", text: "定位窗口以后的回复" });
+  const messageUrl = `/api/agent/v1/messages/${queued.id}`;
+  const anchorUrl = `/api/agent/v1/conversations/${conversation.id}/messages?anchorMessageId=${queued.id}`;
+  const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshotFixture(conversation, { messages: [newer] }) }, onRequest: url => {
+    if (url === anchorUrl) return { status: 200, body: { items: [queued], nextCursor: null, watermark: "anchor-before-completion" } };
+    if (url === messageUrl) return { status: 200, body: completed };
+    return null;
+  } });
+
+  vi.useFakeTimers();
+  try {
+    renderAt(`/agent/${conversation.id}?anchor=${queued.id}`);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const row = screen.getByText(queued.text).closest("[data-message-id]");
+    expect(row).toHaveAttribute("data-anchor", "true");
+    expect(row).toHaveAttribute("data-state", "queued");
+    const stream = FakeEventSource.instances.at(-1)!;
+    await act(async () => { await vi.advanceTimersByTimeAsync(2120); });
+    expect(row).toHaveAttribute("data-state", "completed");
+    expect(screen.queryByText(newer.text)).toBeNull();
+    expect(FakeEventSource.instances.filter(source => !source.closed)).toEqual([stream]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(calls.filter(call => call.method === "GET" && call.url === messageUrl)).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("R3-5 后台补读单次>2s：不叠加请求、不被序号饿死、最新有效结果进缓存（修前缺陷）", async () => {
+  const a = conversationFixture("slow", "慢响应"), b = conversationFixture("fast-b", "快会话");
+  type Deferred = (value: RouteResult) => void;
+  const deferreds: Deferred[] = [];
+  let armed = false;
+  const activeSnapshot = () => ({ ...snapshotFixture(a), activeRequestId: "req-slow" as string | null });
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { slow: activeSnapshot(), "fast-b": snapshotFixture(b) }, onRequest: url => {
+    if (armed && url.endsWith("/slow/snapshot")) return new Promise<RouteResult>(resolve => { deferreds.push(resolve); });
+    return null;
+  } });
+  vi.useFakeTimers();
+  // 假时钟下 user-event 的指针延时会挂起；fireEvent 无定时器依赖。
+  const click = (name: string) => act(async () => { fireEvent.click(screen.getByRole("button", { name })); });
+  try {
+    renderAt("/agent/slow");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(screen.getByRole("heading", { name: "慢响应" })).toBeInTheDocument();
+    armed = true;
+    await click("快会话");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(screen.getByRole("heading", { name: "快会话" })).toBeInTheDocument();
+    // 4 个 tick 全部在途未返回：同一会话只允许 1 个在途补读（修前：每 tick 叠加到 4）。
+    for (let i = 0; i < 4; i++) await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(deferreds).toHaveLength(1);
+    // 慢响应携带新产物返回时必须被接受（修前：更新序号已发出，本响应被丢弃，通知永不出现）。
+    const art1 = artifactFixture("art-slow-1", "迟到产物一", "rev-1", 1);
+    await act(async () => { deferreds[0]!({ status: 200, body: { ...snapshotFixture(a, { artifacts: [art1] }), activeRequestId: "req-slow" } }); await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByTitle("有新产出")).toBeInTheDocument();
+    // 上一响应落地后下一 tick 才补新请求；结果依次进缓存，不饿死。
+    const before = snapshotGetCount(calls, "slow");
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(snapshotGetCount(calls, "slow")).toBe(before + 1);
+    const art2 = artifactFixture("art-slow-2", "迟到产物二", "rev-1", 1);
+    await act(async () => { deferreds.at(-1)!({ status: 200, body: { ...snapshotFixture(a, { artifacts: [art1, art2] }), activeRequestId: "req-slow" } }); await vi.advanceTimersByTimeAsync(0); });
+    // 终态响应（activeRequestId=null）接受后轮询停止。
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(deferreds.length).toBe(3);
+    await act(async () => { deferreds.at(-1)!({ status: 200, body: { ...snapshotFixture(a, { artifacts: [art1, art2] }), activeRequestId: null } }); await vi.advanceTimersByTimeAsync(0); });
+    const stopped = snapshotGetCount(calls, "slow");
+    await act(async () => { await vi.advanceTimersByTimeAsync(7000); });
+    expect(snapshotGetCount(calls, "slow")).toBe(stopped);
+    // 切回后能看到缓存里的最新有效结果（迟到产物已进 cache，由恢复入口重建视图）。
+    // 徽标在按钮内部，可访问名变为「慢响应 有新产出」，用部分匹配定位。
+    armed = false;
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /慢响应/ })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(screen.getByRole("heading", { name: "迟到产物一" })).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+}, 20_000);
+
+it("R3-6 组件卸载后不再发起后台补读", async () => {
+  const a = conversationFixture("gone", "卸载会话"), b = conversationFixture("stay-b", "留守会话");
+  const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: {
+    gone: { ...snapshotFixture(a), activeRequestId: "req-gone" }, "stay-b": snapshotFixture(b),
+  } });
+  const ui = renderAt("/agent/gone");
+  await screen.findByRole("heading", { name: "卸载会话" });
+  await waitFor(() => expect(FakeEventSource.instances.some(source => !source.closed)).toBe(true));
+  await userEvent.click(screen.getByRole("button", { name: "留守会话" }));
+  await screen.findByRole("heading", { name: "留守会话" });
+  const before = snapshotGetCount(calls, "gone");
+  ui.unmount();
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(snapshotGetCount(calls, "gone")).toBe(before);
+}, 15_000);
+
 it("A-07/32 历史引用固定版本；新 head 不改阅读；历史稿只读，意见只对最新稿（B03/A10）", async () => {
   const conversation = conversationFixture("a", "版本讨论");
   let head = artifactFixture("art-1", "脚本", "rev-2", 2);
@@ -751,7 +1219,7 @@ it("A-07/32 历史引用固定版本；新 head 不改阅读；历史稿只读�
     return null;
   } });
   renderAt("/agent/a");
-  await userEvent.click((await screen.findAllByRole("button", { name: "脚本" }))[0]!);
+  await userEvent.click((await screen.findAllByRole("button", { name: "脚本 · v1，现名：脚本" }))[0]!);
   expect(await screen.findByText("正文 rev-1")).toBeInTheDocument();
   // 历史修订统一只读：不暴露会被服务端拒绝的旧稿意见/修改入口。
   expect(screen.getByText("历史版本仅阅读")).toBeInTheDocument();
@@ -770,6 +1238,27 @@ it("A-07/32 历史引用固定版本；新 head 不改阅读；历史稿只读�
   await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "对最新版的意见");
   await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
   await waitFor(() => expect(calls.find(call => call.method === "POST" && call.url.endsWith("/feedback"))?.body).toMatchObject({ target: { revisionId: "rev-3" }, text: "对最新版的意见" }));
+});
+
+// R4/A11：历史引用卡主识别用「类型·准确版本」；产物改名升版后当前名只作补充说明，点击仍开原修订。
+it("R4 产物改名并升到 v3 后：历史引用卡主识别仍是「脚本 · v1」，现名只是补充，点击打开 v1 原文", async () => {
+  const conversation = conversationFixture("rename", "改名回看");
+  const oldMessage = messageFixture({ id: "old-message", role: "assistant", text: "当时的交付", references: { artifacts: [{ artifactId: "art-1", revisionId: "rev-1" }], proposalIds: [], runIds: [], materialBatchIds: [] } });
+  const calls = installWorkbenchRoutes({ conversations: [conversation], onRequest: url => {
+    if (url.endsWith("/rename/snapshot")) return { status: 200, body: snapshotFixture(conversation, { artifacts: [artifactFixture("art-1", "定稿方案", "rev-3", 3)], messages: [oldMessage] }) };
+    if (url.endsWith("/artifacts/art-1")) return { status: 200, body: artifactFixture("art-1", "定稿方案", "rev-3", 3) };
+    if (url.includes("/revisions/")) { const revisionId = url.split("/").at(-1)!; return { status: 200, body: { ...REVISION_FIXTURE, revisionId, revisionNumber: Number(revisionId.at(-1)), content: { format: "markdown", text: `正文 ${revisionId}` } } }; }
+    return null;
+  } });
+  renderAt("/agent/rename");
+  const row = (await screen.findByText("当时的交付")).closest("[data-message-id]") as HTMLElement;
+  const card = within(row).getByRole("button", { name: "脚本 · v1，现名：定稿方案" });
+  expect(within(card).getByText("脚本 · v1").tagName).toBe("STRONG");
+  expect(within(card).getByText("现名：定稿方案")).toBeInTheDocument();
+  await userEvent.click(card);
+  expect(await screen.findByText("正文 rev-1")).toBeInTheDocument();
+  expect(screen.queryByText("正文 rev-3")).toBeNull();
+  expect(calls.filter(call => call.url.endsWith("/revisions/rev-1"))).toHaveLength(1);
 });
 
 it("重新打开已有对话时，保留已阅读的旧版本，不自动换成最新产出", async () => {
@@ -1372,8 +1861,8 @@ it("S1-08/09 旧页补齐精确修订及系统通知引用；单项404可重试�
   await screen.findByText("制作提案 · 暂不可读");
   expect(screen.getByText("早前已受理")).toBeInTheDocument();
   const row = document.querySelector('[data-message-id="old-notice"]')! as HTMLElement;
-  expect(within(row).getAllByRole("button", { name: "早前作品" })[0]).toHaveTextContent("v1");
-  await userEvent.click(within(row).getAllByRole("button", { name: "早前作品" })[0]!);
+  expect(within(row).getAllByRole("button", { name: "脚本 · v1，现名：早前作品" })[0]).toHaveTextContent("v1");
+  await userEvent.click(within(row).getAllByRole("button", { name: "脚本 · v1，现名：早前作品" })[0]!);
   await screen.findByText("这是早前第一版正文");
   expect(screen.getByText("查看最新 v3")).toBeInTheDocument();
   expect(calls.filter(call => call.url.endsWith("/artifacts/old-art"))).toHaveLength(1);
@@ -1444,7 +1933,7 @@ it("S1-08/09 重连核对首页之外已加载对象的新状态，同时保留�
   renderAt("/agent/resync-history");
   await userEvent.click(await screen.findByRole("button", { name: "加载更早的消息" }));
   const row = document.querySelector('[data-message-id="old-delivery"]')! as HTMLElement;
-  await userEvent.click(await within(row).findByRole("button", { name: "早前作品" }));
+  await userEvent.click(await within(row).findByRole("button", { name: "脚本 · v1，现名：早前作品" }));
   await screen.findByText("这是交付内容。");
   await screen.findAllByText("待确认");
   changed = true;

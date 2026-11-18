@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, X } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, X } from "lucide-react";
 import { agentApi, type ArtifactRevision, type LibraryVideo } from "./api.js";
-import type { ContentSource, LibraryMaterial, LibraryProjectFile } from "../../shared/agent/generated/contracts.js";
+import type { ContentSource, LibraryMaterial, LibraryProjectFile, ReviewInput } from "../../shared/agent/generated/contracts.js";
 import type { LibraryPick } from "./workspace-state.js";
 import { MarkdownBody, MarkdownText } from "./markdown.js";
 import { AudioSummaryView } from "./AudioSummaryView.js";
 import { RevisionBody } from "./ProductionCards.js";
+import { RevisionCover } from "./RevisionCover.js";
+import { blobUrl, useNearViewport, useStageRevision } from "./review-content.js";
 
 // 作品库（§6）：只收用户定稿的最终视频，条目身份是 video.revisionId；
 // 列表只给缩略图/标题/定稿时间，详情给播放/下载、采用的文稿与方案、回到对话。
@@ -52,10 +54,6 @@ function formatFinalized(iso: string): string {
   return new Date(iso).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-function blobUrl(blobId: string): string {
-  return `/api/agent/v1/blobs/${encodeURIComponent(blobId)}/content`;
-}
-
 interface LoadState { phase: "loading" | "ready" | "failed"; items: LibraryVideo[]; nextCursor: string | null }
 
 export function WorkLibrary({ onBringIn, bringTarget }: { onBringIn: (picks: LibraryPick[]) => void; bringTarget: "current" | "new" }) {
@@ -89,23 +87,17 @@ export function WorkLibrary({ onBringIn, bringTarget }: { onBringIn: (picks: Lib
     {load.phase === "failed" ? <p className="agent-field-error" role="alert">作品库读取失败，请刷新页面重试。</p> : null}
     {load.phase === "ready" && !load.items.length
       ? <p className="agent-stage-muted">还没有定稿的视频。在对话里以某一版成片定稿后，它会出现在这里。</p> : null}
-    {load.items.map(entry => <LibraryRow key={entry.video.revisionId} entry={entry} onOpen={() => setOpenRevisionId(entry.video.revisionId)} />)}
+    <div className="agent-library-shelf">{load.items.map(entry => <LibraryRow key={entry.video.revisionId} entry={entry} onOpen={() => setOpenRevisionId(entry.video.revisionId)} />)}</div>
     {load.nextCursor ? <button type="button" className="agent-load-older" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? "读取中…" : "更早的定稿"}</button> : null}
   </div>;
 }
 
 function LibraryRow({ entry, onOpen }: { entry: LibraryVideo; onOpen: () => void }) {
-  const [blobId, setBlobId] = useState<string | null>(null);
-  useEffect(() => {
-    let disposed = false;
-    agentApi.readRevision(entry.video.artifactId, entry.video.revisionId)
-      .then(revision => { if (!disposed) setBlobId(revision.content.format === "media" ? revision.content.blobId : null); })
-      .catch(() => { /* 缩略图读不到时仍保留标题行，详情页会给出错误与重试。 */ });
-    return () => { disposed = true; };
-  }, [entry.video.artifactId, entry.video.revisionId]);
-  return <button type="button" className="agent-library-item" onClick={onOpen}>
-    <span className="agent-library-thumb">{blobId ? <video preload="metadata" muted playsInline src={blobUrl(blobId)} aria-hidden /> : null}</span>
-    <span className="agent-library-meta"><strong>{entry.title}</strong><small>定稿于 {formatFinalized(entry.finalizedAt)}</small></span>
+  const [element, visible] = useNearViewport<HTMLButtonElement>();
+  const { revision, error } = useStageRevision(visible ? entry.video : null, {});
+  return <button ref={element} type="button" className="agent-library-item" onClick={onOpen}>
+    <span className="agent-library-thumb"><RevisionCover revision={revision} unavailable={Boolean(error)} /></span>
+    <span className="agent-library-meta"><strong>{entry.title}</strong><small>{revision ? `v${revision.revisionNumber} · ` : ""}定稿于 {formatFinalized(entry.finalizedAt)}</small><ArrowUpRight /></span>
   </button>;
 }
 
@@ -115,6 +107,7 @@ function LibraryDetail({ entry, bringTarget, onBringIn, onBack }: { entry: Libra
   const [plan, setPlan] = useState<{ revision: ArtifactRevision | null; state: "loading" | "ready" | "missing" | "failed" }>({ revision: null, state: "loading" });
   const [content, setContent] = useState<{ source: ContentSource | null; revision: ArtifactRevision | null; state: "loading" | "ready" | "missing" | "failed" }>({ source: null, revision: null, state: "loading" });
   const [planExpanded, setPlanExpanded] = useState(false);
+  const [reviewSourcesExpanded, setReviewSourcesExpanded] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -165,12 +158,20 @@ function LibraryDetail({ entry, bringTarget, onBringIn, onBack }: { entry: Libra
     <div className="agent-preview-body">
       {video.revision && video.revision.content.format === "media"
         ? <div className="agent-preview-media">
-          <video controls preload="metadata" src={blobUrl(video.revision.content.blobId)} aria-label="定稿视频" />
+          <video controls preload="metadata" src={blobUrl(video.revision.content.blobId)} poster={blobUrl(video.revision.content.blobId, "poster")} aria-label="定稿视频" />
           <a href={blobUrl(video.revision.content.blobId)} download>下载文件</a>
         </div>
         : video.failed ? <p className="agent-field-error" role="alert">这条定稿的视频读取失败，请刷新重试。</p>
           : <p className="agent-stage-muted">正在读取视频…</p>}
       {entry.audioSummary ? <AudioSummaryView summary={entry.audioSummary} title="定稿视频的声音" /> : null}
+      <details className="agent-library-source" open={reviewSourcesExpanded} onToggle={event => setReviewSourcesExpanded(event.currentTarget.open)}>
+        <summary>本次制作依据{!entry.reviewSources.length && entry.provenanceStatus === "not_recorded" ? " · 未记录" : ""}</summary>
+        {reviewSourcesExpanded && (entry.reviewSources.length ? <ul className="agent-library-review-sources">
+          {entry.reviewSources.map((input, index) => <LibraryReviewSource key={`${input.groupId}:${input.itemId}`} input={input} ordinal={index + 1} />)}
+        </ul> : <p className="agent-stage-muted">{entry.provenanceStatus === "recorded"
+          ? "这次制作没有需要逐项认可的制作依据。"
+          : "这条定稿没有记录制作依据。"}</p>)}
+      </details>
       <details className="agent-library-source" open={false}>
         <summary>采用的文稿{content.state === "missing" ? " · 未记录" : ""}</summary>
         {content.state === "ready" && content.source?.kind === "message_text"
@@ -230,6 +231,8 @@ function LibraryPickLists({ entry, pickedKeys, onToggle }: { entry: LibraryVideo
   </>;
 }
 
+// 素材修订按需只读展示。simulated={false} 是已知限制：ArtifactRevision DTO 没有模拟标记，
+// 这里无法从数据判断内容是否来自 Faux/模拟通道，只能按读取到的真实修订渲染。
 function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
   const source = material.source;
   const [open, setOpen] = useState(false);
@@ -247,7 +250,7 @@ function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
   return <details className="agent-library-material-preview" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>预览与下载</summary>
     {open ? "kind" in source ? <div className="agent-preview-media">
-      {material.kind === "video" ? <video controls preload="metadata" src={blobUrl(source.blobId)} aria-label="视频预览" />
+      {material.kind === "video" ? <video controls preload="metadata" src={blobUrl(source.blobId)} poster={blobUrl(source.blobId, "poster")} aria-label="视频预览" />
         : material.kind === "image" ? <img src={blobUrl(source.blobId)} alt={material.label} loading="lazy" />
         : material.kind === "audio" ? <audio controls preload="metadata" src={blobUrl(source.blobId)} aria-label="音频预览" /> : null}
       <a href={blobUrl(source.blobId)} download>下载文件</a>
@@ -255,6 +258,39 @@ function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
       : read.failed ? <p role="status">素材读取失败。<button type="button" onClick={() => setAttempt(value => value + 1)}>重试读取素材</button></p>
       : <p className="agent-stage-muted">正在读取…</p> : null}
   </details>;
+}
+
+// §4.3：只读取随定稿冻结的修订，ReviewInput 随绑定保存了认可回执。
+// 修订没有真实或模拟标记，现有预览仍按记录展示素材署名。
+function LibraryReviewSource({ input, ordinal }: { input: ReviewInput; ordinal: number }) {
+  const source = input.source;
+  const ref = source.kind === "artifact_revision" ? source : null;
+  const artifactId = ref?.artifactId;
+  const revisionId = ref?.revisionId;
+  const [read, setRead] = useState<{ state: "loading" | "failed" } | { state: "ready"; revision: ArtifactRevision }>({ state: "loading" });
+  useEffect(() => {
+    if (!artifactId || !revisionId) return;
+    let disposed = false;
+    setRead({ state: "loading" });
+    agentApi.readRevision(artifactId, revisionId)
+      .then(revision => { if (!disposed) setRead({ state: "ready", revision }); })
+      .catch(() => { if (!disposed) setRead({ state: "failed" }); });
+    return () => { disposed = true; };
+  }, [artifactId, revisionId]);
+  const meta = source.kind === "message_text"
+    ? `依据 ${ordinal} · 已认可 · 来自${source.author === "user" ? "用户" : "助手"}消息`
+    : `依据 ${ordinal} · 已认可${read.state === "ready" ? ` · v${read.revision.revisionNumber}` : ""}`;
+  return <li>
+    <p className="agent-stage-muted">{meta}</p>
+    {source.kind === "message_text"
+      ? <div className="agent-library-text"><MarkdownText text={source.text} /></div>
+      : read.state === "ready" ? <div className="agent-library-text">
+        {read.revision.content.format === "media" ? <p className="agent-stage-muted">真实或模拟来源未知</p> : null}
+        <RevisionBody content={read.revision.content} simulated={false} />
+      </div>
+        : read.state === "failed" ? <p className="agent-field-error" role="alert">这条制作依据读取失败。</p>
+          : <p className="agent-stage-muted">正在读取…</p>}
+  </li>;
 }
 
 // §11.7 来源8：输入框旁“从作品库选择”弹层——选视频→勾素材/制作文件→并入当前输入草稿；

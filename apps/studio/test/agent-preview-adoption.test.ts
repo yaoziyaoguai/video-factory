@@ -54,7 +54,8 @@ it("DGR-06 候选不入库，预览一步同字节定稿原子化并保留原预
       reviewConfirmation: { kind: "adopt_preview" as const, workId: work.id, groupId: clipGroup.id, itemId: clip.id,
         source: originalRef, action: "finalize_video" as const } });
     const beforeRejected = counts();
-    assert.throws(() => app.service.sendMessage(owner, conversationId, makeMessage()), /内容依据/);
+    // R5：缺失认可提示定位到组·事项·准确版本，不只报事项名（A10）。
+    assert.throws(() => app.service.sendMessage(owner, conversationId, makeMessage()), /「内容·内容依据·v1」这一版还未获得认可/);
     assert.deepEqual(counts(), beforeRejected, "缺必要认可不能留半个最终稿");
     const basisGroup = currentWork().reviewGroups.find(group => group.items.some(item => item.role === "content"))!;
     await app.service.sendMessage(owner, conversationId, { commandId: commandId(), text: "认可内容", target: null, skillId: null,

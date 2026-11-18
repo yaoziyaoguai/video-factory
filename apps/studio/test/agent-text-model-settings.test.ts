@@ -15,6 +15,7 @@ import { createAgentRuntime } from "../src/server/agent/assembly.js";
 import { assembleOfflineAgent } from "../src/server/agent/offline.js";
 import { defaultTextBindingOf, initializeTextModelSettings, textModelsView, textRegistrationOf } from "../src/server/agent/text-model-settings.js";
 import { canonicalJson } from "../src/server/agent/util.js";
+import { turnDiagnostics, type TurnDiagnostic } from "../src/server/agent/turn-diagnostics.js";
 import type { AgentDatabase } from "../src/server/agent/db.js";
 import type { ConnectionModel, ProviderConnection } from "../src/shared/agent/generated/contracts.js";
 
@@ -381,6 +382,9 @@ describe("text model settings (T2, OpenAI 统一连接)", () => {
     assert.equal(saved.status, 200);
     const conversation = await createConversation("小窗口压缩");
     const statuses: any[] = [];
+    const diagnostics: TurnDiagnostic[] = [];
+    const collect = (event: unknown) => diagnostics.push(event as TurnDiagnostic);
+    turnDiagnostics.subscribe(collect);
     const unsubscribe = assembly.runtime.service.hub().subscribeContextStatus(conversation, status => statuses.push(status));
     try {
       // Pi 依据供应商回报的 usage 判断是否整理；回复要足够长，使更早回合落出保留窗口（ctx/4）。
@@ -396,11 +400,20 @@ describe("text model settings (T2, OpenAI 统一连接)", () => {
       await chat(conversation, "第四轮继续");
     } finally {
       unsubscribe();
+      turnDiagnostics.unsubscribe(collect);
       stub.usage = { input_tokens: 24, output_tokens: 6 };
     }
 
     assert.ok(statuses.length > 0, `期望出现上下文整理事件，实际 ${JSON.stringify(statuses)}`);
-    assert.ok(statuses.some(status => status.phase === "compacted"), "整理事件应报告完成");
+    const compacted = statuses.find(status => status.phase === "compacted");
+    assert.ok(compacted, "整理事件应报告完成");
+    const diagnostic = diagnostics.find(event => event.requestId === compacted.requestId);
+    const start = diagnostic?.native.find(event => event.event === "compaction_start");
+    const end = diagnostic?.native.find(event => event.event === "compaction_end");
+    assert.ok(start?.event === "compaction_start" && end?.event === "compaction_end" && diagnostic?.turnElapsedMs != null);
+    assert.equal(start.reason, compacted.reason);
+    assert.equal(end.outcome, "completed");
+    assert.ok(start.offsetMs <= end.offsetMs && end.offsetMs <= diagnostic.turnElapsedMs);
     // 整理还会在回合结束后触发一次总结请求（同样打到替身）；取真正携带本轮用户消息的请求。
     const lastCall = stub.calls.filter(call => JSON.stringify(call.body.input).includes("第四轮继续")).at(-1);
     assert.ok(lastCall, "第四轮的模型请求应已发出");

@@ -606,6 +606,76 @@ it("G2-3 受理事实：免费本地渲染不建提案/授权/账单，正式视
   } finally { await world.close(); }
 });
 
+it("R5 正式成片入库保留认可来源：reviewSources 非空且 provenanceStatus=recorded，legacy plan/content 为 null", async () => {
+  const world = await setup(); try {
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("start_work", { title: "城市动画" })]),
+      fauxAssistantMessage("已开始。"),
+    ]);
+    const workId = works(world)[0]!.id;
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("write", { path: "main.cjs", content: walkPreviewScript })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "node main.cjs", timeout: 30 })]),
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "动画工程", files: ["main.cjs"],
+        entrypoint: { argv: ["node", "main.cjs"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+      fauxAssistantMessage("工程已冻结。"),
+    ], "封存出片工程。");
+    const project = latestProjectRevision(world);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [
+        { mode: "create", title: "城市文案", kind: "script", content: { format: "markdown", text: "# 城市\n雨停之前走一遍天桥。" } }],
+        reviewGroups: [{ workId, group: { mode: "create", key: "content-group", title: "脚本与内容", nextIntent: null },
+          items: [{ item: { mode: "create", key: "script", label: "脚本", role: "content", required: true },
+            itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "draft" }] }] })]),
+      fauxAssistantMessage("文案已交付。"),
+    ], "先给必选文案。");
+    const contentGroup = works(world).flatMap(work => work.reviewGroups).find(group => group.items.some(item => item.role === "content"))!;
+    const contentItem = contentGroup.items.find(item => item.role === "content")!;
+    assert.ok(contentItem.draft?.kind === "artifact_revision");
+    const contentDraft = contentItem.draft;
+    await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("认可这版文案", {
+      reviewConfirmation: { workId, groupId: contentGroup.id, items: [{ itemId: contentItem.id, source: contentDraft }], action: "approve" },
+    }));
+    const confirmed = itemOf(world, contentGroup.id, contentItem.id);
+    assert.ok(confirmed.confirmationId, "认可产生真实确认 ID");
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("render_project", { workId, title: "城市成片", scope: "正式整片", purpose: "production",
+        inputSources: [],
+        reviewInputs: [{ groupId: contentGroup.id, itemId: contentItem.id, source: contentDraft, confirmationId: confirmed.confirmationId }],
+        operations: [{ operationId: "final-1", outputSlot: "video-1", inputs: [],
+          parameters: { assembly: "code_project", projectRevision: project,
+            entrypoint: { argv: ["node", "main.cjs"] }, outputPath: "out.mp4",
+            expectedMediaKind: "video", format: "mp4", width: 160, height: 90, fps: 4 },
+          target: { group: { mode: "create", key: "final", title: "成片", nextIntent: null },
+            item: { mode: "create", key: "final-video", label: "成片", role: "video", required: true } } }] })]),
+      fauxAssistantMessage("成片已受理。"),
+    ], "带认可出正式成片。");
+    const runId = (world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id;
+    const result = await drive(world, runId);
+    assert.equal(result.state, "succeeded", result.issue?.message);
+    const spec = jsonField(world, "SELECT spec_json FROM production_snapshots WHERE id=?", "spec_json", result.snapshotId) as { operations: { target: { groupId: string; itemId: string } }[] };
+    const finalTarget = spec.operations[0]!.target;
+    const finalItem = itemOf(world, finalTarget.groupId, finalTarget.itemId);
+    assert.ok(finalItem.draft?.kind === "artifact_revision");
+    const finalDraft = finalItem.draft as { kind: "artifact_revision"; artifactId: string; revisionId: string };
+    const finalRevision = world.runtime.service.readRevision("local-owner", finalDraft.artifactId, finalDraft.revisionId);
+    await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("这版定稿", {
+      reviewConfirmation: { workId, groupId: finalTarget.groupId,
+        items: [{ itemId: finalTarget.itemId, source: { kind: "artifact_revision", artifactId: finalDraft.artifactId, revisionId: finalDraft.revisionId, digest: finalRevision.digest } }],
+        action: "finalize_video" },
+    }));
+
+    // A08 数据事实：认可来源随绑定冻结入库（recorded + reviewSources 非空），legacy 付费链 plan/content 为 null。
+    // 旧 UI 只读 plan/content，会把这类定稿显示成“未记录”——修复须以 reviewSources 为准确作依据。
+    const [entry] = world.runtime.service.listLibraryVideos("local-owner", undefined, undefined).items;
+    assert.ok(entry);
+    assert.equal(entry.provenanceStatus, "recorded");
+    assert.deepEqual(entry.reviewSources, [{ groupId: contentGroup.id, itemId: contentItem.id, source: contentDraft, confirmationId: confirmed.confirmationId }]);
+    assert.equal(entry.plan, null);
+    assert.equal(entry.content, null);
+  } finally { await world.close(); }
+});
+
 it("G2-3 执行发布：隔离身份执行、媒体输入物化、真实探测落位、完成不自动点评", async () => {
   const world = await setup(); try {
     const { workId, artifactId, revisionId } = await authorProject(world);

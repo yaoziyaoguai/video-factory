@@ -18,7 +18,7 @@ const distDir = process.env.AGENT_DIST_DIR ?? path.join(studioRoot, "dist", "cli
 const assembly = await assembleOfflineAgent({ dataDir, uiOrigin, fauxScenario: true, media: {} });
 
 if (existsSync(distDir)) {
-  await assembly.app.register(fastifyStatic, { root: distDir, wildcard: false });
+  await assembly.app.register(fastifyStatic, { root: distDir, wildcard: false, preCompressed: true });
   assembly.app.setNotFoundHandler((request: FastifyRequest, reply: FastifyReply) => {
     if (request.method !== "GET" || request.url.startsWith("/api/")) {
       return reply.code(404).send({ error: "未找到资源。" });

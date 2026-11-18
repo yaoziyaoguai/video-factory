@@ -366,3 +366,25 @@ it("工作台状态刷新失败不再写配置", async () => {
   await userEvent.click(screen.getByRole("button", { name: "重新读取" }));
   expect(posts).toHaveLength(1);
 });
+
+// R4/A06：模型页页签同服务页键盘约定——方向键/Home/End 切换并聚焦，roving tabindex，tabpanel 与页签互相指向。
+it("R4 模型页页签支持方向键/Home/End 与 roving tabindex，tabpanel 与选中页签互相关联", async () => {
+  routes(); page();
+  await screen.findByText("型号甲");
+  const tabs = screen.getAllByRole("tab");
+  expect(tabs.map(tab => tab.getAttribute("tabindex"))).toEqual(["0", "-1", "-1", "-1"]);
+  expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "model-tab-text");
+  await userEvent.click(tabs[0]!);
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: /图片模型/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "model-tab-image");
+  expect(document.activeElement).toBe(screen.getByRole("tab", { name: /图片模型/ }));
+  await userEvent.keyboard("{End}");
+  expect(screen.getByRole("tab", { name: /配音模型/ })).toHaveAttribute("aria-selected", "true");
+  expect(document.activeElement).toBe(screen.getByRole("tab", { name: /配音模型/ }));
+  await userEvent.keyboard("{Home}");
+  expect(screen.getByRole("tab", { name: /文本大模型/ })).toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{ArrowLeft}"); // 第一项向左回绕到最后一项
+  expect(screen.getByRole("tab", { name: /配音模型/ })).toHaveAttribute("aria-selected", "true");
+  expect(document.activeElement).toBe(screen.getByRole("tab", { name: /配音模型/ }));
+});

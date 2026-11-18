@@ -1581,7 +1581,7 @@ export interface FeedbackNote {
   contentSource: ContentSource | null;
 }
 /**
- * 保存在原始用户请求消息上的有界执行记录。只含真实阶段与最近八项工具动作；没有原始命令、参数、输出或模型思考。完成、失败、停止后保留。
+ * 保存在原始用户请求消息上的有界执行记录。包含真实阶段、最近八项工具动作和可知的完成原因。没有原始命令、参数、输出或模型思考。完成、失败、停止后保留。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "RequestExecution".
@@ -1589,6 +1589,10 @@ export interface FeedbackNote {
 export interface RequestExecution {
   startedAt: Time;
   endedAt: Time | null;
+  /**
+   * 新完成回合的确定原因。finished 表示自然完成，timeout 表示达到回合时限，tool_limit 表示达到工具调用上限。已完成的历史记录缺省时原因未知。失败和停止仍按消息状态判断。
+   */
+  completionReason?: "finished" | "timeout" | "tool_limit";
   progress: RequestProgress;
 }
 /**

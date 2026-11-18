@@ -89,12 +89,13 @@ export async function probeImageFile(file: string, signal?: AbortSignal): Promis
 
 // read_artifact 的视频抽帧：按反馈目标毫秒位抽单帧 PNG；不执行任意命令、不接受模型参数。
 // 先在 FFmpeg 内把帧限制到 SDK 的默认缩放上限，避免原始超大 PNG 在 resizeImage 前顶满 stdout 缓冲区。
-export async function extractVideoFrames(file: string, timesMs: readonly number[], signal?: AbortSignal): Promise<Buffer[]> {
+export async function extractVideoFrames(file: string, timesMs: readonly number[], signal?: AbortSignal, format: "analysis" | "poster" = "analysis"): Promise<Buffer[]> {
+  const side = format === "poster" ? 512 : 2000;
   return Promise.all(timesMs.map(async timeMs => {
     const { stdout } = await run("ffmpeg", [
       "-v", "error", "-ss", (Math.max(0, timeMs) / 1000).toFixed(3), "-i", file,
-      "-vf", "scale=w='min(iw,2000)':h='min(ih,2000)':force_original_aspect_ratio=decrease",
-      "-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1",
+      "-vf", `scale=w='min(iw,${side})':h='min(ih,${side})':force_original_aspect_ratio=decrease`,
+      "-frames:v", "1", "-f", "image2", "-c:v", format === "poster" ? "mjpeg" : "png", "pipe:1",
     ], { timeout: 30_000, maxBuffer: 16 * 1024 * 1024, encoding: "buffer", ...(signal ? { signal } : {}) });
     if (!stdout.length) throw new InvalidVideoFile("指定时间点没有可抽取的画面。");
     return stdout;

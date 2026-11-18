@@ -15,6 +15,8 @@ import {
   insertConversation, insertMessage, insertQueuedRequest, claimNextRequest, emptyReferences, nextSeq,
 } from "../src/server/agent/conversation-store.js";
 import { getArtifactRow, getRevisionRow, insertRevision } from "../src/server/agent/artifact-store.js";
+import { assembleOfflineAgent } from "../src/server/agent/offline.js";
+import { validatorFor } from "../src/server/agent/validate.js";
 import type { DubFreeResult, EdgeTtsSettings, MediaContent, MediaProvenance, ToolDelivery } from "../src/shared/agent/generated/contracts.js";
 
 // G3-2 免费配音（edge-tts 维护版客户端）：
@@ -133,6 +135,44 @@ test("G3-2 设置：默认缺省、非法形状拒绝、保存/重放/冲突（�
   });
   assert.equal(captureEdgeTtsConfig(a.db), null);
   assert.equal((readFreeServiceSettings(a.db, "edge-tts") as EdgeTtsSettings).voice, "zh-CN-YunxiNeural");
+});
+
+test("DF44 Edge TTS 配置 GET/PATCH 与 OpenAPI 路径一致", async t => {
+  const network = t.mock.method(globalThis, "fetch", async () => assert.fail("设置读写不应联网"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "frame-edge-settings-"));
+  const uiOrigin = "http://127.0.0.1:4500";
+  const { app, close } = await assembleOfflineAgent({ dataDir, uiOrigin });
+  t.after(async () => { await close(); await rm(dataDir, { recursive: true, force: true }); });
+  const url = "/api/agent/v1/settings/services/edge-tts";
+  const initial = await app.inject({ method: "GET", url });
+  assert.equal(initial.statusCode, 200);
+  assert.deepEqual(initial.json(), {
+    serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3",
+  } satisfies EdgeTtsSettings);
+
+  const saved = await app.inject({
+    method: "PATCH", url, headers: { "content-type": "application/json", origin: uiOrigin, "x-video-factory-request": "studio" },
+    payload: { commandId: "edge-settings-df44", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "python3" },
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(validatorFor("SaveFreeServiceSettingsReceipt")(saved.json()).ok, true);
+  const settings = { serviceId: "edge-tts", revision: 1, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "python3" } satisfies EdgeTtsSettings;
+  assert.deepEqual(saved.json(), { replayed: false, settings });
+
+  const reread = await app.inject({ method: "GET", url });
+  assert.equal(reread.statusCode, 200);
+  assert.equal(validatorFor("FreeServiceSettings")(reread.json()).ok, true);
+  assert.deepEqual(reread.json(), settings);
+  assert.equal(network.mock.callCount(), 0);
+  t.diagnostic(`GET ${initial.statusCode} revision=${initial.json().revision}; PATCH ${saved.statusCode}; GET ${reread.statusCode} revision=${reread.json().revision}; fetch=0`);
+
+  const openapi = JSON.parse(await readFile(new URL("../../../contracts/agent/v1/openapi.json", import.meta.url), "utf8"));
+  for (const method of ["get", "patch"] as const) {
+    const serviceId = openapi.paths["/settings/services/{serviceId}"][method].parameters.find(
+      (parameter: { in: string; name: string }) => parameter.in === "path" && parameter.name === "serviceId",
+    );
+    assert.ok(serviceId?.schema.enum.includes("edge-tts"), `${method.toUpperCase()} serviceId 包含 edge-tts`);
+  }
 });
 
 test("G3-2 工具：桩配音生成→正式交付→read_artifact 保留同字节准确修订的元数据", async t => {

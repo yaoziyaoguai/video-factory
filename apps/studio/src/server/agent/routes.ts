@@ -5,6 +5,7 @@ import { decodeEventCursor } from "./paging.js";
 import { maxEventSeq, minEventSeq } from "./event-log.js";
 import { newAgentId } from "./util.js";
 import { createReadStream } from "node:fs";
+import { extractVideoFrames, InvalidVideoFile } from "./media-probe.js";
 
 // /api/agent/v1 的路由与传输层：自鉴权（不依赖旧 app.ts 的 {error} 钩子）、
 // 契约 Error 形状、Origin/安全头校验、SSE 事件流。所有策略都在 AgentService。
@@ -30,6 +31,10 @@ declare module "fastify" {
 
 export async function agentRoutes(app: FastifyInstance, options: AgentPluginOptions): Promise<void> {
   const streams = new Set<() => void>();
+  const posters = new Map<string, Buffer>();
+  const pendingPosters = new Map<string, Promise<Buffer>>();
+  // 同一个不可变媒体只抽一次，小图逐个生成以给实际渲染留出 CPU。
+  let posterQueue = Promise.resolve();
   app.addHook("preClose", async () => { for (const close of [...streams]) close(); });
   const requireOwner = (request: FastifyRequest): string => {
     const ownerId = options.resolveOwner(request);
@@ -240,6 +245,37 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return reply.code(202).send(service.cancelRun(requireOwner(request), params.runId, body(request)));
   });
 
+  app.get("/blobs/:blobId/poster", async (request, reply) => {
+    const blob = service.readBlob(requireOwner(request), (request.params as { blobId: string }).blobId);
+    if (!blob.mime_type.startsWith("video/")) throw new AgentError("NOT_FOUND", "这份媒体没有视频封面。");
+    const etag = `"poster-1-${blob.digest}"`;
+    reply.header("cache-control", "private, no-cache").header("etag", etag);
+    if (request.headers["if-none-match"] === etag) return reply.code(304).send();
+    let frame = posters.get(blob.digest);
+    if (!frame) {
+      let pending = pendingPosters.get(blob.digest);
+      if (!pending) {
+        pending = posterQueue.then(async () => {
+          const time = Math.min(1000, Math.floor((blob.duration_ms ?? 0) / 4));
+          let frames: Buffer[];
+          try { frames = await extractVideoFrames(blob.path, [time], undefined, "poster"); }
+          catch (error) {
+            if (!time || !(error instanceof InvalidVideoFile)) throw error;
+            frames = await extractVideoFrames(blob.path, [0], undefined, "poster");
+          }
+          const image = frames[0]!;
+          if (posters.size >= 64) posters.delete(posters.keys().next().value!);
+          posters.set(blob.digest, image);
+          return image;
+        }).finally(() => pendingPosters.delete(blob.digest));
+        pendingPosters.set(blob.digest, pending);
+        posterQueue = pending.then(() => {}, () => {});
+      }
+      frame = await pending;
+    }
+    return reply.type("image/jpeg").send(frame);
+  });
+
   app.get("/blobs/:blobId/content", async (request, reply) => {
     const params = request.params as { blobId: string };
     const blob = service.readBlob(requireOwner(request), params.blobId);
@@ -259,6 +295,11 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
   app.get("/works/:workId", async request => {
     const params = request.params as { workId: string };
     return service.readWork(requireOwner(request), params.workId);
+  });
+
+  app.get("/works/:workId/groups/:groupId/items/:itemId/latest-feedback", async request => {
+    const { workId, groupId, itemId } = request.params as { workId: string; groupId: string; itemId: string };
+    return { message: service.latestReviewFeedback(requireOwner(request), workId, groupId, itemId) };
   });
 
   app.get("/works/:workId/groups/:groupId/items/:itemId/approvals", async request => {

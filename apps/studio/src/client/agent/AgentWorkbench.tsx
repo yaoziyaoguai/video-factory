@@ -45,11 +45,13 @@ interface ConversationView {
   runCursor: string | null;
   /** 定位窗口（§6）：非 null 时消息列表止于该锚点，更晚消息只提示不插入。 */
   windowAnchor: { messageId: string; seq: number } | null;
+  /** 曾从最新快照页离开且尚未取得终态的排队消息 id，由后台轮询按 id 补读。 */
+  queuedOffPage: string[];
 }
 
 const EMPTY_VIEW: ConversationView = {
   conversation: { id: "", title: "", revision: 1, updatedAt: "" },
-  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, windowAnchor: null,
+  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, windowAnchor: null, queuedOffPage: [],
 };
 
 export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) | undefined } = {}) {
@@ -63,6 +65,16 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const [sidebarHidden, setSidebarHidden] = useState(true);
   const chatPanel = usePanelRef();
   const [focusPreview, setFocusPreview] = useState(false);
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width:1060px)").matches);
+  const [chatDrawer, setChatDrawer] = useState(false);
+  const chatToggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width:1060px)");
+    const change = () => { setNarrow(query.matches); setChatDrawer(false); };
+    query.addEventListener("change", change);
+    return () => query.removeEventListener("change", change);
+  }, []);
+  useEffect(() => { setChatDrawer(false); }, [routeConversationId, page]);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [inspectedRun, setInspectedRun] = useState<string | null>(null);
   const [runReadAttempt, setRunReadAttempt] = useState(0);
@@ -234,16 +246,32 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       const windowSeq = windowAnchor?.seq ?? null;
       // 定位窗口内只见锚点及之前的消息；快照最新页里更晚的只作为窗口外事实，不进列表。
       const snapshotMessages = windowSeq === null ? snapshot.messages.items : snapshot.messages.items.filter(item => item.createdSequence <= windowSeq);
-      // 建立或退出窗口时消息列表按窗口重建（锚点页/最新页），避免残留另一窗口的消息或漏段；
-      // 沿用窗口时照常按 id+版本合并，再过滤快照页中晚于锚点的消息。
-      const messages = windowMode === undefined
-        ? mergeMessages(prior.messages, snapshotMessages)
-        : mergeMessages(anchorPage?.items ?? [], snapshotMessages);
+      let messages: Message[];
+      if (windowMode === undefined) {
+        messages = mergeMessages(prior.messages, snapshotMessages);
+      } else {
+        // 重建窗口时只保留新窗口内的 id，同一条消息仍按版本合并。
+        const windowMessages = [...(anchorPage?.items ?? []), ...snapshotMessages];
+        const windowIds = new Set(windowMessages.map(message => message.id));
+        const knownInWindow = [...prior.messages, ...prior.requestMessages].filter(message => windowIds.has(message.id));
+        messages = mergeMessages([], [...knownInWindow, ...windowMessages]);
+      }
+      // 请求状态独立于阅读窗口，切回会话重建窗口时仍保留此前的排队事实。
+      const requestMessages = mergeMessages(prior.requestMessages, snapshot.messages.items.filter(message => message.requestId));
+      const snapshotMessageIds = new Set(snapshot.messages.items.map(message => message.id));
+      const offPageQueued = (source: readonly Message[]) => source.filter(message => message.state === "queued"
+        && !snapshotMessageIds.has(message.id)).map(message => message.id);
+      // 排队消息回到最新快照页后，已开始的单实体补读仍需等到终态。
+      const resolvedOffPage = new Set([...messages, ...requestMessages]
+        .filter(message => message.state !== "queued" && message.state !== "running").map(message => message.id));
+      // 锚点页先于最新快照读取，快照游标可能已越过旧请求的终态事件。
+      const queuedOffPageIds = [...new Set([...prior.queuedOffPage, ...offPageQueued(prior.messages),
+        ...offPageQueued(prior.requestMessages), ...offPageQueued(anchorPage?.items ?? [])])]
+        .filter(id => !resolvedOffPage.has(id));
       const next: ConversationView = {
         conversation: snapshot.conversation,
         messages,
-        // 历史窗口只限制聊天显示；请求的排队、执行与终态始终按原始消息更新。
-        requestMessages: mergeMessages(prior.requestMessages, snapshot.messages.items.filter(message => message.requestId)),
+        requestMessages,
         artifacts: mergeArtifacts(prior.artifacts, incomingArtifacts),
         proposals: mergeProposals(prior.proposals, mergeProposals(snapshot.proposals.items, referencedProposals)),
         runs: mergeRuns(prior.runs, mergeRuns(snapshot.runs.items, referencedRuns)),
@@ -257,6 +285,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         proposalCursor: prior.conversation.id ? prior.proposalCursor : snapshot.proposals.nextCursor,
         runCursor: prior.conversation.id ? prior.runCursor : snapshot.runs.nextCursor,
         windowAnchor,
+        queuedOffPage: queuedOffPageIds,
       };
       cache.current.set(id, next);
       const changed = prior.conversation.id ? incomingArtifacts.filter(item => {
@@ -307,14 +336,17 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     if (!batch.reading && batch.timer === undefined) batch.timer = window.setTimeout(() => void flush(), 120);
   }, [refreshSnapshot]);
 
-  const readEventEntity = useCallback(async (id: string, event: BusinessEvent) => {
+  const readEventEntity = useCallback(async (id: string, event: BusinessEvent, options?: { staleGenerationAllowed?: boolean }) => {
     const generation = viewGeneration.current.token;
     try {
       const entity = event.kind === "artifact.delivered" ? await agentApi.readArtifactHead(event.entityId)
         : event.kind === "message.changed" ? await agentApi.readMessage(event.entityId)
         : event.kind === "proposal.changed" ? await agentApi.readProposal(event.entityId) : event.kind === "run.changed" ? await agentApi.readRun(event.entityId)
         : event.kind === "work.changed" ? await agentApi.readWork(event.entityId) : null;
-      if (!mounted.current || viewGeneration.current.token !== generation) return;
+      // 后台离页补读允许跨代际落地：它是按事实的和解读取，结果只按 id+版本向前合并
+      // （旧版本不覆盖新版本），setView 受 activeId 约束；会话往返（代际 +1）若吞掉该合并，
+      // 离页 queued 消息会在重建窗口里丢失且没有重试路径（A' 竞态）。活动 SSE 路径仍受代际守卫。
+      if (!mounted.current || (!options?.staleGenerationAllowed && viewGeneration.current.token !== generation)) return;
       const prior = cache.current.get(id);
       if (!prior) return;
       const next = { ...prior };
@@ -333,6 +365,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         if (windowSeq === null || (entity as Message).createdSequence <= windowSeq) {
           next.messages = mergeMessages(prior.messages, [entity as Message]);
         }
+        // 离页补读取得终态后立即移出补读名单：否则轮询条件读到陈旧名单，终态落地后仍空转一轮。
+        if (message.state !== "queued" && message.state !== "running") next.queuedOffPage = prior.queuedOffPage.filter(id => id !== message.id);
       }
       if (entity && event.kind === "proposal.changed") next.proposals = mergeProposals(prior.proposals, [entity as Proposal]);
       if (entity && event.kind === "run.changed") next.runs = mergeRuns(prior.runs, [entity as Run]);
@@ -343,18 +377,39 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       // 消息已合入缓存，仍显式重读其引用的 head；独立稿认可可能只发 message.changed，且产物不在快照首页。
       scheduleSnapshot(id, event.kind === "message.changed" && entity
         ? (entity as Message).references.artifacts.map(ref => ref.artifactId) : []);
-    } catch { if (activeId.current === id && viewGeneration.current.token === generation) { setConnectionState("最新状态尚未同步，正在补读。当前阅读和草稿已保留。"); scheduleSnapshot(id); } }
+    } catch {
+      if (!mounted.current || activeId.current !== id || viewGeneration.current.token !== generation) return;
+      setConnectionState("最新状态尚未同步，正在补读。当前阅读和草稿已保留。");
+      // 离页补读失败由定向轮询重试，最新快照不保证包含该消息。
+      if (!options?.staleGenerationAllowed) scheduleSnapshot(id);
+    }
   }, [scheduleSnapshot]);
 
   // 一条当前 SSE；离开的在途会话按事实轮询，避免几十条 EventSource 占满浏览器连接。
+  // 同一会话合并在途补读（finally 释放）：慢响应不再每 tick 叠加新请求，也就不会被更新的序号丢弃（R3）。
   useEffect(() => {
+    const inFlight = new Set<string>();
     const timer = window.setInterval(() => {
       for (const [id, item] of cache.current) {
-        if (id !== activeId.current && (item.activeRequestId || item.messages.some(message => message.state === "queued") || item.runs.some(run => !runEnded(run.state) || (run.finance != null && run.finance.state !== "settled")))) void refreshSnapshot(id);
+        if (inFlight.has(id)) continue;
+        const hasOffPageRequests = item.queuedOffPage.length > 0;
+        const needsBackgroundSnapshot = id !== activeId.current && (hasOffPageRequests || item.activeRequestId !== null
+          || item.messages.some(message => message.state === "queued")
+          || item.runs.some(run => !runEnded(run.state) || (run.finance != null && run.finance.state !== "settled")));
+        if (!needsBackgroundSnapshot && !hasOffPageRequests) continue;
+        inFlight.add(id);
+        void (async () => {
+          if (needsBackgroundSnapshot) await refreshSnapshot(id);
+          // 旧 queued 消息已离开最新快照页：复用 message.changed 的单实体读取合并缝取回真实终态，
+          // 当前会话也保留这些定向补读，切回时短暂读取失败不会卡住排队条。
+          for (const messageId of cache.current.get(id)?.queuedOffPage ?? []) {
+            await readEventEntity(id, { eventId: `background-poll:${messageId}`, cursor: "", conversationId: id, kind: "message.changed", entityId: messageId, entityVersion: 0, notification: "quiet", createdAt: "" }, { staleGenerationAllowed: true });
+          }
+        })().finally(() => { inFlight.delete(id); });
       }
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [refreshSnapshot]);
+  }, [refreshSnapshot, readEventEntity]);
 
   useEffect(() => {
     setView(conversationId ? cache.current.get(conversationId) ?? EMPTY_VIEW : EMPTY_VIEW);
@@ -956,11 +1011,25 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   };
   const backToWork = () => { openIntent.current++; setSelection(null); setInspectedRun(null); setOpenBatchId(null); };
   const selectWork = (id: string | null) => { backToWork(); setReviewNavigation(null); setSelectedWorkId(id); };
-  const openReview = (target: ReviewNavigation) => { backToWork(); setSelectedWorkId(target.workId); setReviewNavigation(target); };
+  const openReview = (target: ReviewNavigation) => { setChatDrawer(false); backToWork(); setSelectedWorkId(target.workId); setReviewNavigation(target); };
   const cacheRevision = (revision: ArtifactRevision) => setRevisionCache(current => current[`${revision.artifactId}:${revision.revisionId}`] ? current : ({ ...current, [`${revision.artifactId}:${revision.revisionId}`]: revision }));
-  const progressCard = (compact = false) => <TaskProgress activeRequestId={view.activeRequestId} messages={view.requestMessages} progress={requestProgress} runs={activeRuns}
-    contextStatus={contextNote} works={view.works} disconnected={streamDisconnected} compact={compact} onStop={stopActive} onOpenRun={runId => void openRun(runId)} onOpenWork={selectWork}
-    onOpenChat={() => { chatPanel.current?.expand(); setFocusPreview(false); if (view.windowAnchor) navigate(`/agent/${conversationId}`); }} />;
+  const compactWork = narrow && workMode;
+  const chatHidden = compactWork ? !chatDrawer : focusPreview;
+  const showChat = () => {
+    if (compactWork) { setChatDrawer(true); requestAnimationFrame(() => composerInput.current?.focus({ preventScroll: true })); }
+    else { chatPanel.current?.expand(); setFocusPreview(false); }
+  };
+  const closeChat = () => { setChatDrawer(false); chatToggle.current?.focus(); };
+  const submission = sendingNow && sending.current.has(conversationId ?? "new")
+    ? conversationId ? "正在提交请求" : "正在创建会话"
+    : reviewBusyKeys.some(key => (selectedWorkId && key.startsWith(`${selectedWorkId}:`)) || (openArtifactHead && key === `standalone:${openArtifactHead.id}`))
+      ? "正在提交审阅操作" : null;
+  const progressCard = (compact = false) => <TaskProgress submission={submission} activeRequestId={view.activeRequestId} messages={view.requestMessages} progress={requestProgress} runs={activeRuns}
+    contextStatus={contextNote} works={view.works} disconnected={streamDisconnected} compact={compact} showIdle={workMode && !!view.conversation.id} onStop={stopActive} onOpenRun={runId => void openRun(runId)} onOpenWork={selectWork}
+    onOpenChat={() => { showChat(); if (view.windowAnchor) navigate(`/agent/${conversationId}`); }} />;
+  const focusButton = <button type="button" className="agent-focus-toggle" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"}
+    onClick={() => { if (focusPreview) chatPanel.current?.expand(); else chatPanel.current?.collapse(); setFocusPreview(!focusPreview); }}>
+    {focusPreview ? <ArrowLeft /> : <Maximize2 />}{focusPreview ? "返回创作" : "聚焦审片"}</button>;
   const title = view.conversation.title || "新的对话";
   const discussArtifact = () => {
     if (!openArtifactHead) return;
@@ -979,10 +1048,13 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   } as const)[visibleContextNote.phase] : null;
 
   return <div className={`agent-root${sidebarHidden || focusPreview ? " sidebar-hidden" : ""}${focusPreview ? " review-focused" : ""}`}
+    data-compact-workspace={compactWork || undefined} data-chat-drawer={compactWork && chatDrawer || undefined}
     onPointerDownCapture={event => {
+      if (compactWork && chatDrawer && event.target instanceof Element && !event.target.closest(".agent-chat,.agent-side,.agent-rail")) setChatDrawer(false);
       if (!sidebarHidden && event.target instanceof Element && !event.target.closest(".agent-side,.agent-rail,[aria-label='切换侧栏']")) setSidebarHidden(true);
     }}
     onKeyDown={event => {
+      if (event.key === "Escape" && compactWork && chatDrawer && sidebarHidden) closeChat();
       if (event.key === "Escape" && !sidebarHidden) {
         setSidebarHidden(true);
         event.currentTarget.querySelector<HTMLButtonElement>("[aria-label='切换侧栏']")?.focus();
@@ -991,13 +1063,13 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     <nav className="agent-rail" aria-label="主导航">
       <button type="button" className="agent-rail-brand" aria-label="Frame 新对话" title="Frame · 新对话" onClick={() => void createConversation()}>f.</button>
       <button type="button" aria-label="新建对话" title="新建对话" onClick={() => void createConversation()}><Plus /><span className="agent-rail-label">新建</span></button>
-      <button type="button" aria-label={page === "chat" ? (sidebarHidden || focusPreview ? "展开会话列表" : "收起会话列表") : "返回当前对话"} title={page === "chat" ? "会话列表" : "返回当前对话"}
-        aria-current={page === "chat" ? "page" : undefined} aria-expanded={!sidebarHidden && !focusPreview}
-        onClick={() => { if (page !== "chat" || focusPreview) { setPage("chat"); chatPanel.current?.expand(); setFocusPreview(false); } else setSidebarHidden(value => !value); }}><MessageSquare /><span className="agent-rail-label">对话</span></button>
+      <button type="button" ref={chatToggle} aria-label={page === "chat" && compactWork ? (chatDrawer ? "收起对话" : "展开对话") : page === "chat" ? (sidebarHidden || focusPreview ? "展开会话列表" : "收起会话列表") : "返回当前对话"} title={page === "chat" ? "会话列表" : "返回当前对话"}
+        aria-current={page === "chat" ? "page" : undefined} aria-expanded={compactWork ? chatDrawer : !sidebarHidden && !focusPreview}
+        onClick={() => { if (page === "chat" && compactWork) { if (chatDrawer) closeChat(); else showChat(); } else if (page !== "chat" || focusPreview) { setPage("chat"); chatPanel.current?.expand(); setFocusPreview(false); } else setSidebarHidden(value => !value); }}><MessageSquare /><span className="agent-rail-label">对话</span></button>
       <button type="button" aria-label="打开作品库" title="作品库" aria-current={page === "library" ? "page" : undefined} onClick={() => setPage("library")}><Film /><span className="agent-rail-label">作品库</span></button>
       <div className="agent-rail-bottom"><button type="button" aria-label="打开模型配置" title="模型配置" aria-current={page === "models" ? "page" : undefined} onClick={() => setPage("models")}><Cpu /><span className="agent-rail-label">模型</span></button>
         <button type="button" aria-label="打开免费服务" title="免费服务" aria-current={page === "services" ? "page" : undefined} onClick={() => setPage("services")}><PlugZap /><span className="agent-rail-label">免费服务</span></button>
-        <button type="button" aria-label="打开 Skill 管理" title="Skill 管理" aria-current={page === "skills" ? "page" : undefined} onClick={() => setPage("skills")}><Sparkles /><span className="agent-rail-label">Skill</span></button>
+        <button type="button" aria-label="打开 Skill 管理" title="Skill 管理" aria-current={page === "skills" ? "page" : undefined} onClick={() => setPage("skills")}><Sparkles /><span className="agent-rail-label">技能</span></button>
         <button type="button" aria-label="打开个人设置" title="个人设置" aria-current={page === "profile" ? "page" : undefined} onClick={() => setPage("profile")}><UserRound /><span className="agent-rail-label">我的</span></button></div>
     </nav>
     <aside className="agent-side">
@@ -1017,19 +1089,20 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       })}{conversationCursor ? <button type="button" onClick={() => void loadMoreConversations()}>更多会话</button> : null}</nav>
     </aside>
     <main className="agent-frame">
-      {page !== "chat" ? <header className="agent-topbar"><button type="button" className="agent-icon-button" aria-label="返回当前对话" onClick={() => setPage("chat")}><ArrowLeft /></button><h1>{framePageTitle[page]}</h1></header> : null}
+
       <FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} onLibraryBringIn={bringLibraryPicks} libraryBringTarget={conversationId ? "current" : "new"} />
       <div ref={chatWorkspace} className="agent-chat-workspace" hidden={page !== "chat"}>
       {connectionState ? <div role="status" className="agent-connection-state">{connectionState}<button type="button" onClick={() => conversationId && void refreshSnapshot(conversationId, true)}>重新连接</button></div> : null}
       {actionError || bootError ? <div className="agent-action-error" role="alert">{actionError || bootError}<button type="button" onClick={() => setActionError("")}>知道了</button></div> : null}
-      {focusPreview ? progressCard(true) : null}
-      <Group className="agent-main" orientation="horizontal" id="vf-agent-panels" onLayoutChanged={layout => { if (layout["agent-chat"]) savePanelLayout(layout); }} defaultLayout={panelLayout ?? undefined}>
-        <Panel id="agent-chat" defaultSize="28%" minSize="23%" maxSize="42%" collapsible panelRef={chatPanel} onResize={size => setFocusPreview(size.asPercentage === 0)}>
-          <section className="agent-chat" inert={focusPreview}>
+      {focusPreview && !workMode ? progressCard(true) : null}
+      <Group className="agent-main" orientation="horizontal" id="vf-agent-panels" onLayoutChanged={layout => { if (!compactWork && layout["agent-chat"]) savePanelLayout(layout); }} defaultLayout={panelLayout ?? undefined}>
+        <Panel id="agent-chat" defaultSize="25%" minSize="21%" maxSize="42%" collapsible panelRef={chatPanel} onResize={size => { if (!compactWork) setFocusPreview(size.asPercentage === 0); }}>
+          <section className="agent-chat" inert={chatHidden}>
 <header className="agent-topbar agent-conversation-heading">
         <button type="button" className="agent-icon-button" aria-label="切换侧栏" aria-expanded={!sidebarHidden} onClick={() => setSidebarHidden(value => !value)}><PanelLeft /></button>
         <div className="agent-topbar-title">{renaming?.id === conversationId && conversationId ? <input autoFocus className="agent-rename-input" aria-label="会话名称" value={renaming.title} onChange={event => setRenaming({ id: conversationId, title: event.target.value })} onBlur={() => void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision)} onKeyDown={event => { if (event.key === "Enter") void commitRename(conversationId, renaming.title.trim() || title, view.conversation.revision); if (event.key === "Escape") setRenaming(null); }} /> : <h1 onDoubleClick={() => conversationId && setRenaming({ id: conversationId, title })}>{page === "chat" ? title : framePageTitle[page]}</h1>}</div>
         <button type="button" className="agent-title-rename" aria-label="重命名当前对话" hidden={page !== "chat" || !conversationId} onClick={() => conversationId && setRenaming({ id: conversationId, title })}><Pencil /></button>
+        {compactWork && chatDrawer ? <button type="button" className="agent-icon-button" aria-label="关闭对话" onClick={closeChat}><X /></button> : null}
         <span className="agent-runtime-label agent-sr-only">{model?.availability === "configured" ? `${model.name}${isSimulated ? " · 模拟媒体" : ""}` : "文本模型待配置"}</span>
       </header>
             <div className="agent-messages" ref={chatScroll} onScroll={onChatScroll}>
@@ -1054,7 +1127,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               </div>)}
               {streaming ? <div className="agent-message assistant streaming" data-testid="streaming-message"><span className="agent-assistant-avatar">f·</span><div className="agent-message-content"><span className="agent-author">Frame</span><MarkdownText text={streaming.text || "正在想…"} /></div></div> : null}
             </div>
-            {!focusPreview ? progressCard() : null}
+            {!chatHidden ? progressCard() : null}
             {unseenMessages && !view.windowAnchor ? <button className="agent-new-messages" type="button" onClick={() => { pinnedBottom.current = true; setUnseenMessages(false); if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight; }}>回到最新消息 ↓</button> : null}
             <footer className="agent-composer">
               {skillNotice ? <p className="agent-config-note" role="status">{skillNotice}</p> : null}
@@ -1082,7 +1155,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         <Separator className="agent-resizer" aria-label="调整对话与预览的宽度" title="拖动或用左右方向键调整宽度" />
         <Panel id="agent-preview" minSize="58%">
           <section className="agent-preview">
-            <div className="agent-workspace-status" data-work-mode={workMode || undefined}><Film /><strong>{focusPreview ? "聚焦审片" : "作品中心"}</strong>{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}<button type="button" aria-label={focusPreview ? "返回聊天与作品" : "展开作品区"} title={focusPreview ? "返回聊天与作品" : "展开作品区"} onClick={() => { if (focusPreview) chatPanel.current?.expand(); else chatPanel.current?.collapse(); setFocusPreview(!focusPreview); }}>{focusPreview ? <ArrowLeft /> : <Maximize2 />}{focusPreview ? "返回创作" : "聚焦审片"}</button></div>
+            {!workMode ? <div className="agent-workspace-status"><Film /><strong>{focusPreview ? "聚焦审片" : "作品中心"}</strong>{view.runs.length ? <button type="button" onClick={() => void openRun(view.runs[0]!.id)}>制作记录 · {view.runs.length}</button> : null}{focusButton}</div> : null}
             {!workMode && view.artifacts.length ? <div className="agent-artifact-tabs" data-work-mode={workMode || undefined} aria-label="当前会话产物">{view.artifacts.map(artifact => <button type="button" key={artifact.id} aria-label={artifact.title} title={artifact.title} aria-pressed={!inspectedRun && selection?.artifactId === artifact.id} onClick={() => openArtifact(artifact.id)}><span className="agent-artifact-icon"><ArtifactIcon kind={artifact.kind} /></span><span><strong>{artifact.title}</strong><small>{stageOwnedLabel(view.works, artifact)}就绪</small></span>{notices.byConversation.get(conversationId ?? "")?.includes(artifact.id) ? <span className="agent-output-badge">有更新</span> : null}</button>)}{view.artifactCursor ? <button type="button" onClick={() => void loadMoreOutputs("artifacts")}>更多产物</button> : null}</div> : null}
             <div className="agent-workspace-scroll" data-mode={workMode ? "work" : undefined} data-proposals-open={workMode && proposalsOpen || undefined}>
               {selectedRun ? <article className="agent-paper"><header className="agent-preview-header"><h2>制作记录</h2><button type="button" onClick={() => { openIntent.current++; setInspectedRun(null); }}>回到作品</button></header><RunCard key={selectedRun.id} run={selectedRun} onCancel={r => void cancelProduction(r)} onOpen={openArtifact} simulated={isSimulated} proposals={view.proposals} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onRetry={() => void retryReferences()} />
@@ -1122,6 +1195,11 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               </article>
               : !view.works.length ? <FrameEmptyPreview /> : null}
               {view.works.length ? <div style={{ display: "contents" }} hidden={!workMode}><WorkCenter key={conversationId} active={page === "chat" && workMode}
+                toolbar={<div className="agent-center-tools">
+                  {chatHidden ? progressCard(true) : null}
+                  {view.runs.length ? <button type="button" className="agent-open-runs" title="制作记录" aria-label={`制作记录 · ${view.runs.length}`} onClick={() => void openRun(view.runs[0]!.id)}><Film /></button> : null}
+                  {!compactWork ? focusButton : null}
+                </div>}
                 works={view.works} selectedWorkId={selectedWorkId} onSelectWork={selectWork} onOpenReview={openReview}
                 revisions={revisionCache} onRevisionLoaded={cacheRevision} artifacts={view.artifacts} onOpenArtifact={openArtifact}
                 hasMoreArtifacts={Boolean(view.artifactCursor)} onMoreArtifacts={() => void loadMoreOutputs("artifacts")}>
@@ -1187,7 +1265,10 @@ function MessageRow({ works, message, anchored, onOpenArtifact, artifacts, propo
         const revision = revisions[`${reference.artifactId}:${reference.revisionId}`];
         const errorKey = errors[`artifact:${reference.artifactId}`] ? `artifact:${reference.artifactId}` : `revision:${reference.artifactId}:${reference.revisionId}`;
         if ((!artifact || !revision) && errors[errorKey]) return unavailable(errorKey, artifact?.title ?? "产出");
-        return <button key={reference.revisionId} type="button" aria-label={artifact?.title ?? "查看产出"} onClick={() => onOpenArtifact(reference.artifactId, reference.revisionId)}><ArtifactIcon kind={artifact?.kind ?? "prompt"} /><span><strong>{artifact?.title ?? "查看产出"}</strong><small>{artifact ? stageOwnedLabel(works, artifact) : "内容"}{revision ? ` · v${revision.revisionNumber}` : " · 绑定版本"}</small></span><ChevronRight /></button>;
+        // A11：历史卡以「类型·准确版本」为主识别；产物改名/升版后的当前名只作补充说明，避免把旧修订误读成最新内容。
+        const ownedLabel = artifact ? stageOwnedLabel(works, artifact) : "内容";
+        const versionText = revision ? ` · v${revision.revisionNumber}` : " · 绑定版本";
+        return <button key={reference.revisionId} type="button" aria-label={`${ownedLabel}${versionText}${artifact ? `，现名：${artifact.title}` : ""}`} onClick={() => onOpenArtifact(reference.artifactId, reference.revisionId)}><ArtifactIcon kind={artifact?.kind ?? "prompt"} /><span><strong>{ownedLabel}{versionText}</strong><small>{artifact ? `现名：${artifact.title}` : "查看产出"}</small></span><ChevronRight /></button>;
       })}{message.references.runIds.map(id => {
         const run = runs.find(item => item.id === id);
         return run ? <button key={id} type="button" onClick={() => onOpenRun(id)}><span><strong>{run.title}</strong><small>制作记录</small></span><ChevronRight /></button> : unavailable(`run:${id}`, "制作记录");

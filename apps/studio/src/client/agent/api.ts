@@ -126,6 +126,7 @@ export const agentApi = {
   readProposal: (id: string) => requestJson<Proposal>("GET", `/api/agent/v1/proposals/${encodeURIComponent(id)}`),
   readRun: (id: string) => requestJson<Run>("GET", `/api/agent/v1/runs/${encodeURIComponent(id)}`),
   readWork: (id: string) => requestJson<Work>("GET", `/api/agent/v1/works/${encodeURIComponent(id)}`),
+  latestReviewFeedback: (workId: string, groupId: string, itemId: string) => requestJson<{ message: Message | null }>("GET", `/api/agent/v1/works/${encodeURIComponent(workId)}/groups/${encodeURIComponent(groupId)}/items/${encodeURIComponent(itemId)}/latest-feedback`),
   reviewApprovalHistory: (workId: string, groupId: string, itemId: string, cursor?: string) => requestJson<ReviewApprovalHistoryPage>("GET", `/api/agent/v1/works/${encodeURIComponent(workId)}/groups/${encodeURIComponent(groupId)}/items/${encodeURIComponent(itemId)}/approvals${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   readMaterialBatch: (id: string) => requestJson<MaterialBatch>("GET", `/api/agent/v1/material-batches/${encodeURIComponent(id)}`),
   acceptProposal: (id: string, input: AcceptProposal) => requestJson<AdmissionReceipt>("POST", `/api/agent/v1/proposals/${encodeURIComponent(id)}/acceptances`, input),

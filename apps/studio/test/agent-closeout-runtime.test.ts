@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { test, type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
-import { assembleOfflineAgent, FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
+import { assembleOfflineAgent, FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot, studioRoot, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
 import { createAgentRuntime } from "../src/server/agent/assembly.js";
 import { projectDraftItems } from "../src/server/agent/artifact-drafts.js";
 import { validatorFor } from "../src/server/agent/validate.js";
@@ -16,6 +16,8 @@ import { CreativeRunner } from "../src/server/agent/creative-runner.js";
 import { createWork, parseCreationState, writeWorkState } from "../src/server/agent/creative-work.js";
 import { openAgentDatabase } from "../src/server/agent/db.js";
 import { getMessageRow, recordRequestProgress, rowToMessage } from "../src/server/agent/conversation-store.js";
+
+import { seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t: TestContext, options: Partial<Parameters<typeof assembleOfflineAgent>[0]> = {}) {
@@ -378,6 +380,7 @@ test("S1-13 白名单、不合法工具后换调用、停止后无迟到草稿�
   const stopped = app.service.snapshot("local-owner", id).messages.items.find(message => message.requestId === requestId && message.role === "user")!;
   assert.equal(stopped.state, "stopped");
   assert.ok(stopped.execution?.endedAt, "停止后仍保留本轮执行记录");
+  assert.equal(stopped.execution.completionReason, undefined);
 });
 
 test("S1-05 原生 threshold 自动压缩后最后答复正确，继续闲聊与单目标改稿", async t => {
@@ -513,4 +516,46 @@ test("S1-06 threshold 摘要失败保留成功答复与成果，停止摘要不�
   app.service.stopRequest("local-owner", requestId!, { commandId: "stop-summary" }); await idle(app, id);
   assert.ok(statuses.some(s => s.requestId === requestId && s.phase === "cancelled"));
   assert.equal((app.database.prepare("SELECT state FROM requests WHERE id=?").get(requestId) as { state: string }).state, "stopped");
+});
+
+test("上一条修改意见按作品和事项读取，支持空态和旧消息", async t => {
+  const { app, id } = await fixture(t);
+  const ownerId = "local-owner", scope = { ownerId, conversationId: id };
+  const a = seedConfirmedWork(app.database, new Date().toISOString(), scope, "轨道之上");
+  const b = seedConfirmedWork(app.database, new Date().toISOString(), scope, "一杯早晨");
+  const endpoint = (work: typeof a) => `/api/agent/v1/works/${work.workId}/groups/${work.groupId}/items/${work.itemId}/latest-feedback`;
+  const note = (work: typeof a, text: string) => {
+    assert.equal(work.content.kind, "artifact_revision");
+    return app.service.addFeedback(ownerId, id, { commandId: `cmd-${crypto.randomUUID()}`, text,
+      target: { workId: work.workId, artifactId: work.content.artifactId, revisionId: work.content.revisionId } }).receipt.messageId;
+  };
+  assert.equal((await app.app.inject({ url: endpoint(a) })).json().message, null);
+  note(a, "先改片头");
+  const lastA = note(a, "保留画面，降低配乐");
+  for (let i = 0; i < 55; i++) note(b, `给咖啡短片的意见 ${i}`);
+  assert.equal(app.service.snapshot(ownerId, id).messages.items.some(message => message.id === lastA), false);
+  const response = await app.app.inject({ url: endpoint(a) });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().message.id, lastA);
+  assert.throws(() => app.service.latestReviewFeedback("other-owner", a.workId, a.groupId, a.itemId));
+  assert.equal((await app.app.inject({ url: endpoint(a).replace(a.itemId, b.itemId) })).statusCode, 404);
+});
+
+test("视频封面返回 JPEG、按不可变媒体重验证且权限先于缓存", async t => {
+  const { app, id } = await fixture(t, { media: { autoStart: false } });
+  const bytes = await readFile(path.join(studioRoot, "src/client/agent/preview/assets/coffee-preview.mp4"));
+  const blobs = app.production!.blobs;
+  const video = blobs.persist("local-owner", id, bytes, "video/mp4", 6000);
+  const endpoint = (blobId: string) => `/api/agent/v1/blobs/${blobId}/poster`;
+  const [first, concurrent] = await Promise.all([1, 2].map(() => app.app.inject({ url: endpoint(video.id) })));
+  assert.equal(first!.statusCode, 200);
+  assert.equal(first!.headers["content-type"], "image/jpeg");
+  assert.equal(first!.rawPayload.readUInt16BE(0), 0xffd8);
+  assert.deepEqual(first!.rawPayload, concurrent!.rawPayload);
+  assert.equal(first!.headers["cache-control"], "private, no-cache");
+  const headers = { "if-none-match": String(first!.headers.etag) };
+  assert.equal((await app.app.inject({ url: endpoint(video.id), headers })).statusCode, 304);
+  const other = app.service.createConversation("other-owner", { commandId: "other-start", title: "独立测试会话" }).conversation;
+  const sameBytes = blobs.persist("other-owner", other.id, bytes, "video/mp4", 6000);
+  assert.equal((await app.app.inject({ url: endpoint(sameBytes.id), headers })).statusCode, 404);
 });

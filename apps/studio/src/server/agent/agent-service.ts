@@ -301,6 +301,25 @@ export class AgentService {
     return workProjection(this.options.db, row);
   }
 
+  latestReviewFeedback(ownerId: string, workId: string, groupId: string, itemId: string) {
+    const work = getWorkRow(this.options.db, ownerId, workId);
+    const item = work && parseCreationState(work).groups.find(group => group.id === groupId)?.items.find(entry => entry.id === itemId);
+    if (!work || !item) throw new AgentError("NOT_FOUND", "没有找到这个审阅事项。");
+    const sources = [item.draft, item.approved].filter(source => source !== null);
+    // 意见可能早已翻出聊天窗口。按原始绑定查整条历史；旧修订没有绑定时用该事项的稿件或聊天来源。
+    const latest = this.options.db.prepare(`SELECT m.id FROM messages m
+      LEFT JOIN artifact_revisions r ON r.id = json_extract(m.target_json, '$.revisionId')
+      WHERE m.conversation_id = ? AND m.owner_id = ? AND m.feedback_json IS NOT NULL
+        AND COALESCE(json_extract(m.feedback_json, '$.workId'), json_extract(m.target_json, '$.workId'), json_extract(r.creation_binding_json, '$.workId')) = ?
+        AND (CASE WHEN r.creation_binding_json IS NOT NULL THEN
+          json_extract(r.creation_binding_json, '$.groupId') = ? AND json_extract(r.creation_binding_json, '$.itemId') = ?
+          ELSE EXISTS (SELECT 1 FROM json_each(?) s WHERE
+            json_extract(s.value, '$.artifactId') = json_extract(m.target_json, '$.artifactId')
+            OR json_extract(s.value, '$.messageId') = json_extract(m.feedback_json, '$.contentSource.messageId')) END)
+      ORDER BY m.created_seq DESC LIMIT 1`).get(work.conversation_id, ownerId, workId, groupId, itemId, JSON.stringify(sources)) as { id: string } | undefined;
+    return latest ? this.readMessage(ownerId, latest.id) : null;
+  }
+
   listReviewApprovalHistory(ownerId: string, workId: string, groupId: string, itemId: string, cursor?: string): ReviewApprovalHistoryPage {
     const row = getWorkRow(this.options.db, ownerId, workId);
     if (!row || !parseCreationState(row).groups.some(group => group.id === groupId && group.items.some(item => item.id === itemId))) {
