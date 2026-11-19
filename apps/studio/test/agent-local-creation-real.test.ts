@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assembly.js";
@@ -21,10 +22,14 @@ import type { CreativeProjectContent, ModelEntry, Work } from "../src/shared/age
 // 必须显式指定已运行 daemon（FRAME_CREATIVE_DOCKER_SOCKET）；缺失时跳过，不用替身冒充。
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const evidence = path.join(root, ".local/skill-creation");
+// 长路径 worktree 下可以指定较短的证据路径，避免 macOS 的 Unix socket 路径长度限制。
+const evidence = process.env.FRAME_CREATIVE_TEST_EVIDENCE_DIR ?? path.join(root, ".local/skill-creation");
 const dockerSocket = process.env.FRAME_CREATIVE_DOCKER_SOCKET;
 
 const SKILL_NAME = "frame-anim-recipe";
+const COMMAND_TIMEOUT_SECONDS = 90;
+// 整个回合还要完成文件读写、工程封存与终态落盘。
+const TURN_WAIT_MS = (COMMAND_TIMEOUT_SECONDS + 30) * 1000;
 
 // Skill 参考：逐帧动画配方。BACKGROUND 与 SQUARE 是每次制作替换的配色，其余固定。
 const recipe = `# 逐帧动画配方
@@ -111,15 +116,20 @@ async function setupReal(directory: string): Promise<{ world: World; broker: { c
   };
 }
 
-// 真实容器执行以秒计：回合轮询给足真实时间，不拿超时截断冒充回合结束。
 async function send(world: World, steps: (ReturnType<typeof fauxAssistantMessage> | ((context: TranscriptContext) => ReturnType<typeof fauxAssistantMessage>))[], text = "请处理", extra: Record<string, unknown> = {}) {
   world.runtime.host.faux!.setResponses(steps);
-  const sent = await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput(text, extra));
-  for (let i = 0; i < 900 && world.runtime.service.snapshot("local-owner", world.conversationId).activeRequestId; i++) {
-    await new Promise(resolve => setTimeout(resolve, 100));
+  const startedAt = performance.now();
+  const { receipt } = await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput(text, extra));
+  let message = world.runtime.service.readMessage("local-owner", receipt.messageId);
+  while ((message.state === "queued" || message.state === "running") && performance.now() - startedAt < TURN_WAIT_MS) {
+    await delay(100);
+    message = world.runtime.service.readMessage("local-owner", receipt.messageId);
   }
-  assert.equal(world.runtime.service.snapshot("local-owner", world.conversationId).activeRequestId, null, "回合应已结束");
-  return sent.receipt;
+  if (message.state !== "completed" || message.execution?.completionReason !== "finished") {
+    const elapsed = Math.round(performance.now() - startedAt);
+    assert.fail(`回合「${text}」(${receipt.requestId}) 未自然结束，状态 ${message.state}，等待 ${elapsed}/${TURN_WAIT_MS} ms，执行记录 ${JSON.stringify(message.execution ?? null)}`);
+  }
+  return receipt;
 }
 
 async function drive(world: World, runId: string) {
@@ -182,7 +192,7 @@ it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改�
         assert.match(read.text, /逐帧动画配方/, "读到的是 Skill 参考内容");
         return fauxAssistantMessage([fauxToolCall("write", { path: "anim.py", content: animFirst })]);
       },
-      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "动画工程", files: ["anim.py"],
         entrypoint: { argv: ["python3", "-I", "anim.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("工程已冻结。"),
@@ -240,7 +250,7 @@ it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改�
     await send(world, [
       fauxAssistantMessage([fauxToolCall("edit", { path: "anim.py", edits: [
         { oldText: '"#15263c"', newText: '"#efe8db"' }, { oldText: '"#f6ca65"', newText: '"#b85638"' }] })]),
-      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "动画工程", files: ["anim.py"],
         entrypoint: { argv: ["python3", "-I", "anim.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("新配色已封存。"),
@@ -266,6 +276,17 @@ it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改�
     assert.equal(second.state, "succeeded");
     const after = itemOf(world, target.groupId, target.itemId);
     assert.ok(after.draft?.kind === "artifact_revision" && after.draft.revisionId !== item.draft.revisionId, "草稿推进到新修订");
+    assert.equal(after.draft.artifactId, item.draft.artifactId, "实际容器重渲续入同一产物");
+    const secondRevision = world.runtime.service.readRevision("local-owner", after.draft.artifactId, after.draft.revisionId);
+    assert.equal(secondRevision.revisionNumber, 2);
+    assert.equal(secondRevision.baseRevisionId, item.draft.revisionId);
+    assert.equal(secondRevision.runId, secondRunRow.id);
+    assert.equal(secondRevision.creationBinding?.runId, secondRunRow.id);
+    assert.equal(second.operations[0]?.operationId, "anim-2");
+    const operationOutput = world.runtime.database.prepare(
+      "SELECT output_revision_id AS revisionId FROM production_operations WHERE run_id=? AND id=?",
+    ).get(secondRunRow.id, "anim-2");
+    assert.deepEqual(operationOutput, { revisionId: after.draft.revisionId });
     const secondMedia = jsonField(world, "SELECT content_json FROM artifact_revisions WHERE id=?", "content_json", after.draft.revisionId) as { mimeType: string; blobId: string };
     const secondBlob = world.blobs.get("local-owner", secondMedia.blobId);
     assert.notEqual(secondBlob.digest, firstBlob.digest, "修改后产出字节不同");
@@ -281,8 +302,12 @@ it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改�
 
     await writeFile(path.join(directory, "evidence.json"), JSON.stringify({
       imageId: broker.imageId, socketPath: broker.socketPath, skill: SKILL_NAME,
-      runs: [{ runId: runRow.id, state: first.state, digest: firstBlob.digest, durationMs: firstMedia.durationMs },
-        { runId: secondRunRow.id, state: second.state, digest: secondBlob.digest }],
+      runs: [
+        { runId: runRow.id, operationId: first.operations[0]!.operationId, revision: first.outputRevisions[0]!,
+          state: first.state, digest: firstBlob.digest, durationMs: firstMedia.durationMs },
+        { runId: secondRunRow.id, operationId: second.operations[0]!.operationId, revision: second.outputRevisions[0]!,
+          baseRevisionId: secondRevision.baseRevisionId, revisionNumber: secondRevision.revisionNumber, state: second.state, digest: secondBlob.digest },
+      ],
       media: ["animation-draft.mp4", "animation-revised.mp4"],
     }, null, 2));
   } finally { await world.close(); }
@@ -313,7 +338,7 @@ it("S3/V3 真实容器执行边界：未来输出、无输出不交付、镜像�
     // 确定性动画工程：从零生成可解码短动画（输出不进封存清单，由本次执行产生）。
     await send(world, [
       fauxAssistantMessage([fauxToolCall("write", { path: "anim.py", content: animFirst })]),
-      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I anim.py", timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "动画工程", files: ["anim.py"],
         entrypoint: { argv: ["python3", "-I", "anim.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("工程已冻结。"),
@@ -355,9 +380,10 @@ it("S3/V3 真实容器执行边界：未来输出、无输出不交付、镜像�
     assert.equal(digestOf(rerun.outputRevisions[0]!.revisionId), firstDigest, "同源码重渲产出同样字节");
 
     // 合法封存 + 确实执行 + 正常退出但不写声明输出：不能交付旧文件。
+    const executionMarker = "s3-entrypoint-ran-without-media";
     await send(world, [
-      fauxAssistantMessage([fauxToolCall("write", { path: "silent.py", content: "import sys\nsys.exit(0)\n" })]),
-      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I silent.py", timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("write", { path: "silent.py", content: `print("${executionMarker}")\n` })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I silent.py", timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "静默工程", files: ["silent.py"],
         entrypoint: { argv: ["python3", "-I", "silent.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("静默工程已冻结。"),
@@ -377,7 +403,10 @@ it("S3/V3 真实容器执行边界：未来输出、无输出不交付、镜像�
     ], "渲染静默工程。");
     const silentRun = await drive(world, runOf());
     assert.equal(silentRun.state, "failed", "正常退出但没有声明输出必须失败");
-    assert.match(silentRun.issue?.message ?? "", /没有产生声明的输出 output\.mp4/);
+    assert.equal(silentRun.issue?.code, "PROVIDER_FAILED");
+    const issue = silentRun.issue?.message ?? "";
+    assert.match(issue, /output\.mp4/, "失败信息应指向这次声明的输出文件");
+    assert.ok(issue.includes(executionMarker), "失败记录保留了本次入口实际执行的输出");
     assert.equal(silentRun.outputRevisions.length, 0);
     assert.equal(count(world, "FROM artifacts WHERE kind='video'"), videosBefore, "不交付旧文件，也不新增产物");
     const silentSpec = jsonField(world, "SELECT spec_json FROM production_snapshots WHERE id=?", "spec_json", silentRun.snapshotId) as { operations: { target: { groupId: string; itemId: string } }[] };
@@ -411,7 +440,7 @@ Image.new("RGB", (320, 180), "#243447").save("spaced.png")
 `;
     await send(world, [
       fauxAssistantMessage([fauxToolCall("write", { path: "spaced.py", content: spacedScript })]),
-      fauxAssistantMessage([fauxToolCall("bash", { command: 'python3 -I spaced.py "参数 含 空格"', timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: 'python3 -I spaced.py "参数 含 空格"', timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "参数工程", files: ["spaced.py"],
         entrypoint: { argv: ["python3", "-I", "spaced.py", "参数 含 空格"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("参数工程已冻结。"),
@@ -445,7 +474,7 @@ else:
 `;
     await send(world, [
       fauxAssistantMessage([fauxToolCall("write", { path: "passthrough.py", content: passthroughScript })]),
-      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I passthrough.py", timeout: 90 })]),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "python3 -I passthrough.py", timeout: COMMAND_TIMEOUT_SECONDS })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "复用工程", files: ["passthrough.py"],
         entrypoint: { argv: ["python3", "-I", "passthrough.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
       fauxAssistantMessage("复用工程已冻结。"),

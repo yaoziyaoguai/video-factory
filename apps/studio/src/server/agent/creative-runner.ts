@@ -12,6 +12,7 @@ import { AgentError } from "./errors.js";
 export const CREATIVE_IMAGE = "frame-creative:pi-1.4-v1";
 export const CREATIVE_TOOL_NAMES = ["read", "write", "edit", "bash"] as const;
 export const CREATIVE_CWD = "/workspace";
+const WRITE_REQUEST_MAX_BYTES = 128 * 1024 * 1024;
 
 // code_project 媒体输入在执行工作区的落位规则：inputs/<slot>.<扩展名>。
 // 受理边界用同一映射核对输出路径与输入落位分离，执行处用它真实落文件；作品库选材输入复用同一扩展映射。
@@ -61,6 +62,24 @@ export function creativeWorkspaceId(workspace: CreativeWorkspace | CreativeToolC
   return createHash("sha256").update(JSON.stringify([workspace.conversationId, workspace.workId, workspace.executionId])).digest("hex");
 }
 export const creativeSkillDirectory = (id: string): string => `/skills/${id}`;
+
+function projectPath(file: string): string {
+  if (!file || path.posix.isAbsolute(file) || file.split(/[\\/]/).some(part => part === "..")) {
+    throw new AgentError("INVALID_INPUT", "工程文件必须使用工作区内的相对路径。");
+  }
+  return path.posix.join(CREATIVE_CWD, file);
+}
+
+export function assertCreativeWriteFits(file: string, rawBytes: number, subject: string): string {
+  const normalizedPath = projectPath(file);
+  // 工作区身份总是 64 位十六进制，受理时尚无 runId 也能计算真实 write 消息。
+  const envelope = { workspaceId: "0".repeat(64), action: "write", path: normalizedPath, data: "" };
+  const requestBytes = Buffer.byteLength(JSON.stringify(envelope), "utf8") + 4 * Math.ceil(rawBytes / 3);
+  if (requestBytes > WRITE_REQUEST_MAX_BYTES) {
+    throw new AgentError("INVALID_INPUT", `${subject}原文件 ${rawBytes} B，code_project 写入请求 ${requestBytes} B，超过 128 MiB（${WRITE_REQUEST_MAX_BYTES} B）上限，请换用更小的文件。`);
+  }
+  return normalizedPath;
+}
 
 /** 编辑工作区：同一 conversation+work 的原生创作工具与 publish_project 共用固定身份。 */
 export function editingWorkspace(conversationId: string, workId: string): CreativeWorkspace {
@@ -113,11 +132,14 @@ export class CreativeRunner {
     return (await this.request(workspace, "image", {})).imageId!;
   }
   async readFile(workspace: CreativeWorkspace, relativePath: string): Promise<Buffer> {
-    const result = await this.request(workspace, "read", { path: this.projectPath(relativePath) });
+    const result = await this.request(workspace, "read", { path: projectPath(relativePath) });
     return Buffer.from(result.data!, "base64");
   }
   async writeFile(workspace: CreativeWorkspace, relativePath: string, content: Buffer | string): Promise<void> {
-    await this.request(workspace, "write", { path: this.projectPath(relativePath), data: Buffer.from(content).toString("base64") });
+    const buffer = Buffer.isBuffer(content);
+    const file = assertCreativeWriteFits(relativePath, buffer ? content.length : Buffer.byteLength(content, "utf8"), `文件「${relativePath}」`);
+    const data = (buffer ? content : Buffer.from(content)).toString("base64");
+    await this.request(workspace, "write", { path: file, data });
   }
   async listFiles(workspace: CreativeWorkspace): Promise<CreativeFile[]> {
     return (await this.request(workspace, "list", {})).files!;
@@ -130,13 +152,6 @@ export class CreativeRunner {
   async executeArgv(workspace: CreativeWorkspace, argv: readonly string[], options: CreativeExecutionOptions = {}): Promise<{ exitCode: number | null }> {
     const result = await this.request(workspace, "execute", { argv: [...argv], ...(options.timeout === undefined ? {} : { timeout: options.timeout }) }, options);
     return { exitCode: result.exitCode! };
-  }
-
-  private projectPath(file: string): string {
-    if (!file || path.posix.isAbsolute(file) || file.split(/[\\/]/).some(part => part === "..")) {
-      throw new AgentError("INVALID_INPUT", "工程文件必须使用工作区内的相对路径。");
-    }
-    return path.posix.join(CREATIVE_CWD, file);
   }
 
   private async skillSnapshot(skills: CreativeSkill[]): Promise<{ revision: string; files: SkillFile[] }> {

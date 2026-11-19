@@ -351,7 +351,7 @@ function ReviewItemCard({ work, group, item, groupPicker, revisions, runs, simul
   const finalizedCurrent = item.role === "video" && sameSource(item.finalizedSource, draft);
   // 所看视频修订决定阅读身份（E1）：整片、片段条、片段针对与制作记录同属该修订的 run。
   const isVideo = item.role === "video";
-  const viewingRunId = isVideo && displayedSource?.kind === "artifact_revision" ? revision?.runId ?? null : null;
+  const viewingRunId = isVideo ? shown?.runId ?? shown?.creationBinding?.runId ?? null : null;
   const viewingRunLoaded = viewingRunId == null || runs.some(run => run.id === viewingRunId);
   // 回调身份不进依赖：父级每次渲染都会换新箭头，进了依赖会让补读 effect 反复触发。
   const ensureRunRef = useRef(onEnsureRun);

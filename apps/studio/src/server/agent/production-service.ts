@@ -279,7 +279,7 @@ export class ProductionService {
         operationId: operation.operationId, outputSlot: operation.outputSlot, inputs: operation.inputs,
         kind: "render", model: null, maxCreateAttempts: 1, parameters: operation.parameters,
       }));
-      const { validation, renderParameters, musicSources } = normalizeOperationInputs(this.db, scope, inputSources, requestedOperations, catalog, probes);
+      const { validation, renderParameters, musicSources } = normalizeOperationInputs(this.db, scope, inputSources, requestedOperations, catalog, probes, this.blobs);
       const operations: LocalRenderOperation[] = [];
       const projectArtifactIds: string[] = [];
       for (const operation of intent.operations) {

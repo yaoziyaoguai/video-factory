@@ -10,7 +10,8 @@ import type {
   Target, ToolDelivery, ToolProductionIntent, VideoParameters, RevisionRef, ProposalRef, InputRef,
 } from "../../shared/agent/generated/contracts.js";
 import { blobSources, mergeSources, resolveMediaReference, readAdoptedAudioSource } from "./material-store.js";
-import { CODE_PROJECT_INPUT_EXTENSIONS } from "./creative-runner.js";
+import { assertCreativeWriteFits, CODE_PROJECT_INPUT_EXTENSIONS, codeProjectInputPath, MEDIA_INPUT_EXTENSION } from "./creative-runner.js";
+import type { ProductionBlobs } from "./production-blobs.js";
 import { operationOutputRevision } from "./production-store.js";
 import { speechText, markdownSectionMap, markdownTotalLength } from "../../shared/agent/markdown.js";
 import {
@@ -739,16 +740,16 @@ function inheritedBinding(
 // publish_project 的工程修订与交付修订共用同一落库路径；工程内容由调用方先行冻结与清单校验。
 export function insertRevision(
   db: AgentDatabase, now: string, artifact: ArtifactRow, baseRevisionId: string | null,
-  item: { title: string; kind: string; content: ArtifactRevision["content"] }, requestId: string,
-  binding: CreationBinding | null = null,
+  item: { title: string; kind: string; content: ArtifactRevision["content"] }, requestId: string | null,
+  binding: CreationBinding | null = null, runId: string | null = null,
 ): ArtifactRevisionRow {
   const revisionId = newAgentId("rev");
   const revisionNumber = artifact.head_revision_number + 1;
   const content = item.content;
   db.prepare(
     `INSERT INTO artifact_revisions(id, artifact_id, revision_number, base_revision_id, request_id, run_id, digest, content_json, creation_binding_json, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-  ).run(revisionId, artifact.id, revisionNumber, baseRevisionId, requestId, digestOf(content), canonicalJson(content),
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(revisionId, artifact.id, revisionNumber, baseRevisionId, requestId, runId, digestOf(content), canonicalJson(content),
     binding ? canonicalJson(binding) : null, now);
   // 媒体修订与作品库文件卡修订共享 blob、不复制字节；blob 关联同事务写入，文本修订没有 blob。
   if (content.format === "media" || content.format === "file") {
@@ -1242,6 +1243,7 @@ export function normalizeOperationInputs(
   operationRequests: readonly OperationRequest[],
   catalog: QuoteCatalog,
   probes?: Map<string, RenderFileProbe>,
+  localWriteBlobs?: ProductionBlobs,
 ): {
   validation: CatalogValidationContext;
   renderParameters: Map<string, RenderParameters>;
@@ -1303,6 +1305,12 @@ export function normalizeOperationInputs(
     const imageSlots = new Set<number>();
     let timedTargetMs = 0;
     const codeParameters = parameters?.assembly === "code_project" ? parameters : null;
+    const checkLocalCodeInput = (slot: number, blob: { mime_type: string; size_bytes: number }) => {
+      const mimeType = blob.mime_type as MediaContent["mimeType"];
+      if (Object.hasOwn(MEDIA_INPUT_EXTENSION, mimeType)) {
+        assertCreativeWriteFits(codeProjectInputPath(slot, mimeType), blob.size_bytes, `操作「${op.operationId}」输入槽位 ${slot}：`);
+      }
+    };
     if (codeParameters) {
       // code_project：工程修订随参数冻结，输入槽只作数据文件；输出时长由运行决定，不设静态上界。
       const project = getArtifactRow(db, scope.ownerId, codeParameters.projectRevision.artifactId);
@@ -1312,6 +1320,10 @@ export function normalizeOperationInputs(
       }
       const content = JSON.parse(revision.content_json) as CreativeProjectContent;
       validateCodeProjectExecution(codeParameters, content, op.inputs);
+      if (localWriteBlobs) for (const file of content.files) {
+        const blob = localWriteBlobs.get(scope.ownerId, file.blobId);
+        assertCreativeWriteFits(file.relativePath, blob.size_bytes, `操作「${op.operationId}」冻结文件「${file.relativePath}」`);
+      }
     }
     if (parameters && parameters.assembly !== "code_project" && parameters.segmentIds) {
       // 长度一致性在准备边界核对一次，随后随快照冻结（B2.3）。
@@ -1357,8 +1369,9 @@ export function normalizeOperationInputs(
       const music = musicSlots.has(slot);
       const image = imageSlots.has(slot);
       if (input.kind === "blob") {
-        const blob = db.prepare("SELECT mime_type FROM production_blobs WHERE id=? AND digest=? AND owner_id=? AND conversation_id=?").get(input.blobId, input.digest, scope.ownerId, scope.conversationId) as { mime_type: string } | undefined;
+        const blob = db.prepare("SELECT mime_type,size_bytes FROM production_blobs WHERE id=? AND digest=? AND owner_id=? AND conversation_id=?").get(input.blobId, input.digest, scope.ownerId, scope.conversationId) as { mime_type: string; size_bytes: number } | undefined;
         if (!blob) throw new AgentError("INVALID_INPUT", "媒体输入不存在或不属于当前会话。");
+        if (codeParameters && localWriteBlobs) checkLocalCodeInput(slot, blob);
         if (op.kind === "render" && !codeParameters) {
           // 混音音乐槽额外接受本地登记的 WAV（如冻结工程渲染的程序音乐）；旁白槽仍是供应商 MP3 契约。
           const accepted = music ? blob.mime_type === "audio/mpeg" || blob.mime_type === "audio/wav"
@@ -1397,6 +1410,9 @@ export function normalizeOperationInputs(
         }
         const content = input.kind === "text" ? { format: "markdown" as const, text: input.text }
           : rowToArtifactRevision(getRevisionRow(db, input.artifactId, input.revisionId)!).content;
+        if (codeParameters && localWriteBlobs && content.format === "media") {
+          checkLocalCodeInput(slot, localWriteBlobs.get(scope.ownerId, content.blobId));
+        }
         if (op.kind === "speech") {
           // §9.3：TrustedOperationInput 只有元数据；实际文本在 prepare 这里读一次并判断 1–1000 码点，
           // 冻结原文原样发送（不删标题/改写/截断），accept 与适配器不再重复结构校验。
