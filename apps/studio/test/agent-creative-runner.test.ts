@@ -2,19 +2,20 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import http from "node:http";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { CreativeRunner, CREATIVE_TOOL_NAMES, creativeWorkspaceId, type CreativeToolContext } from "../src/server/agent/creative-runner.js";
+import { assertCreativeWriteFits, CreativeRunner, CREATIVE_TOOL_NAMES, creativeWorkspaceId, type CreativeToolContext } from "../src/server/agent/creative-runner.js";
 import { PiRuntimeHost } from "../src/server/agent/pi-runtime.js";
 import { SkillPackages } from "../src/server/agent/skill-packages.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const evidence = path.join(root, ".local/skill-creation");
+const evidence = process.env.FRAME_CREATIVE_TEST_EVIDENCE_DIR ?? path.join(root, ".local/skill-creation");
 const dockerSocket = process.env.FRAME_CREATIVE_DOCKER_SOCKET;
 
 const python = `from PIL import Image\nImage.new("RGB", (160, 90), "red").save("python.png")\n`;
@@ -56,6 +57,43 @@ test("G2-2 Frame 业务工具继续拒绝隐式参数转换", async t => {
   assert.deepEqual(applied, [2]); assert.deepEqual(errors, [true, false]);
 });
 
+test("DD-10 写入上限与真实序列化的 Unicode、JSON 转义和 base64 分组一致", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "fw-"));
+  let body: Buffer | undefined;
+  const socketPath = path.join(directory, "s");
+  const listener = http.createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk);
+    body = Buffer.concat(chunks);
+    response.end("{}\n");
+  });
+  t.after(async () => {
+    await new Promise<void>(resolve => listener.close(() => resolve()));
+    await rm(directory, { recursive: true, force: true });
+  });
+  await new Promise<void>(resolve => listener.listen(socketPath, resolve));
+
+  const workspace = { conversationId: "dd10-conversation", workId: "dd10-work", executionId: "dd10-run" };
+  const inputPath = '资料//./引号"文件.bin';
+  const normalizedPath = '/workspace/资料/引号"文件.bin';
+  const content = "甲Z";
+  await new CreativeRunner({ socketPath }).writeFile(workspace, inputPath, content);
+  assert.ok(body);
+  const observed = JSON.parse(body.toString());
+  const base64 = Buffer.from(content).toString("base64");
+  assert.deepEqual(observed, { workspaceId: creativeWorkspaceId(workspace), action: "write", path: normalizedPath, data: base64 });
+  const envelopeBytes = body.length - base64.length;
+  const limit = 128 * 1024 * 1024;
+  const maxRawBytes = Math.floor((limit - envelopeBytes) / 4) * 3;
+  assert.equal(assertCreativeWriteFits(inputPath, maxRawBytes, "边界夹具："), normalizedPath);
+  const rejectedSize = envelopeBytes + 4 * Math.ceil((maxRawBytes + 1) / 3);
+  assert.ok(rejectedSize > limit);
+  assert.throws(() => assertCreativeWriteFits(inputPath, maxRawBytes + 1, "边界夹具："), {
+    code: "INVALID_INPUT",
+    message: new RegExp(`原文件 ${maxRawBytes + 1} B.*写入请求 ${rejectedSize} B`),
+  });
+});
+
 // 必须显式选择已运行 daemon；缺失时跳过，不以宿主 shell 或假容器代替。
 test("G2 大型二进制资源经真实 UDS 完整往返，坏 base64 在入口拒绝", { skip: !dockerSocket, timeout: 120_000 }, async t => {
   await mkdir(evidence, { recursive: true });
@@ -88,7 +126,8 @@ test("G2 大型二进制资源经真实 UDS 完整往返，坏 base64 在入口�
 
 test("G2-1 真实 Pi Operations / PNG / Chromium-FFmpeg / 缓存会话 A-B / 隔离与交付暂停", { skip: !dockerSocket, timeout: 240_000 }, async t => {
   await mkdir(evidence, { recursive: true });
-  const directory = await mkdtemp(path.join(evidence, "g2-"));
+  // 安装器按真实路径加载 Skill，测试绝对路径映射时也使用同一真实路径。
+  const directory = await realpath(await mkdtemp(path.join(evidence, "g2-")));
   const skill = path.join(directory, "source-skill");
   await mkdir(path.join(skill, "references"), { recursive: true });
   await writeFile(path.join(skill, "SKILL.md"), "---\nname: native-fixture\ndescription: Operations fixture\n---\nRead references/notes.txt.\n");

@@ -61,8 +61,9 @@ export function retainedVideoMaterials(db: AgentDatabase, ownerId: string, video
     if (!artifact || !revision || artifact.kind === "project" || artifact.kind === "file") return;
     seenMaterials.add(key);
     const content = JSON.parse(revision.content_json) as ArtifactRevision["content"];
+    const label = `来源 v${revision.revision_number} · ${artifact.title}（现名）`;
     materials.push({ source: { artifactId: ref.artifactId, revisionId: ref.revisionId },
-      label: providedToProject ? `${artifact.title}（提供给工程）` : artifact.title,
+      label: providedToProject ? `${label}（提供给工程）` : label,
       kind: artifact.kind, provenance: content.format === "media" ? content.sources ?? blobSources(db, content.blobId) : [] });
   };
   const addProject = (ref: RevisionRef): void => {

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import http from "node:http";
-import { readFileSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream, readFileSync } from "node:fs";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -11,16 +12,17 @@ import { it } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assembly.js";
 import { CreativeRunner, creativeWorkspaceId, editingWorkspace } from "../src/server/agent/creative-runner.js";
-import { parseCreationState, writeWorkState, type WorkRow } from "../src/server/agent/creative-work.js";
+import { parseCreationState, setReviewItemDraft, writeWorkState, type WorkRow } from "../src/server/agent/creative-work.js";
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { mixedRenderCatalogEntry } from "../src/server/agent/media-config.js";
-import type { QuoteCatalog } from "../src/server/agent/artifact-store.js";
+import { getArtifactRow, type QuoteCatalog } from "../src/server/agent/artifact-store.js";
+import { AgentError } from "../src/server/agent/errors.js";
 import { probeImageFile } from "../src/server/agent/media-probe.js";
 import { retainedVideoMaterials } from "../src/server/agent/library-materials.js";
 import type { ProductionService } from "../src/server/agent/production-service.js";
-import { newAgentId, systemClock } from "../src/server/agent/util.js";
+import { digestOf, newAgentId, systemClock } from "../src/server/agent/util.js";
 import { FAUX_PROVIDER, FAUX_TEXT_MODEL } from "../src/server/agent/offline.js";
-import type { CreativeProjectContent, ModelEntry, Work } from "../src/shared/agent/generated/contracts.js";
+import type { CreativeProjectContent, ExecutionObservation, ModelEntry, ToolRenderProject, Work } from "../src/shared/agent/generated/contracts.js";
 
 // G2-3 行为验收：publish_project 封存、render_project 免费受理（§4.2.1）、code_project 隔离执行、
 // 草稿落位与在途 no-clobber、取消语义。走真实 SQLite + Pi 会话 + 现有 worker 与 LocalRenderPort；
@@ -296,7 +298,7 @@ const draftImageOperation = (project: { artifactId: string; revisionId: string }
   operationId: "frame-1", outputSlot: "image-1",
   inputs: [] as { kind: "blob"; blobId: string; digest: string }[],
   parameters: { assembly: "code_project" as const, projectRevision: { artifactId: project.artifactId, revisionId: project.revisionId },
-    entrypoint: { argv: ["node", "main.cjs"] }, outputPath: "out.png",
+    entrypoint: { argv: ["node", "main.cjs"] satisfies [string, ...string[]] }, outputPath: "out.png",
     expectedMediaKind: "image" as const, format: "png" as const, width: 160, height: 90 },
   target: { group: { mode: "create" as const, key: "visual", title: "画面", nextIntent: null },
     item: { mode: "create" as const, key: "first-frame", label: "首帧图", role: "storyboard" as const, required: true } },
@@ -776,8 +778,133 @@ it("G2-3 在途 no-clobber：后继草稿不被旧运行结果覆盖，产出事
     assert.equal(after.draft?.kind === "artifact_revision" ? after.draft.revisionId : null, superseded.draft?.kind === "artifact_revision" ? superseded.draft.revisionId : null,
       "后继稿不被旧运行结果覆盖（§4.2.1）");
     assert.equal(secondResult.outputRevisions.length, 1, "旧运行的产出修订仍保留");
+    assert.notEqual(secondResult.outputRevisions[0]!.artifactId, firstDraft.artifactId, "迟到结果不能推进原 artifact 的 head");
     const binding = jsonField(world, "SELECT creation_binding_json FROM artifact_revisions WHERE id=?", "creation_binding_json", secondResult.outputRevisions[0]!.revisionId);
     assert.equal(binding.itemId, target.itemId, "被跳过落位的产出仍记录准确归属");
+  } finally { await world.close(); }
+});
+
+async function admitImageRevision(world: World, project: { workId: string; artifactId: string; revisionId: string },
+    target?: { groupId: string; itemId: string; baseRevisionId: string }) {
+  const op = draftImageOperation(project);
+  const receipt = await send(world, [
+    fauxAssistantMessage([fauxToolCall("render_project", { workId: project.workId, title: "首帧草稿", scope: "首帧图片", purpose: "draft",
+      inputSources: [], reviewInputs: [], operations: [target ? {
+        ...op, baseRevisionId: target.baseRevisionId,
+        target: { group: { mode: "existing", groupId: target.groupId }, item: { mode: "existing", itemId: target.itemId } },
+      } : op] })]),
+    fauxAssistantMessage("已记录渲染请求。"),
+  ]);
+  return world.runtime.database.prepare("SELECT id FROM production_runs WHERE source_request_id=?").get(receipt.requestId) as { id: string } | undefined;
+}
+
+it("DD-11 同基准迟到运行与 head 前移时保留独立产物，只有准确草稿可以落位", async () => {
+  const world = await setup();
+  try {
+    const project = await authorProject(world);
+    const db = world.runtime.database;
+    const first = await admitImageRevision(world, project);
+    assert.ok(first);
+    const firstRun = await drive(world, first.id);
+    assert.equal(firstRun.state, "succeeded");
+    const [v1] = firstRun.outputRevisions;
+    assert.ok(v1);
+    const work = works(world).find(item => item.id === project.workId)!;
+    const group = work.reviewGroups[0]!;
+    const item = group.items[0]!;
+    const firstDraft = item.draft;
+    assert.ok(firstDraft?.kind === "artifact_revision" && firstDraft.revisionId === v1.revisionId);
+    const target = { groupId: group.id, itemId: item.id, baseRevisionId: v1.revisionId };
+
+    const late = await admitImageRevision(world, project, target);
+    assert.ok(late);
+    assert.equal(await admitImageRevision(world, project, target), undefined, "同作品已有排队运行时不能再受理");
+    assert.equal(count(world, "FROM production_runs"), 2);
+
+    // 合成夹具：暂存旧运行的队列状态以构造同基准交错，正常运行仍受在途唯一约束。
+    db.prepare("UPDATE production_runs SET state='failed' WHERE id=?").run(late.id);
+    const firstPublisher = await admitImageRevision(world, project, target);
+    assert.ok(firstPublisher);
+    const winner = await drive(world, firstPublisher.id);
+    assert.equal(winner.state, "succeeded");
+    const [v2] = winner.outputRevisions;
+    assert.ok(v2);
+    assert.equal(v2.artifactId, v1.artifactId);
+    db.prepare("UPDATE production_runs SET state='queued' WHERE id=?").run(late.id);
+    const loser = await drive(world, late.id);
+    assert.equal(loser.state, "succeeded");
+    assert.notEqual(loser.outputRevisions[0]!.artifactId, v1.artifactId);
+    const draftAfterLate = itemOf(world, group.id, item.id).draft;
+    assert.ok(draftAfterLate?.kind === "artifact_revision");
+    assert.equal(draftAfterLate.revisionId, v2.revisionId, "迟到结果不能覆盖已推进的草稿");
+
+    // 合成独立状态：事项指回旧稿，原 artifact 的 head 仍是 v2。
+    const workRow = db.prepare("SELECT * FROM works WHERE id=?").get(work.id) as WorkRow;
+    setReviewItemDraft(db, systemClock(), workRow, target, firstDraft);
+    const fork = await admitImageRevision(world, project, target);
+    assert.ok(fork);
+    const forked = await drive(world, fork.id);
+    assert.equal(forked.state, "succeeded");
+    const [independent] = forked.outputRevisions;
+    assert.ok(independent);
+    assert.notEqual(independent.artifactId, v1.artifactId);
+    const forkedDraft = itemOf(world, group.id, item.id).draft;
+    assert.ok(forkedDraft?.kind === "artifact_revision");
+    assert.equal(forkedDraft.revisionId, independent.revisionId, "未满足续版条件时仍按准确基准落位");
+    assert.equal(getArtifactRow(db, "local-owner", v1.artifactId)?.head_revision_id, v2.revisionId);
+
+    const deleted = await admitImageRevision(world, project, { ...target, baseRevisionId: independent.revisionId });
+    assert.ok(deleted);
+    const beforeDelete = db.prepare("SELECT * FROM works WHERE id=?").get(work.id) as WorkRow;
+    const state = parseCreationState(beforeDelete);
+    state.groups = state.groups.filter(candidate => candidate.id !== group.id);
+    writeWorkState(db, systemClock(), beforeDelete, state);
+    const deletedRun = await drive(world, deleted.id);
+    assert.equal(deletedRun.state, "succeeded", "目标删除也保留真实运行结果");
+    assert.notEqual(deletedRun.outputRevisions[0]!.artifactId, independent.artifactId);
+    assert.equal(works(world).find(value => value.id === work.id)!.reviewGroups.some(value => value.id === group.id), false,
+      "迟到发布不重建已删目标");
+    assert.equal(getArtifactRow(db, "local-owner", independent.artifactId)?.head_revision_id, independent.revisionId);
+  } finally { await world.close(); }
+});
+
+it("DD-11 observe 捕获发布末尾业务失败时保留观测且写入整体撤回", async () => {
+  const world = await setup();
+  try {
+    const db = world.runtime.database;
+    const project = await authorProject(world);
+    const first = await admitImageRevision(world, project);
+    assert.ok(first);
+    const firstRun = await drive(world, first.id);
+    assert.equal(firstRun.state, "succeeded");
+    const [v1] = firstRun.outputRevisions;
+    assert.ok(v1);
+    const group = works(world)[0]!.reviewGroups[0]!;
+    const item = group.items[0]!;
+    const second = await admitImageRevision(world, project, { groupId: group.id, itemId: item.id, baseRevisionId: v1.revisionId });
+    assert.ok(second);
+    const stateBeforePublish = () => ({
+      draft: itemOf(world, group.id, item.id).draft,
+      head: getArtifactRow(db, "local-owner", v1.artifactId)?.head_revision_id,
+      artifacts: count(world, "FROM artifacts"),
+      revisions: count(world, "FROM artifact_revisions"),
+      links: count(world, "FROM revision_blob_links"),
+      deliveries: count(world, "FROM events WHERE kind='artifact.delivered'"),
+      workEvents: count(world, "FROM events WHERE kind='work.changed'"),
+      output: db.prepare("SELECT output_blob_id,output_revision_id FROM production_operations WHERE run_id=?").get(second.id),
+    });
+    const before = stateBeforePublish();
+    db.function("dd11_reject_publication", () => { throw new AgentError("TEMPORARILY_UNAVAILABLE", "fixture rejects final publish event"); });
+    db.exec(`CREATE TEMP TRIGGER dd11_failed_delivery AFTER INSERT ON events WHEN NEW.kind = 'artifact.delivered' BEGIN
+      SELECT dd11_reject_publication();
+    END`);
+    try { await world.runtime.worker!.pollOnce(); }
+    finally { db.exec("DROP TRIGGER dd11_failed_delivery"); }
+    assert.deepEqual(stateBeforePublish(), before, "observe 捕获的错误不得提交发布的部分写入");
+    assert.equal(world.runtime.service.getRun("local-owner", second.id).state, "unknown");
+    assert.equal(count(world, "FROM ledger_observations l JOIN production_attempts a ON a.id=l.attempt_id WHERE a.run_id=? AND l.applied=1", second.id), 1);
+    assert.equal(count(world, "FROM production_attempt_outputs o JOIN production_attempts a ON a.id=o.attempt_id WHERE a.run_id=? AND o.exit_kind='completed'", second.id), 1,
+      "实际媒体执行收据留下供核对，尚无业务交付");
   } finally { await world.close(); }
 });
 
@@ -1601,11 +1728,61 @@ it("G4-1 定稿事实冻结：finalize 只认最终视频，后继新稿/新工�
     assert.equal(second.state, "succeeded");
     const after = itemOf(world, target.groupId, target.itemId);
     assert.ok(after.draft?.kind === "artifact_revision" && after.draft.revisionId !== draftV1.revisionId, "事项主稿推进到 v2");
+    assert.equal(after.draft.artifactId, draftV1.artifactId, "同事项重渲染在原产物上续写");
+    assert.deepEqual(second.outputRevisions, [{ artifactId: draftV1.artifactId, revisionId: after.draft.revisionId }]);
+    const draftRevisionV2 = world.runtime.service.readRevision("local-owner", after.draft.artifactId, after.draft.revisionId);
+    assert.equal(draftRevisionV2.revisionNumber, 2);
+    assert.equal(draftRevisionV2.baseRevisionId, draftRevisionV1.revisionId);
+    assert.equal(draftRevisionV2.runId, secondRun.id);
+    assert.equal(draftRevisionV2.requestId, null, "worker 发布不登记为助手机器人的直接交付");
+    assert.equal(draftRevisionV2.creationBinding?.runId, secondRun.id);
+    assert.deepEqual(draftRevisionV2.creationBinding?.projectRevision, { artifactId: projectV2.id, revisionId: projectV2.revisionId });
+    assert.equal(draftRevisionV2.creationBinding?.groupId, target.groupId);
+    assert.equal(draftRevisionV2.creationBinding?.itemId, target.itemId);
+    assert.ok(draftRevisionV1.content.format === "media" && draftRevisionV2.content.format === "media");
+    assert.notEqual(draftRevisionV1.content.blobId, draftRevisionV2.content.blobId);
+    const db = world.runtime.database;
+    assert.deepEqual(db.prepare("SELECT output_blob_id,output_revision_id FROM production_operations WHERE run_id=? AND id='walk-2'").get(secondRun.id), {
+      output_blob_id: draftRevisionV2.content.blobId, output_revision_id: draftRevisionV2.revisionId,
+    });
+    assert.equal(count(world, "FROM revision_blob_links WHERE revision_id=? AND blob_id=?", draftRevisionV2.revisionId, draftRevisionV2.content.blobId), 1);
+    assert.equal(count(world, "FROM events WHERE kind='artifact.delivered' AND entity_id=? AND entity_version=2", after.draft.artifactId), 1);
+
+    // 合成恢复状态：让已绑定输出在非终态的 attempt 中重复收到落盘观测，实际走 observe/publish。
+    const settled = db.prepare(`SELECT l.id, l.observation_json FROM ledger_observations l
+      JOIN production_attempts a ON a.id=l.attempt_id WHERE a.run_id=? AND json_extract(l.observation_json, '$.state')='succeeded'`)
+      .get(secondRun.id) as { id: number; observation_json: string };
+    const observation = JSON.parse(settled.observation_json) as ExecutionObservation;
+    const replayState = () => ({
+      refs: world.runtime.service.getRun("local-owner", secondRun.id).outputRevisions,
+      draft: itemOf(world, target.groupId, target.itemId).draft,
+      revisions: count(world, "FROM artifact_revisions WHERE artifact_id=?", draftV1.artifactId),
+      links: count(world, "FROM revision_blob_links"),
+      deliveries: count(world, "FROM events WHERE kind='artifact.delivered'"),
+    });
+    const beforeReplay = replayState();
+    db.prepare("UPDATE production_attempts SET state='unknown' WHERE id=?").run(observation.attemptId);
+    db.prepare("UPDATE ledger_observations SET applied=0 WHERE id=?").run(settled.id);
+    await world.runtime.worker!.pollOnce();
+    assert.deepEqual(replayState(), beforeReplay, "同一观测重放不增加版本、链接或事件");
+    assert.deepEqual(db.prepare("SELECT state FROM production_attempts WHERE id=?").get(observation.attemptId), { state: "succeeded" });
+
+    const differentBlob = world.blobs.get("local-owner", draftRevisionV1.content.blobId);
+    const conflict: ExecutionObservation = { ...observation, blob: {
+      id: differentBlob.id, digest: differentBlob.digest, mimeType: "video/mp4",
+    } };
+    db.prepare("UPDATE production_attempts SET state='unknown' WHERE id=?").run(observation.attemptId);
+    db.prepare("INSERT INTO ledger_observations(attempt_id,digest,observation_json) VALUES(?,?,?)")
+      .run(observation.attemptId, digestOf(conflict), JSON.stringify(conflict));
+    await world.runtime.worker!.pollOnce();
+    assert.deepEqual(replayState(), beforeReplay, "不同 blob 的观测不能改写已绑定产物");
+    assert.deepEqual(db.prepare("SELECT state FROM production_attempts WHERE id=?").get(observation.attemptId), { state: "unknown" });
 
     // 新稿不回写已入库条目：库仍只有 v1，工程引用仍是定稿当时的 v1 修订，不重新封存最新目录。
     const entries = world.runtime.service.listLibraryVideos("local-owner", undefined, undefined).items;
     assert.equal(entries.length, 1, "v2 草稿不入库");
     assert.equal(entries[0]!.video.revisionId, draftV1.revisionId);
+    assert.deepEqual(world.runtime.service.readRevision("local-owner", draftV1.artifactId, draftV1.revisionId).content, draftRevisionV1.content);
     assert.deepEqual(entries[0]!.project, { artifactId: projectV1.id, revisionId: projectV1.revisionId });
     assert.deepEqual(entries[0]!.projectFiles, [
       { project: { artifactId: projectV1.id, revisionId: projectV1.revisionId }, relativePath: "main.cjs", mimeType: "text/javascript" },
@@ -1791,13 +1968,33 @@ it("S5 逐操作来源：run 级 inputSources 不复制，operation_output 继�
     const digestOf = (revisionId: string) => String((world.runtime.database.prepare("SELECT digest FROM artifact_revisions WHERE id=?").get(revisionId) as { digest: string }).digest);
     const basis = { kind: "artifact_revision" as const, artifactId: basisDraft.artifactId, revisionId: basisDraft.revisionId, digest: digestOf(basisDraft.revisionId) };
 
-    // 工程 A：ffmpeg 写 3 秒片段，封存时声明采用「画面依据」。
+    const basisItemId = basisGroup.items[0]!.id;
+    const approveBasis = (source: typeof basis) => world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("认可实际采用的画面依据", {
+      reviewConfirmation: { workId, groupId: basisGroup.id,
+        items: [{ itemId: basisItemId, source }], action: "approve" },
+    }));
+    const reviseBasis = async (baseRevisionId: string, version: number) => {
+      await send(world, [
+        fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{
+          mode: "revise", artifactId: basis.artifactId, baseRevisionId,
+          title: `画面依据 v${version}`, kind: "script", content: { format: "markdown", text: `第 ${version} 版的独立依据。` },
+        }] })]),
+        fauxAssistantMessage("依据后续修订已交付。"),
+      ]);
+      const head = world.runtime.service.readArtifactHead("local-owner", basisDraft.artifactId);
+      assert.equal(head.revisionNumber, version);
+      return { kind: "artifact_revision" as const, artifactId: head.id, revisionId: head.revisionId, digest: digestOf(head.revisionId) };
+    };
+    await approveBasis(basis);
+    const basisV2 = await reviseBasis(basis.revisionId, 2);
+    const sources = [basis, basisV2];
+    // 工程 A 封存已认可的 v1 和待认可的 v2，先制作草稿，再核对依据。
     await send(world, [
       fauxAssistantMessage([fauxToolCall("write", { path: "main.cjs", content: walkPreviewScript })]),
       fauxAssistantMessage([fauxToolCall("bash", { command: "node main.cjs", timeout: 30 })]),
       fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "片段工程", files: ["main.cjs"],
         entrypoint: { argv: ["node", "main.cjs"] }, dependencyLocks: [], timelineFiles: [],
-        sourceRevisions: [{ artifactId: basisDraft.artifactId, revisionId: basisDraft.revisionId }] })]),
+        sourceRevisions: sources.map(({ artifactId, revisionId }) => ({ artifactId, revisionId })) })]),
       fauxAssistantMessage("片段工程已冻结。"),
     ], "封存片段工程。");
     const projectA = latestProjectRevision(world);
@@ -1845,11 +2042,11 @@ if (fs.existsSync("inputs/0.mp4")) {
     const bindingOf = (revisionId: string) => jsonField(world, "SELECT creation_binding_json FROM artifact_revisions WHERE id=?", "creation_binding_json", revisionId) as
       { inputSources: { kind: string; revisionId: string }[]; projectRevision?: { artifactId: string; revisionId: string }; projectRevisions?: { artifactId: string; revisionId: string }[] };
     const segBinding = bindingOf(result.outputRevisions[0]!.revisionId);
-    assert.deepEqual(segBinding.inputSources, [basis], "本操作来源 = 工程声明提供给它的资源（digest 读冻结行）");
+    assert.deepEqual(segBinding.inputSources, sources, "本操作来源 = 工程声明提供给它的准确历史修订");
     assert.deepEqual(segBinding.projectRevision, projectA, "本操作自己的工程");
     assert.deepEqual(segBinding.projectRevisions, [projectA], "单操作工程链只有自己的工程");
     const finalBinding = bindingOf(result.outputRevisions[1]!.revisionId);
-    assert.deepEqual(finalBinding.inputSources, [basis], "operation_output 继承上游产物的来源");
+    assert.deepEqual(finalBinding.inputSources, sources, "operation_output 继承上游产物的来源");
     assert.ok(!JSON.stringify(finalBinding).includes(candidateDraft.revisionId), "run 级声明、未提供给任何操作的候选不复制到产物（§11.7 来源1）");
     assert.deepEqual(finalBinding.projectRevision, projectB, "最终主工程 = 产出最终视频那步自己的工程");
     assert.deepEqual(finalBinding.projectRevisions, [projectB, projectA], "工程链去重留存：本操作在前、继承工程在后");
@@ -1863,16 +2060,16 @@ if (fs.existsSync("inputs/0.mp4")) {
     assert.ok(finalItem.draft?.kind === "artifact_revision");
     const finalDraft = finalItem.draft as { kind: "artifact_revision"; artifactId: string; revisionId: string };
     const finalRevision = world.runtime.service.readRevision("local-owner", finalDraft.artifactId, finalDraft.revisionId);
-    // 草稿渲染不代认其必选画面依据；定稿仍需用户明确认可实际采用的准确版本。
-    await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("认可实际采用的画面依据", {
-      reviewConfirmation: { workId, groupId: basisGroup.id,
-        items: [{ itemId: basisGroup.items[0]!.id, source: basis }], action: "approve" },
-    }));
-    await world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("这版定稿", {
+    const finalize = async () => world.runtime.service.sendMessage("local-owner", world.conversationId, chatInput("这版定稿", {
       reviewConfirmation: { workId, groupId: finalTarget.groupId,
         items: [{ itemId: finalTarget.itemId, source: { kind: "artifact_revision", artifactId: finalDraft.artifactId, revisionId: finalDraft.revisionId, digest: finalRevision.digest } }],
         action: "finalize_video" },
     }));
+    assert.deepEqual(itemOf(world, basisGroup.id, basisItemId).approved, basis, "制作草稿不代认刚采用的 v2");
+    await assert.rejects(finalize, { code: "INVALID_INPUT", message: /画面依据.*v2.*还未获得认可/ });
+    await approveBasis(basisV2);
+    await reviseBasis(basisV2.revisionId, 3);
+    await finalize();
     const [entry] = world.runtime.service.listLibraryVideos("local-owner", undefined, undefined).items;
     assert.ok(entry);
     assert.deepEqual(entry.project, projectB, "最终主工程；没有则为 null，不猜上游工程");
@@ -1881,10 +2078,10 @@ if (fs.existsSync("inputs/0.mp4")) {
       { project: projectA, relativePath: "main.cjs", mimeType: "text/javascript" },
     ], "多工程清单按行 project 归属，主工程分组在前；同名 main.cjs 各自指向所属工程");
     assert.deepEqual(entry.materials, [
-      { source: result.outputRevisions[0]!, label: "多工程成片 · 合成视频 1", kind: "video", provenance: [] },
-      { source: { artifactId: basisDraft.artifactId, revisionId: basisDraft.revisionId },
-        label: "画面依据（提供给工程）", kind: "script", provenance: [] },
-    ], "采用的生成片段本身与其工程依据均留存；未采用候选不混入，也不追加认可");
+      { source: result.outputRevisions[0]!, label: "来源 v1 · 多工程成片 · 合成视频 1（现名）", kind: "video", provenance: [] },
+      ...sources.map(({ artifactId, revisionId }, index) => ({ source: { artifactId, revisionId },
+        label: `来源 v${index + 1} · 画面依据 v3（现名）（提供给工程）`, kind: "script", provenance: [] })),
+    ], "DD-13：真实 v1/v2 清楚区分，现名只作识别。多条路径引用同版本时仍只留一项");
 
     // 跨会话选材：两个同名 main.cjs 按所属工程各自物化不同字节；链外工程引用被拒。
     const other = world.runtime.service.createConversation("local-owner", { commandId: cmd(), title: "选材会话" }).conversation;
@@ -2195,5 +2392,136 @@ it("A3 组元数据变更升版本：改 label/组标题升一版并留事件；
       fauxAssistantMessage("原样再受理。"),
     ], "原样再渲染一版。");
     assert.equal(stateOf().reviewGroups.find(group => group.id === visual.id)!.revision, visualRevisionBefore + 1, "无元数据变化不升组版本");
+  } finally { await world.close(); }
+});
+
+it("DD-10 已知输入和冻结文件逐份检查，拒绝超限不写受理事实", async () => {
+  const concat = { binding: null, quoteMinor: 0, priceKind: "bounded" as const };
+  const world = await setup({ "render:ordered_concat": concat }); try {
+    const { workId, artifactId, revisionId } = await authorProject(world);
+    const reference = (blob: { id: string; digest: string }) => ({ kind: "blob" as const, blobId: blob.id, digest: blob.digest });
+    const request = { requestId: newAgentId("req"), messageId: newAgentId("msg") };
+    const admit = (operation: ToolRenderProject["operations"][number], inputSources: ToolRenderProject["inputSources"] = []) =>
+      world.runtime.production!.admitLocalRender("local-owner", world.conversationId, request, {
+        workId, title: "DD-10 本地创作", scope: "冻结输入", purpose: "draft", inputSources, reviewInputs: [], operations: [operation],
+      });
+    const draft = draftImageOperation({ artifactId, revisionId });
+    const db = world.runtime.database;
+    const updateSize = (id: string, bytes: number) => db.prepare("UPDATE production_blobs SET size_bytes=? WHERE id=?").run(bytes, id);
+    const admissionState = () => ({
+      tables: ["production_runs", "production_snapshots", "production_input_locks", "production_operations", "command_receipts", "events"]
+        .map(table => count(world, `FROM ${table}`)),
+      work: db.prepare("SELECT * FROM works WHERE id=?").get(workId),
+    });
+
+    // 合成尺寸元数据覆盖原线上同类风险，不分配或下载大文件。
+    const oversized = world.blobs.persist("local-owner", world.conversationId, Buffer.from("large video fixture"), "video/mp4", 3200);
+    updateSize(oversized.id, 234_140_076);
+    const before = admissionState();
+    assert.throws(() => admit({ ...draft, inputs: [reference(oversized)] }), {
+      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*234140076.*312186\d+.*134217728.*更小/,
+    });
+    assert.deepEqual(admissionState(), before);
+
+    const projectContent = jsonField(world, "SELECT content_json FROM artifact_revisions WHERE id=?", "content_json", revisionId) as CreativeProjectContent;
+    const frozen = projectContent.files[0]!;
+    updateSize(frozen.blobId, 96 * 1024 * 1024);
+    assert.throws(() => admit(draft), {
+      code: "INVALID_INPUT", message: /frame-1.*冻结文件.*main\.cjs.*100663296.*134217\d+.*134217728/,
+    });
+    assert.deepEqual(admissionState(), before);
+    updateSize(frozen.blobId, readFileSync(world.blobs.filePath(world.blobs.get("local-owner", frozen.blobId).digest)).length);
+
+    // 只按每次 write 传输计算，两个 60 MiB 文件各自合法。只验证受理，文件本身是小夹具。
+    const moderateA = world.blobs.persist("local-owner", world.conversationId, makePng(10, 30, 70), "image/png", null);
+    const moderateB = world.blobs.persist("local-owner", world.conversationId, makePng(10, 30, 90), "image/png", null);
+    updateSize(moderateA.id, 60 * 1024 * 1024);
+    updateSize(moderateB.id, 60 * 1024 * 1024);
+    const separateWrites = admit({ ...draft, inputs: [reference(moderateA), reference(moderateB)] });
+    assert.equal(separateWrites.run.state, "queued");
+    world.runtime.production!.cancel("local-owner", separateWrites.run.id, { commandId: cmd(), expectedRevision: separateWrites.run.revision });
+    await drive(world, separateWrites.run.id);
+
+    // 非 code_project 继续采用原受理规则，即使同一 blob 的尺寸超过 runner 消息限制。
+    const plain = admit({ ...draft, inputs: [reference(oversized)],
+      parameters: { assembly: "ordered_concat", format: "mp4", width: 160, height: 90, fps: 24, audioMode: "none" } });
+    assert.equal(plain.run.state, "queued");
+    world.runtime.production!.cancel("local-owner", plain.run.id, { commandId: cmd(), expectedRevision: plain.run.revision });
+    await drive(world, plain.run.id);
+
+    const small = world.blobs.persist("local-owner", world.conversationId, makePng(30, 90, 90), "image/png", null);
+    const valid = admit({ ...draft, inputs: [reference(small)] });
+    const completed = await drive(world, valid.run.id);
+    assert.equal(completed.state, "succeeded");
+    assert.equal(completed.outputRevisions.length, 1);
+    const output = completed.outputRevisions[0]!;
+    const exact = world.runtime.service.readRevision("local-owner", output.artifactId, output.revisionId);
+    assert.equal(exact.content.format, "media");
+    const source = { kind: "artifact_revision" as const, artifactId: output.artifactId, revisionId: output.revisionId, digest: exact.digest };
+    updateSize(exact.content.blobId, 96 * 1024 * 1024);
+    const beforeRevisionRef = admissionState();
+    assert.throws(() => admit({ ...draft, inputs: [source] }, [source]), {
+      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*100663296.*更小/,
+    });
+    assert.deepEqual(admissionState(), beforeRevisionRef);
+  } finally { await world.close(); }
+});
+
+it("DD-10 旧队列与未知上游在执行时按真实文件大小拒绝，不交付下游", async () => {
+  const world = await setup(); try {
+    const project = await authorProject(world);
+    const db = world.runtime.database;
+    const draft = draftImageOperation(project);
+    const request = { requestId: newAgentId("req"), messageId: newAgentId("msg") };
+    const admit = (operations: ToolRenderProject["operations"]) => world.runtime.production!.admitLocalRender("local-owner",
+      world.conversationId, request, { workId: project.workId, title: "DD-10 执行边界", scope: "输入槽",
+        purpose: "draft", inputSources: [], reviewInputs: [], operations });
+    const sizeBytes = 96 * 1024 * 1024;
+    // 模拟受理规则升级前的素材，以及当前批次才知道大小的上游产物。
+    // 稀疏文件从真实 PNG 尾部扩展，按新字节流重新计算摘要，生产 worker 仍真实核验文件。
+    const makeLarge = async (blobId: string) => {
+      const file = world.blobs.filePath(world.blobs.get("local-owner", blobId).digest);
+      await truncate(file, sizeBytes);
+      const hash = createHash("sha256");
+      for await (const chunk of createReadStream(file)) hash.update(chunk);
+      const digest = hash.digest("hex");
+      await rename(file, world.blobs.filePath(digest));
+      db.prepare("UPDATE production_blobs SET size_bytes=?,digest=? WHERE id=?").run(sizeBytes, digest, blobId);
+    };
+    const inputWriteTrap = { action: "write" as const, path: "/workspace/inputs/0.png", message: "超限文件不得发给 UDS" };
+    const checkFailed = async (receipt: ReturnType<typeof admit>, operationId: string, previousOutputs: ReturnType<typeof admit>["run"]["outputRevisions"]) => {
+      const executions = world.host.executions.length;
+      world.host.fileFailure = inputWriteTrap;
+      const failed = await drive(world, receipt.run.id);
+      assert.equal(failed.state, "failed");
+      assert.match(failed.issue?.message ?? "", new RegExp(`slot=0.*${operationId}.*100663296.*134217728`));
+      assert.deepEqual(failed.outputRevisions, previousOutputs);
+      assert.equal(world.host.fileFailure, inputWriteTrap, "超限素材尚未发到 UDS");
+      assert.equal(world.host.executions.length, executions, "超限后未执行入口");
+      const target = receipt.reviewTargets.find(target => target.operationId === operationId)!;
+      assert.equal(itemOf(world, target.groupId, target.itemId).draft, null);
+      world.host.fileFailure = null;
+    };
+    const seed = world.blobs.persist("local-owner", world.conversationId, makePng(10, 45, 33), "image/png", null);
+    await makeLarge(seed.id);
+    const large = world.blobs.get("local-owner", seed.id);
+    // 只在受理时遮住大小，模拟旧版未检查上限。冻结引用从始至终指向同一真实摘要。
+    const setSize = db.prepare("UPDATE production_blobs SET size_bytes=? WHERE id=?");
+    setSize.run(seed.size_bytes, seed.id);
+    const queued = admit([{ ...draft, operationId: "old-queued", inputs: [{ kind: "blob", blobId: seed.id, digest: large.digest }] }]);
+    setSize.run(sizeBytes, seed.id);
+    await checkFailed(queued, "old-queued", []);
+
+    const chain = admit([draft, { ...draft, operationId: "consumer", outputSlot: "derived-image",
+      inputs: [{ kind: "operation_output", producerOperationId: draft.operationId, outputSlot: draft.outputSlot }],
+      target: { ...draft.target, item: { ...draft.target.item, key: "derived", label: "下游场景" } } }]);
+    await world.runtime.worker!.pollOnce();
+    const first = world.runtime.service.getRun("local-owner", chain.run.id);
+    assert.equal(first.outputRevisions.length, 1, "已完成上游的真实发布留存");
+    const upstream = first.outputRevisions[0]!;
+    const revision = world.runtime.service.readRevision("local-owner", upstream.artifactId, upstream.revisionId);
+    assert.equal(revision.content.format, "media");
+    await makeLarge(revision.content.blobId);
+    await checkFailed(chain, "consumer", first.outputRevisions);
   } finally { await world.close(); }
 });

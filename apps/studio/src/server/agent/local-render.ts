@@ -7,7 +7,7 @@ import type { CodeProjectParameters, CreativeProjectContent, ExecutionInput, Exe
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import type { CreativeRunner } from "./creative-runner.js";
-import { codeProjectInputPath } from "./creative-runner.js";
+import { assertCreativeWriteFits, codeProjectInputPath } from "./creative-runner.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
 import {
@@ -493,15 +493,16 @@ export class LocalRenderPort implements MediaExecutionPort {
     try {
       for (const file of content.files) {
         stage = `恢复文件 ${file.relativePath}`;
-        await this.creative.writeFile(workspace, file.relativePath,
-          readFileSync(this.blobs.filePath(this.blobs.get(run.owner_id, file.blobId).digest)));
+        const blob = this.blobs.get(run.owner_id, file.blobId);
+        assertCreativeWriteFits(file.relativePath, blob.size_bytes, `操作「${input.operationId}」冻结文件「${file.relativePath}」`);
+        await this.creative.writeFile(workspace, file.relativePath, readFileSync(this.blobs.filePath(blob.digest)));
       }
       for (const resolved of input.resolvedInputs) {
         stage = `输入落位（slot=${resolved.slot}）`;
         const blob = this.blobs.get(run.owner_id, resolved.blobId);
-        await this.creative.writeFile(workspace,
-          codeProjectInputPath(resolved.slot, blob.mime_type as MediaContent["mimeType"]),
-          readFileSync(this.blobs.filePath(blob.digest)));
+        const file = codeProjectInputPath(resolved.slot, blob.mime_type as MediaContent["mimeType"]);
+        assertCreativeWriteFits(file, blob.size_bytes, `操作「${input.operationId}」输入槽位 ${resolved.slot}：`);
+        await this.creative.writeFile(workspace, file, readFileSync(this.blobs.filePath(blob.digest)));
       }
       // 冻结工程的 entrypoint 是执行权威：argv 逐项直传进程，不经 shell 重新解释。
       stage = "执行入口";

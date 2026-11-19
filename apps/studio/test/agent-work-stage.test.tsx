@@ -1160,6 +1160,71 @@ describe("R2 组审阅工作台", () => {
 });
 
 describe("E1 片段阅读身份（AUD-01）", () => {
+  it("DD-12 历史采用稿按实际播放版本补读制作，可重试且 A/B 不串片段", async () => {
+    const artifactId = "adopted-video";
+    const draft = { kind: "artifact_revision" as const, artifactId, revisionId: "adopted-v3", digest: "sha256:adopted-v3" };
+    const work = workFixture({ id: "work-1", title: "采用后审片", stage: "video", video: { draft } });
+    const group = work.reviewGroups[0]!;
+    const item = group.items[0]!;
+    const oldRun = runFixture("original-run-2", "第二版的真实制作", "producer-2", "produced-2",
+      [segmentFixture("same-segment", "第二版实际片段", "segment-2")]);
+    const currentRun = runFixture("original-run-3", "第三版的真实制作", "producer-3", "produced-3",
+      [segmentFixture("same-segment", "第三版实际片段", "segment-3")]);
+    const adopted = (revisionNumber: number, run: Run, baseRevisionId: string): ArtifactRevision => ({
+      ...videoRevisionFixture(artifactId, `adopted-v${revisionNumber}`, run.id, `whole-${revisionNumber}`),
+      revisionNumber, baseRevisionId, runId: null,
+      creationBinding: {
+        workId: work.id, groupId: group.id, itemId: item.id, purpose: "draft",
+        inputSources: [], reviewInputs: [], runId: run.id, adoptedFrom: run.outputRevisions[0]!,
+      },
+    });
+    let readFailed = true;
+    const harness = installStageRoutes({ works: [work], onRequest: url => {
+      if (url.endsWith("/revisions/adopted-v3")) return { status: 200, body: adopted(3, currentRun, "adopted-v2") };
+      if (url.endsWith("/revisions/adopted-v2")) return { status: 200, body: adopted(2, oldRun, "adopted-v1") };
+      if (url.endsWith("/runs/original-run-2")) return { status: 200, body: oldRun };
+      if (url.endsWith("/runs/original-run-3")) return readFailed
+        ? { status: 503, body: { code: "UNAVAILABLE", message: "暂不可读" } } : { status: 200, body: currentRun };
+      return null;
+    } });
+    const runReads = () => harness.calls.filter(call => call.method === "GET" && call.url.includes("/runs/")).map(call => call.url.split("/").at(-1));
+    renderAt("/agent/conv-w");
+    await screen.findByText(/这份制作的片段读取失败/);
+    expect(runReads()).toEqual(["original-run-3"]);
+    readFailed = false;
+    await userEvent.click(screen.getByRole("button", { name: "重试" }));
+    await screen.findByText("第三版实际片段");
+    await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
+    await userEvent.click(await screen.findByRole("button", { name: "上一版 v2" }));
+    expect(document.querySelector(".agent-stage-body video")?.getAttribute("src")).toContain("whole-2");
+    await screen.findByText("第二版实际片段");
+    expect(screen.queryByText("第三版实际片段")).toBeNull();
+    expect(runReads()).toEqual(["original-run-3", "original-run-3", "original-run-2"]);
+    await userEvent.click(screen.getByRole("button", { name: "当前版 v3" }));
+    await screen.findByText("第三版实际片段");
+    expect(document.querySelector(".agent-stage-body video")?.getAttribute("src")).toContain("whole-3");
+    expect(runReads()).toEqual(["original-run-3", "original-run-3", "original-run-2"]);
+    await userEvent.click(screen.getByRole("button", { name: "上一版 v2" }));
+    await userEvent.click(screen.getByRole("button", { name: "查看制作记录" }));
+    await screen.findByRole("heading", { name: "制作记录" });
+    const selectedRun = within(document.querySelector<HTMLElement>(".agent-paper .agent-run")!);
+    expect(selectedRun.getByText("第二版的真实制作")).toBeInTheDocument();
+    expect(selectedRun.queryByText("第三版的真实制作")).toBeNull();
+  });
+
+  it("DD-12 无制作来源的历史视频保留预览，既不显示其他运行也不补读", async () => {
+    const draft = { kind: "artifact_revision" as const, artifactId: "legacy", revisionId: "legacy-v1", digest: "sha256:legacy-v1" };
+    const work = workFixture({ id: "work-1", title: "早期成片", stage: "video", video: { draft } });
+    const revision = { ...videoRevisionFixture(draft.artifactId, draft.revisionId, "unused", "legacy-blob"), runId: null };
+    const harness = installStageRoutes({ works: [work], onRequest: url => url.endsWith("/revisions/legacy-v1")
+      ? { status: 200, body: revision } : null });
+    harness.snapshot.runs.items = [runFixture("unrelated", "另一份制作", "other", "other-v1", [])];
+    renderAt("/agent/conv-w");
+    await waitFor(() => expect(document.querySelector(".agent-stage-body video")?.getAttribute("src")).toContain("legacy-blob"));
+    expect(screen.queryByRole("button", { name: "查看制作记录" })).toBeNull();
+    expect(harness.calls.filter(call => call.method === "GET" && call.url.includes("/runs/"))).toEqual([]);
+  });
+
   it("阅读旧成片时新版到达：整片、片段条、制作记录仍为所看修订的那次制作；查看最新稿后一起切换", async () => {
     const v1 = { kind: "artifact_revision" as const, artifactId: "art-video-1", revisionId: "video-rev-1", digest: "sha256:v1" };
     const v2 = { kind: "artifact_revision" as const, artifactId: "art-video-2", revisionId: "video-rev-2", digest: "sha256:v2" };

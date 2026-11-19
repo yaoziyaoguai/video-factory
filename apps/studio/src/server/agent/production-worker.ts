@@ -4,7 +4,7 @@ import type { AgentDatabase } from "./db.js";
 import { renderSlotRole } from "./render-inputs.js";
 import { type EventHub, insertEvent } from "./event-log.js";
 import { emptyReferences, insertMessage, nextSeq } from "./conversation-store.js";
-import { getRevisionRow, maxArtifactSeq, proposalPlanSource } from "./artifact-store.js";
+import { getArtifactRow, getRevisionRow, insertRevision, maxArtifactSeq, proposalPlanSource } from "./artifact-store.js";
 import { AgentError } from "./errors.js";
 import { canonicalJson, digestOf, newAgentId, type AgentClock } from "./util.js";
 import { ProductionBlobs, type BlobRow } from "./production-blobs.js";
@@ -338,7 +338,8 @@ export class ProductionWorker {
             : op.kind === "render" || op.kind === "video" ? "video/" : op.kind === "speech" ? "audio/" : "image/";
           if (!blob.mime_type.startsWith(expected)) throw new AgentError("INVALID_INPUT", "输出类型不匹配。");
           this.blobs.verify(blob);
-          this.publish(run, op, blob);
+          // 业务错误会在外层转成 unknown，发布写入须先由保存点整体撤回。
+          this.db.transaction(() => this.publish(run, op, blob))();
         } catch (error) {
           if (!(error instanceof AgentError)) throw error;
           state = "unknown";
@@ -367,7 +368,7 @@ export class ProductionWorker {
       if (operation.output_blob_id !== blob.id) throw new AgentError("INVALID_INPUT", "输出槽位已绑定其他媒体。");
       return;
     }
-    const artifactId = newAgentId("art"), revisionId = newAgentId("rev"), now = this.clock();
+    const now = this.clock();
     const snapshot = snapshotFor(this.db, run);
     // 旧付费快照缺新组模型字段时在读取边界一次规范化为空集合与默认用途；不改写原 JSON、不补造认可事实。
     const reviewInputs = snapshot.spec.reviewInputs ?? [];
@@ -427,36 +428,43 @@ export class ProductionWorker {
       }
       videoTarget = run.frozen_target_json ? JSON.parse(run.frozen_target_json) as FrozenReviewTarget : null;
     }
-    const source: ContentSource = { kind: "artifact_revision", artifactId, revisionId, digest: digestOf(content) };
-    // 草稿落位先于修订写入（§4.2.1 在途改稿、§11.6 S4）：本地与付费都按受理冻结的基准落位——
-    // null 基准表示受理时确实无稿，完成时仍为空才落；准确基准只在当前仍是该版时更新。
-    // 未落位（后继稿、目标已删除、旧历史运行缺冻结目标）时只保留 run 产出，不覆盖、不改挂别项。
-    if (localOperation || finalVideoDraft) {
-      const work = this.db.prepare("SELECT * FROM works WHERE id = ?").get(run.work_id) as WorkRow | undefined;
-      if (work) {
-        if (localOperation) {
-          const state = parseCreationState(work);
-          const item = state.groups.find(group => group.id === localOperation.target.groupId)
-            ?.items.find(candidate => candidate.id === localOperation.target.itemId);
-          const currentDraft = item?.draft?.kind === "artifact_revision" ? item.draft.revisionId : null;
-          if (item && currentDraft === localOperation.target.baseRevisionId) {
-            setReviewItemDraft(this.db, now, work, localOperation.target, source);
-          }
-        } else if (videoTarget) {
-          setVideoOutput(this.db, now, work, source, videoTarget);
-          // 归属记录受理冻结的身份：即使未落位，run 产出仍指向原目标可查。
-          binding = { workId: run.work_id, groupId: videoTarget.groupId, itemId: videoTarget.itemId,
-            inputSources: sources.inputSources, reviewInputs, purpose, runId: run.id, ...projectFields };
-        }
-      }
+    const work = localOperation || finalVideoDraft
+      ? this.db.prepare("SELECT * FROM works WHERE id = ?").get(run.work_id) as WorkRow | undefined
+      : undefined;
+    const item = localOperation && work?.owner_id === run.owner_id && work.conversation_id === run.conversation_id
+      ? parseCreationState(work).groups.find(group => group.id === localOperation.target.groupId)
+        ?.items.find(candidate => candidate.id === localOperation.target.itemId)
+      : undefined;
+    const draft = item?.draft?.kind === "artifact_revision" ? item.draft : null;
+    // 草稿仍是受理基准即可落位；续版还要求原产物归属、类型和 head 都与基准一致。
+    const canLand = !!localOperation && !!item && (draft?.revisionId ?? null) === localOperation.target.baseRevisionId;
+    const artifact = canLand && draft ? getArtifactRow(this.db, run.owner_id, draft.artifactId) : undefined;
+    const base = artifact && draft && artifact.conversation_id === run.conversation_id
+      && artifact.work_id === run.work_id && artifact.kind === artifactKind && artifact.head_revision_id === draft.revisionId
+      ? getRevisionRow(this.db, artifact.id, draft.revisionId) : undefined;
+    const continued = op.kind === "render" && artifact && draft && base && base.digest === draft.digest
+      ? insertRevision(this.db, now, artifact, base.id, { title, kind: artifactKind, content }, null, binding, run.id)
+      : null;
+    const artifactId = continued?.artifact_id ?? newAgentId("art");
+    const revisionId = continued?.id ?? newAgentId("rev");
+    const source: ContentSource = { kind: "artifact_revision", artifactId, revisionId, digest: continued?.digest ?? digestOf(content) };
+    if (work && localOperation && canLand) {
+      setReviewItemDraft(this.db, now, work, localOperation.target, source);
+    } else if (work && videoTarget) {
+      setVideoOutput(this.db, now, work, source, videoTarget);
+      // 归属记录受理冻结的身份：即使未落位，run 产出仍指向原目标可查。
+      binding = { workId: run.work_id, groupId: videoTarget.groupId, itemId: videoTarget.itemId,
+        inputSources: sources.inputSources, reviewInputs, purpose, runId: run.id, ...projectFields };
     }
-    this.db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,work_id,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?)")
-      .run(artifactId, run.conversation_id, run.owner_id, title, artifactKind, run.work_id, revisionId, maxArtifactSeq(this.db, run.conversation_id) + 1, now, now);
-    this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,?,?,?,?)")
-      .run(revisionId, artifactId, run.id, digestOf(content), canonicalJson(content), binding ? canonicalJson(binding) : null, now);
-    this.db.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES(?,?)").run(revisionId, blob.id);
+    if (!continued) {
+      this.db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,work_id,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?)")
+        .run(artifactId, run.conversation_id, run.owner_id, title, artifactKind, run.work_id, revisionId, maxArtifactSeq(this.db, run.conversation_id) + 1, now, now);
+      this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,?,?,?,?)")
+        .run(revisionId, artifactId, run.id, source.digest, canonicalJson(content), binding ? canonicalJson(binding) : null, now);
+      this.db.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES(?,?)").run(revisionId, blob.id);
+    }
     this.db.prepare("UPDATE production_operations SET output_blob_id=?,output_revision_id=? WHERE run_id=? AND id=?").run(blob.id, revisionId, run.id, op.operationId);
-    insertEvent(this.db, now, { ownerId: run.owner_id, conversationId: run.conversation_id, kind: "artifact.delivered", entityId: artifactId, entityVersion: 1, notification: "new_output" });
+    insertEvent(this.db, now, { ownerId: run.owner_id, conversationId: run.conversation_id, kind: "artifact.delivered", entityId: artifactId, entityVersion: continued?.revision_number ?? 1, notification: "new_output" });
   }
   // unknown 的用户说明按事实来源区分：本地无退出证据、供应商无任务身份，或仍在正常查询原任务。
   private unknownIssueMessage(runId: string, ops: OperationRow[], attempts: AttemptRow[]): string {

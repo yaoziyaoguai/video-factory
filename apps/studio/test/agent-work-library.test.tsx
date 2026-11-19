@@ -99,3 +99,45 @@ test("R5 只展示已记录的素材署名，媒体是否为模拟保持未知",
   expect(within(attributed!).getByText(/测试作者/)).toBeVisible();
   expect(within(attributed!).getByText("真实或模拟来源未知")).toBeVisible();
 });
+
+test("DD-13 预览和带入始终读取选中的准确历史修订", async () => {
+  const artifactId = "art-same-source";
+  const sources = [1, 2].map(number => ({
+    source: { artifactId, revisionId: `rev-source-${number}` },
+    label: `来源 v${number} · 轨道成片 v3（现名）`,
+    kind: "video" as const, provenance: [],
+  }));
+  const entry: LibraryVideo = {
+    title: "轨道定稿", finalizedAt: at, conversationId: "synthetic", workId: "work-1",
+    originMessageId: null, video, materials: sources, projectFiles: [], project: null,
+    narrationText: null, content: null, plan: null, provenanceStatus: "recorded", reviewSources: [],
+  };
+  const onBringIn = vi.fn();
+  api.list.mockResolvedValue({ nextCursor: null, items: [entry] });
+  api.read.mockImplementation(async (id: string, revisionId: string) =>
+    revision(id, revisionId, id === artifactId ? Number(revisionId.at(-1)) : 1,
+      { format: "media", blobId: `blob-${revisionId}`, mimeType: "video/mp4", durationMs: 4000 }));
+  render(<MemoryRouter><WorkLibrary bringTarget="current" onBringIn={onBringIn} /></MemoryRouter>);
+  await userEvent.click(await screen.findByRole("button", { name: /轨道定稿/ }));
+  const first = await screen.findByRole("checkbox", { name: /来源 v1/ });
+  const second = screen.getByRole("checkbox", { name: /来源 v2/ });
+  const firstRow = within(first.closest("li")!);
+  const secondRow = within(second.closest("li")!);
+  for (const [row, number] of [[firstRow, 1], [secondRow, 2]] as const) {
+    await userEvent.click(row.getByText("预览与下载"));
+    expect(await row.findByRole("link", { name: "下载文件" })).toHaveAttribute("href", expect.stringContaining(`blob-rev-source-${number}`));
+    expect(row.getByLabelText("视频预览")).toHaveAttribute("src", expect.stringContaining(`blob-rev-source-${number}`));
+  }
+  await userEvent.click(first);
+  await userEvent.click(second);
+  await userEvent.click(first);
+  expect(first).not.toBeChecked();
+  expect(second).toBeChecked();
+  await userEvent.click(screen.getByRole("button", { name: "带入当前对话（1）" }));
+  expect(onBringIn).toHaveBeenCalledExactlyOnceWith([{
+    label: `${sources[1]!.label}（视频）`,
+    selection: { sourceVideo: video, source: { kind: "artifact_revision", ...sources[1]!.source } },
+  }]);
+  expect(basisReads()).toEqual(sources.map(material => [material.source.artifactId, material.source.revisionId]));
+  expect(api.head).not.toHaveBeenCalled();
+});
