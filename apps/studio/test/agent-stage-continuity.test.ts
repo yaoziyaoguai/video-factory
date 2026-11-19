@@ -1521,7 +1521,7 @@ it("C1 作品库只收定稿视频：重复定稿去重不顶前，来源按定�
     // G4-2：留存清单完整投影——文本依据修订也在 materials 里，可跨会话选材；无媒体来源记录。
     const basisA = artifactOf(f, "山路短片画面依据");
     assert.deepEqual(entryA.materials, [{ source: { artifactId: basisA.id, revisionId: basisA.revisionId },
-      label: "山路短片画面依据", kind: "prompt", provenance: [] }]);
+      label: "来源 v1 · 山路短片画面依据（现名）", kind: "prompt", provenance: [] }]);
     assert.equal(entryA.project, null);
     assert.deepEqual(entryA.projectFiles, []);
     const noticeA = f.app.service.snapshot("local-owner", f.conversation.id).messages.items
