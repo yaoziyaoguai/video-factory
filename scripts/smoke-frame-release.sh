@@ -39,7 +39,7 @@ export FRAME_HTTP_PROXY= FRAME_HTTPS_PROXY= FRAME_NO_PROXY=localhost,127.0.0.1,v
 old_sha=c1b54c68f3fb7336496d8748d33171c67c062660
 container=video_factory_prod
 volume=video-factory_video_factory_workspace
-alias=frame-creative:pi-1.4-v1
+alias=frame-creative:pi-1.5-v1
 unit=/etc/systemd/system/frame-creative.service
 host_script=/opt/frame-creative/creative-runner-host.mjs
 maintenance=/etc/nginx/snippets/frame-release-maintenance.conf

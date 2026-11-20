@@ -16,8 +16,7 @@ def controlled_path(value, writable=False):
     return candidate
 
 
-def main():
-    request = json.load(sys.stdin)
+def handle(request):
     action = request["action"]
     if action == "initialize":
         root = Path(request["root"])
@@ -82,8 +81,21 @@ def main():
     raise ValueError("未支持的固定文件动作。")
 
 
-try:
-    print(json.dumps(main(), ensure_ascii=False))
-except Exception as error:
-    print(str(error), file=sys.stderr)
-    sys.exit(1)
+def main():
+    # 每行一个请求：宿主以长驻温热容器复用同一进程，EOF 即退出。
+    # 单请求 + 关闭 stdin 的旧调用方式等价于一次循环，保持兼容。
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            reply = handle(json.loads(line))
+        except Exception as error:
+            # 温热进程按请求隔离失败：单次路径/权限错误回复后继续服务，
+            # 不让容器退出迫使宿主回退冷启动。
+            reply = {"error": str(error)}
+        sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+main()

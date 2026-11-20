@@ -13,7 +13,7 @@ failed="video_factory_failed_${DEPLOY_RUN//-/_}"
 volume=video-factory_video_factory_workspace
 image="video-factory:release-$RELEASE_SHA"
 creative="frame-creative:release-$RELEASE_SHA"
-alias=frame-creative:pi-1.4-v1
+alias=frame-creative:pi-1.5-v1
 unit=/etc/systemd/system/frame-creative.service
 host_script=/opt/frame-creative/creative-runner-host.mjs
 maintenance=/etc/nginx/snippets/frame-release-maintenance.conf
@@ -156,7 +156,12 @@ record_probe_volumes() {
 }
 clean_probe_volumes() {
   [[ -e "$backup/probe-volumes.txt" ]] || return 0
-  while IFS= read -r probe_volume; do [[ -z "$probe_volume" ]] || docker volume rm "$probe_volume"; done < "$backup/probe-volumes.txt"
+  while IFS= read -r probe_volume; do
+    [[ -z "$probe_volume" ]] && continue
+    # 温热容器最长 60 秒空闲存活并挂载探针卷；先精确移除挂载它的容器再删卷。
+    docker ps -aq --filter "volume=$probe_volume" | xargs -r docker rm -f >/dev/null
+    docker volume rm "$probe_volume"
+  done < "$backup/probe-volumes.txt"
 }
 restore() {
   local rc=$?
