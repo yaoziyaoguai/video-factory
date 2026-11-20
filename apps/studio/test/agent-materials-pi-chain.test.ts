@@ -310,6 +310,13 @@ test("T3-06 Pi 链：prompt+采用图片正式交付，PC 来源与刷新一致�
 });
 
 test("T3-12 Pi 链：read_trends 无内部 ID 读配置榜单；读取中改配置本次沿快照、下次用新值；全部失败非空 unavailable 榜", async t => {
+  // 本机回环 NewsNow 桩按联调口径显式放行私网（默认拒绝的用例在设置测试里）。
+  const previousPolicy = process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+  process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = "1";
+  t.after(() => {
+    if (previousPolicy === undefined) delete process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+    else process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = previousPolicy;
+  });
   const directory = await mkdtemp(path.join(tmpdir(), "frame-pi-t312-"));
   const a = await assembleOfflineAgent({ dataDir: directory, uiOrigin: origin });
   t.after(async () => { await a.close(); await rm(directory, { recursive: true, force: true }); });

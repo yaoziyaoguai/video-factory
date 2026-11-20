@@ -166,7 +166,7 @@ async function json(method: string, baseUrl: string, url: string, body?: unknown
 
 async function configureConnection(baseUrl: string): Promise<void> {
   const model: ConnectionModel = { id: "sol", kind: "text", name: "sol", modelId: "gpt-6.1-sol", features: [], contextWindowTokens: 272_000, maxOutputTokens: 16_384, enabled: true, isDefault: true };
-  const connection: ProviderConnection = { id: "provider-openai", name: "OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-A", enabled: true, models: [model] };
+  const connection: ProviderConnection = { id: "provider-openai", name: "OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-A", credentialConfigured: true, enabled: true, models: [model] };
   const saved = await json("POST", baseUrl, "/api/agent/v1/settings/model-connections", { commandId: cmd(), expectedRevision: 0, connection });
   assert.equal(saved.status, 200, `连接保存失败: ${JSON.stringify(saved.body)}`);
 }

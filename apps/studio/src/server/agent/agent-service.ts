@@ -166,7 +166,10 @@ export class AgentService {
 
   readProviderConnections() {
     if (!this.options.providerConnections) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口未启用供应商连接设置。");
-    return readProviderConnections(this.options.db);
+    // 对外读取不回传明文 Key：apiKey 恒为 null，是否已配置改由 credentialConfigured 表达；
+    // 保存时 null 表示保留已存 Key。内部执行路径仍直接读库取真实凭据。
+    const view = readProviderConnections(this.options.db);
+    return { ...view, connections: view.connections.map(connection => ({ ...connection, apiKey: null, credentialConfigured: connection.apiKey != null })) };
   }
 
   saveProviderConnection(ownerId: string, input: unknown) {
@@ -183,7 +186,8 @@ export class AgentService {
 
   readImportedSettings(ownerId: string): ImportedSettings {
     void ownerId;
-    return this.options.importedSettings ?? [];
+    // 导入文件里的旧 Key 只在启动建连时使用；读取视图与模型/素材设置同口径，不回传明文。
+    return (this.options.importedSettings ?? []).map(entry => ({ ...entry, apiKey: null }));
   }
 
   // —— 免费服务设置（素材来源与 NewsNow；与业务库同库，直接读写当前配置） ——

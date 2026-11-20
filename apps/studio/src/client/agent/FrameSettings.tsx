@@ -111,8 +111,8 @@ function ServicesDirectory() {
         if (!current.enabled && (!current.endpoint || current.sourceIds.length === 0)) { setNotice("启用 NewsNow 需要先在配置里填写实例地址和来源。"); return; }
         request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled, endpoint: current.endpoint, sourceIds: current.sourceIds, topics: current.topics } };
       } else if (current.serviceId === "edge-tts") {
-        // 读取形状恒带语音与命令（未保存时给缺省），开关只需回写当前选择。
-        request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled, voice: current.voice, pythonCommand: current.pythonCommand } };
+        // 解释器命令由服务端环境变量解析；开关只需回写当前语音选择。
+        request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled, voice: current.voice } };
       } else {
         request = { row, body: { commandId: agentApi.newCommandId(), expectedRevision: current.revision, enabled } };
       }
@@ -120,13 +120,7 @@ function ServicesDirectory() {
     setToggleSaving(true);
     try {
       const receipt = await agentApi.saveFreeServiceSettings(request.row.id, request.body);
-      // 开关回执不带 Key；已读到的 Key 保留给行内展示。
-      setLoads(prev => {
-        const prior = prev[request.row.id]?.settings ?? null;
-        const settings = prior !== null && "apiKey" in prior && prior.apiKey !== undefined && "credentialConfigured" in receipt.settings
-          ? { ...receipt.settings, apiKey: prior.apiKey } : receipt.settings;
-        return { ...prev, [request.row.id]: { phase: "ready", settings } };
-      });
+      setLoads(prev => ({ ...prev, [request.row.id]: { phase: "ready", settings: receipt.settings } }));
       setTogglePending(null); setNotice("");
     } catch (error) {
       if (error instanceof AgentApiError) {
@@ -173,10 +167,10 @@ function ServicesDirectory() {
   const savedDetails = (row: ServiceRow) => {
     const settings = loadOf(row.id).settings;
     if (!settings) return null;
-    if (settings.serviceId === "pexels") return <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} apiKey={settings.apiKey} />;
+    if (settings.serviceId === "pexels") return <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} credentialConfigured={settings.credentialConfigured} />;
     if (settings.serviceId === "newsnow") return settings.endpoint ? <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} /> : null;
     if (settings.serviceId === "edge-tts") return <dl className="agent-saved-configuration"><dt>语音</dt><dd>{settings.voice}</dd></dl>;
-    if ("credentialConfigured" in settings) return <SavedConfigurationDetails name={row.name} apiKey={settings.apiKey ?? null} />;
+    if ("credentialConfigured" in settings) return <SavedConfigurationDetails name={row.name} credentialConfigured={settings.credentialConfigured} />;
     return null;
   };
 
@@ -245,7 +239,7 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
     setPhase("loading"); setNotice(""); setPending(null);
     try {
       const value = await agentApi.readFreeServiceSettings(row.id) as KeyedServiceSettings;
-      setSettings(value); setEnabled(value.enabled); setApiKey(value.apiKey ?? ""); setKeyError("");
+      setSettings(value); setEnabled(value.enabled); setApiKey(""); setKeyError("");
       setPhase("editing");
     } catch { setPhase("loadFailed"); }
   }, [row.id]);
@@ -254,7 +248,8 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
   useEffect(() => { if (phase === "editing") keyInput.current?.focus(); }, [phase]);
 
   const close = () => { active.current = false; setApiKey(""); setPending(null); onClose(); };
-  const dirty = phase === "editing" && settings !== null && (enabled !== settings.enabled || apiKey !== (settings.apiKey ?? ""));
+  // Key 只写不回显：输入框相对“空”的差异即视为有新 Key 待保存。
+  const dirty = phase === "editing" && settings !== null && (enabled !== settings.enabled || apiKey !== "");
   const requestClose = () => {
     if (!saving && !pending && dirty) { setConfirmDiscard(true); setNotice(""); return; }
     close();
@@ -306,7 +301,7 @@ function KeyedServiceConfigDialog({ row, onClose, onSaved }: { row: KeyedRow; on
   return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose(); }}>
     <div className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-labelledby={`${row.id}-config-title`} ref={dialog} onKeyDown={onKeyDown}>
       <header className="agent-modal-header">
-        <div><h3 id={`${row.id}-config-title`}>配置 {row.name}</h3><p>Key 保存在本机，可在此查看与编辑 · 保存不发起调用</p></div>
+        <div><h3 id={`${row.id}-config-title`}>配置 {row.name}</h3><p>Key 只写不回显，留空保持已保存的 Key · 保存不发起调用</p></div>
         <button type="button" className="agent-icon-button" aria-label="关闭配置" onClick={requestClose}><X aria-hidden="true" /></button>
       </header>
       {phase === "loading" ? <p className="agent-config-note">正在读取配置…</p> : phase === "loadFailed" ? <div className="agent-config-note">
@@ -490,14 +485,13 @@ const EDGE_TTS_VOICE_OPTIONS = [
   "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
 ];
 
-// 免费配音配置面板：语音与能 import edge_tts 的解释器命令 + 启用。保存不发起外部请求；
-// 语音形状由契约校验，这里做同样的先行检查给出行内错误。
+// 免费配音配置面板：语音 + 启用。解释器命令由服务端环境变量管理，不在页面配置；
+// 保存不发起外部请求；语音形状由契约校验，这里做同样的先行检查给出行内错误。
 function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (settings: EdgeTtsSettings) => void }) {
   const [phase, setPhase] = useState<"loading" | "loadFailed" | "editing">("loading");
   const [settings, setSettings] = useState<EdgeTtsSettings | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [voice, setVoice] = useState("");
-  const [pythonCommand, setPythonCommand] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState<SaveEdgeTtsSettings | null>(null);
@@ -511,14 +505,13 @@ function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
     return () => { active.current = false; };
   }, []);
   const voiceInput = useRef<HTMLInputElement>(null);
-  const runtimeDetails = useRef<HTMLDetailsElement>(null);
 
   const load = useCallback(async () => {
     setPhase("loading"); setNotice(""); setPending(null);
     try {
       const value = await agentApi.readFreeServiceSettings("edge-tts") as EdgeTtsSettings;
       setSettings(value); setEnabled(value.enabled);
-      setVoice(value.voice); setPythonCommand(value.pythonCommand); setErrors({});
+      setVoice(value.voice); setErrors({});
       setPhase("editing");
     } catch { setPhase("loadFailed"); }
   }, []);
@@ -548,14 +541,11 @@ function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
   const submit = async (retry: typeof pending) => {
     if (!settings || saving || conflictReadFailed) return;
     const trimmedVoice = voice.trim();
-    const trimmedPython = pythonCommand.trim();
     const fieldErrors: Record<string, string> = {};
     if (!/^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$/.test(trimmedVoice)) fieldErrors.voice = "语音必须是 Edge 神经语音 ID，例如 zh-CN-XiaoxiaoNeural。";
-    if (!trimmedPython || /[\x00-\x1f\x7f]/.test(trimmedPython)) fieldErrors.pythonCommand = "Python 命令不能为空或含控制字符；填写能 import edge_tts 的解释器命令。";
     setErrors(fieldErrors);
-    if (fieldErrors.pythonCommand && runtimeDetails.current) runtimeDetails.current.open = true;
     if (Object.keys(fieldErrors).length) return;
-    const body = retry ?? { commandId: agentApi.newCommandId(), expectedRevision: settings.revision, enabled, voice: trimmedVoice, pythonCommand: trimmedPython };
+    const body = retry ?? { commandId: agentApi.newCommandId(), expectedRevision: settings.revision, enabled, voice: trimmedVoice };
     setSaving(true);
     dialog.current?.querySelector<HTMLButtonElement>('button[aria-label="关闭配置"]')?.focus();
     try {
@@ -593,17 +583,7 @@ function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
           <datalist id="edgetts-voice-options">{EDGE_TTS_VOICE_OPTIONS.map(option => <option key={option} value={option} />)}</datalist>
           {errors.voice ? <span className="agent-field-error" id="edgetts-config-voice-error" role="alert">{errors.voice}</span> : null}
         </div>
-        <details className="agent-scope-details" ref={runtimeDetails}>
-          <summary>运行设置</summary>
-          <div className="agent-config-field">
-            <label htmlFor="edgetts-config-python">Python 命令</label>
-            <input disabled={saving} id="edgetts-config-python" value={pythonCommand} onChange={event => edit(setPythonCommand)(event.target.value)} autoComplete="off" placeholder="python3" aria-invalid={Boolean(errors.pythonCommand)} aria-describedby={errors.pythonCommand ? "edgetts-config-python-error" : "edgetts-config-runtime-note"} />
-            {errors.pythonCommand ? <span className="agent-field-error" id="edgetts-config-python-error" role="alert">{errors.pythonCommand}</span> : null}
-          </div>
-          <p className="agent-config-summary" id="edgetts-config-runtime-note">供管理员配置：填写已安装 edge-tts 的解释器可执行文件名或绝对路径，不含参数。服务器需在 Python 隔离模式（-I）下加载该依赖。</p>
-          {conflict && !conflictReadFailed ? <p className="agent-config-note">当前已保存 Python：{settings?.pythonCommand}</p> : null}
-        </details>
-        <p className="agent-config-summary">第三方维护的免费客户端，没有官方 SLA。配音失败会返回真实原因，不会自动改用付费配音。</p>
+        <p className="agent-config-summary">第三方维护的免费客户端，没有官方 SLA。配音失败会返回真实原因，不会自动改用付费配音。运行依赖由管理员在服务端配置。</p>
         {notice ? <p className="agent-field-error" role="alert">{notice}</p> : null}
         {conflict && !conflictReadFailed ? <aside className="agent-config-note" aria-label="当前已保存免费配音配置"><strong>当前已保存</strong><p>{settings?.enabled ? "已选用" : "已停用"} · {settings?.voice}</p></aside> : null}
         {conflictReadFailed ? <button type="button" onClick={() => void readConflict()}>重试读取最新配置</button> : null}

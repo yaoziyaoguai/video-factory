@@ -1061,10 +1061,6 @@ export interface PexelsSettings {
   credentialConfigured: boolean;
   endpoint: "https://api.pexels.com/v1";
   writeUnavailableReason: string | null;
-  /**
-   * 完整 Key 仅设置 GET 返回，供本机个人页面查看；保存回执省略，不进入 Bootstrap、事件或 Agent 上下文。
-   */
-  apiKey?: string | null;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1076,10 +1072,6 @@ export interface KeyedMaterialSettings {
   enabled: boolean;
   credentialConfigured: boolean;
   writeUnavailableReason: string | null;
-  /**
-   * 完整 Key 仅设置 GET 返回，供本机个人页面查看；保存回执省略，不进入 Bootstrap、事件或 Agent 上下文。
-   */
-  apiKey?: string | null;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1129,10 +1121,6 @@ export interface EdgeTtsSettings {
   revision: number;
   enabled: boolean;
   voice: string;
-  /**
-   * 能在 -I 下 import edge_tts 的 Python 解释器可执行文件名或绝对路径，不含 shell 参数；部署统一配置 PATH 或在此覆盖。
-   */
-  pythonCommand: string;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1275,7 +1263,6 @@ export interface SaveEdgeTtsSettings {
   expectedRevision: number;
   enabled: boolean;
   voice: string;
-  pythonCommand: string;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3092,6 +3079,9 @@ export interface ImportedConfiguration {
   name: string;
   endpoint: string;
   modelId: string | null;
+  /**
+   * 启动建连使用文件中的真实值；HTTP 读取视图不回传明文，恒为 null。
+   */
   apiKey: string | null;
   details: string[];
 }
@@ -3130,7 +3120,14 @@ export interface ProviderConnection {
    */
   protocol: "openai" | "openai-chat-completions" | "anthropic-messages" | "ark" | "minimax" | "wan";
   baseUrl: string;
+  /**
+   * 读取时恒为 null，不回传明文 Key；保存时 null 表示保留已存 Key。
+   */
   apiKey: string | null;
+  /**
+   * 读取时表示是否已保存凭据；保存时由服务端按生效 Key 重算，客户端传值被忽略。
+   */
+  credentialConfigured: boolean;
   enabled: boolean;
   models: ConnectionModel[];
 }

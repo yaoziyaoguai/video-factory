@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import type { FauxProviderHandle, FauxResponseStep } from "@earendil-works/pi-ai";
 import { type AgentDatabase } from "./db.js";
 import { createAgentRuntime } from "./assembly.js";
+import type { ImportedSettings } from "../../shared/agent/generated/contracts.js";
 import { offlineScenarioFactory } from "./offline-scenario.js";
 import { PiRuntimeHost } from "./pi-runtime.js";
 import { type CrashPointHook } from "./pi-tools.js";
@@ -61,6 +62,8 @@ export interface OfflineAgentOptions {
   fauxResponses?: FauxResponseStep[];
   /** 免费素材替身 fetch；仅测试用于完整 Pi 链的可控回源。 */
   stockFetch?: typeof fetch;
+  /** 注入导入配置（含合成 Key）；仅测试用于断言读取视图不回传明文。 */
+  importedSettings?: ImportedSettings;
   /** 离线入口默认体验：装一个永不枯竭的场景工厂（明确标识测试回放，见 offline-scenario.ts）。 */
   fauxScenario?: boolean;
   media?: Omit<FauxMediaOptions, "fixtureRoot"> & { autoStart?: boolean; leaseMs?: number; crash?: ProductionCrashHook };
@@ -81,7 +84,7 @@ export async function assembleOfflineAgent(options: OfflineAgentOptions): Promis
   const runtime = await createAgentRuntime({
     dataDir: options.dataDir, skillsRoot: options.skillsRoot ?? defaultSkillsRoot,
     // 隔离装配同样启用连接设置：模型页走真实初始化/保存事务；文本执行仍用 Faux，不接真实供应商。
-    providerConnections: true, importedSettings: [],
+    providerConnections: true, importedSettings: options.importedSettings ?? [],
     host: { faux: { provider: FAUX_PROVIDER, modelIds: [FAUX_TEXT_MODEL],
       ...(options.fauxTokensPerSecond === undefined ? {} : { tokensPerSecond: options.fauxTokensPerSecond }) },
       ...(options.fauxContextWindow === undefined ? {} : { fauxContextWindow: options.fauxContextWindow }),

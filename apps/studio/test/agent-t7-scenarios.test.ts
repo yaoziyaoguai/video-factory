@@ -381,7 +381,7 @@ it("T7-05 场景③：制作进行中另聊热点并切默认模型，旧制作�
     const saveConnection = (models: ConnectionModel[]) => {
       const state = readProviderConnections(db);
       const connection: ProviderConnection = { id: connectionId, name: "OpenAI 文本", protocol: "openai",
-        baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-t7", enabled: true, models };
+        baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-t7", credentialConfigured: true, enabled: true, models };
       return saveProviderConnection(db, staticClock, "local-owner",
         { commandId: cmd(), expectedRevision: state.revision, connection });
     };

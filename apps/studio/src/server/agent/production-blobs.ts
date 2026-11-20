@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
 import type { AgentDatabase } from "./db.js";
 import { newAgentId, type AgentClock } from "./util.js";
@@ -50,8 +50,9 @@ export class ProductionBlobs {
   }
   verify(row: BlobRow): void {
     try {
-      const file = this.filePath(row.digest);
-      if (statSync(file).size === row.size_bytes && createHash("sha256").update(readFileSync(file)).digest("hex") === row.digest) return;
+      // 常规路径只核对长度：文件由 persist() 按内容寻址原子写入，全量重读哈希会让百兆级成片
+      // 在主线程秒级阻塞（审计第一阶段止血项）；流式哈希随第二阶段 persistFromFile 落地。
+      if (statSync(this.filePath(row.digest)).size === row.size_bytes) return;
     } catch { /* 给调用边界一个明确的输入不可用结果。 */ }
     throw new AgentError("CAPABILITY_UNAVAILABLE", "媒体文件缺失或内容校验失败。");
   }

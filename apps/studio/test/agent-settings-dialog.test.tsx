@@ -8,15 +8,15 @@ import type { AvailableProviderModels, ProviderConnectionSettings, SaveProviderC
 // 视频保留原供应商连接（可多条）。浏览不写库、应用单事务切换、备选管理与目录同步独立。
 
 const fixture = (): ProviderConnectionSettings => ({ revision: 1, connections: [
-  { id: "provider-openai", name: "我的 OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "synthetic-shared-key", enabled: true, models: [
+  { id: "provider-openai", name: "我的 OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1", apiKey: "synthetic-shared-key", credentialConfigured: true, enabled: true, models: [
     { id: "first", name: "型号甲", modelId: "alpha", kind: "text", features: ["适合长文"], contextWindowTokens: 32000, maxOutputTokens: 1000, enabled: true, isDefault: true, thinkingLevel: "default" },
     { id: "second", name: "型号乙", modelId: "beta", kind: "text", features: [], contextWindowTokens: 32000, maxOutputTokens: 1000, enabled: true, isDefault: false, thinkingLevel: "default" },
     { id: "third", name: "型号丙", modelId: "gamma", kind: "text", features: [], contextWindowTokens: 64000, maxOutputTokens: 2000, enabled: true, isDefault: false, thinkingLevel: "default" },
   ] },
-  { id: "provider-ark", name: "火山引擎", protocol: "ark", baseUrl: "https://ark.example.com/v1", apiKey: "synthetic-ark-key", enabled: true, models: [
+  { id: "provider-ark", name: "火山引擎", protocol: "ark", baseUrl: "https://ark.example.com/v1", apiKey: "synthetic-ark-key", credentialConfigured: true, enabled: true, models: [
     { id: "video-one", name: "视频甲", modelId: "faux-video", kind: "video", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: false },
   ] },
-  { id: "provider-ark2", name: "另一家视频", protocol: "ark", baseUrl: "https://two.example.com/v1", apiKey: "synthetic-ark2-key", enabled: true, models: [
+  { id: "provider-ark2", name: "另一家视频", protocol: "ark", baseUrl: "https://two.example.com/v1", apiKey: "synthetic-ark2-key", credentialConfigured: true, enabled: true, models: [
     { id: "video-two", name: "视频乙", modelId: "faux-video-2", kind: "video", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: false },
   ] },
 ], modelStatuses: [
@@ -75,7 +75,7 @@ it("每类一个当前；页面不再明文展示 Key，备选按连接标注", 
 it("进入与切换用途预选当前型号；MiniMax 配音当前与 OpenAI 备选一致且浏览不写库", async () => {
   const settings = fixture();
   settings.connections[0]!.models.push({ id: "speech-backup", name: "OpenAI 配音备选", modelId: "gpt-realtime-2.1-mini", kind: "speech", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: false });
-  settings.connections.push({ id: "provider-minimax", name: "我的 MiniMax", protocol: "minimax", baseUrl: "https://api.minimax.cn", apiKey: "synthetic-minimax-key", enabled: true,
+  settings.connections.push({ id: "provider-minimax", name: "我的 MiniMax", protocol: "minimax", baseUrl: "https://api.minimax.cn", apiKey: "synthetic-minimax-key", credentialConfigured: true, enabled: true,
     models: [{ id: "speech-current", name: "MiniMax 当前配音", modelId: "speech-2.8-turbo", kind: "speech", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true }] });
   const { posts } = routes({ settings }); page();
   await screen.findByText("用于新的请求和方案");
@@ -230,7 +230,7 @@ it("目录勾选登记备选，容量来自目录；下线条目不默认勾选"
 
 it("空的视频供应商连接也有目录区：先空状态提示，同步后即可勾选登记", async () => {
   const settings = fixture();
-  settings.connections.push({ id: "provider-fresh", name: "新连接", protocol: "ark", baseUrl: "https://fresh.example.com/v1", apiKey: "synthetic-fresh", enabled: true, models: [] });
+  settings.connections.push({ id: "provider-fresh", name: "新连接", protocol: "ark", baseUrl: "https://fresh.example.com/v1", apiKey: "synthetic-fresh", credentialConfigured: true, enabled: true, models: [] });
   const state = routes({ settings }); page();
   await screen.findByText("型号甲");
   await userEvent.click(screen.getByRole("tab", { name: /视频模型/ }));

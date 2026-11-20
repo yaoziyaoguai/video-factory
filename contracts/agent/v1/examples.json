@@ -4766,7 +4766,7 @@
         "name": "Pixabay",
         "endpoint": "https://pixabay.com/api/",
         "modelId": null,
-        "apiKey": "synthetic-local-key",
+        "apiKey": null,
         "details": []
       }
     ]
@@ -4826,7 +4826,7 @@
       "name": "供应商",
       "protocol": "openai-chat-completions",
       "baseUrl": "https://example.com/v1",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4843,7 +4843,8 @@
           "isDefault": true,
           "thinkingLevel": "default"
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4855,7 +4856,7 @@
       "name": "OpenAI",
       "protocol": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4892,7 +4893,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4904,7 +4906,7 @@
       "name": "MiniMax",
       "protocol": "minimax",
       "baseUrl": "https://api.minimax.io",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4933,7 +4935,8 @@
           "enabled": true,
           "isDefault": false
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4945,7 +4948,7 @@
       "name": "阿里万相",
       "protocol": "wan",
       "baseUrl": "https://dashscope-async.aliyuncs.com",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4961,7 +4964,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4976,7 +4980,7 @@
           "name": "供应商",
           "protocol": "openai-chat-completions",
           "baseUrl": "https://example.com/v1",
-          "apiKey": "example-only-key",
+          "apiKey": null,
           "enabled": true,
           "models": [
             {
@@ -4993,7 +4997,8 @@
               "isDefault": true,
               "thinkingLevel": "high"
             }
-          ]
+          ],
+          "credentialConfigured": true
         }
       ],
       "modelStatuses": [
@@ -5057,7 +5062,8 @@
             "isDefault": true,
             "thinkingLevel": "default"
           }
-        ]
+        ],
+        "credentialConfigured": true
       }
     }
   },
@@ -5116,7 +5122,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -10357,8 +10364,7 @@
       "serviceId": "edge-tts",
       "revision": 0,
       "enabled": false,
-      "voice": "zh-CN-XiaoxiaoNeural",
-      "pythonCommand": "python3"
+      "voice": "zh-CN-XiaoxiaoNeural"
     }
   },
   {
@@ -10369,8 +10375,7 @@
       "serviceId": "edge-tts",
       "revision": 1,
       "enabled": true,
-      "voice": "随便一个声音",
-      "pythonCommand": "python3"
+      "voice": "随便一个声音"
     }
   },
   {
@@ -10381,8 +10386,7 @@
       "commandId": "cmd_edge_1",
       "expectedRevision": 0,
       "enabled": true,
-      "voice": "zh-CN-YunxiNeural",
-      "pythonCommand": "/opt/venv/bin/python3"
+      "voice": "zh-CN-YunxiNeural"
     }
   },
   {

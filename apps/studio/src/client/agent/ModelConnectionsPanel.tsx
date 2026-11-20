@@ -48,7 +48,8 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
 
   const modelsOfKind = (connection: ProviderConnection): ConnectionModel[] => connection.models.filter(model => model.kind === kind);
   // 承载矩阵（§11.2）：文本用 OpenAI，图片用 OpenAI 或火山方舟；配音 OpenAI 或 MiniMax；视频 Ark/MiniMax/万相（不含 OpenAI）。
-  const kindConnections = (settings?.connections ?? []).filter(item => item.enabled && item.apiKey && connectionSupportsKind(item, kind));
+  // Key 已不回传，可用连接按 credentialConfigured 判定。
+  const kindConnections = (settings?.connections ?? []).filter(item => item.enabled && item.credentialConfigured && connectionSupportsKind(item, kind));
   const current = kindConnections.flatMap(connection => modelsOfKind(connection).map(model => ({ connection, model }))).find(item => item.model.isDefault) ?? null;
   const backups = kindConnections.flatMap(connection => modelsOfKind(connection).map(model => ({ connection, model }))).filter(item => !item.model.isDefault) ?? [];
   const statusOf = (modelId: string): string | null => settings?.modelStatuses.find(item => item.modelEntryId === modelId)?.unavailableReason ?? null;
@@ -63,7 +64,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
 
   const switchKind = (next: ConnectionModel["kind"]) => {
     setKind(next); setPickModelId(""); setNotice(""); setRemoving(null); setManaging(false); setModelSearch("");
-    const scoped = (settings?.connections ?? []).filter(item => item.enabled && item.apiKey && connectionSupportsKind(item, next));
+    const scoped = (settings?.connections ?? []).filter(item => item.enabled && item.credentialConfigured && connectionSupportsKind(item, next));
     setPickConnectionId((scoped.find(item => item.models.some(model => model.kind === next && model.isDefault)) ?? scoped[0])?.id ?? "");
   };
 
@@ -380,7 +381,7 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
   mode: "connection" | "model"; connectionId: string | null; modelId: string | null;
   settings: ProviderConnectionSettings; onSaved: () => Promise<void>; onClose: () => void; onRemoveCurrent?: (() => void) | undefined;
 }) {
-  const blank = (): ProviderConnection => ({ id: `provider-${crypto.randomUUID()}`, name: "", protocol: "openai", baseUrl: "", apiKey: null, enabled: true, models: [] });
+  const blank = (): ProviderConnection => ({ id: `provider-${crypto.randomUUID()}`, name: "", protocol: "openai", baseUrl: "", apiKey: null, credentialConfigured: false, enabled: true, models: [] });
   const [connection, setConnection] = useState<ProviderConnection>(() => settings.connections.find(item => item.id === connectionId) ?? blank());
   const [creating, setCreating] = useState(!connectionId);
   const [notice, setNotice] = useState("");
@@ -470,7 +471,7 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
         <label className="agent-config-field">连接名称<input required maxLength={100} value={connection.name} onChange={event => change({ name: event.target.value })} placeholder="例如：通义千问、我的中转服务" /></label>
         <label className="agent-config-field">接口协议<select value={connection.protocol} onChange={event => change({ protocol: event.target.value as ProviderConnection["protocol"] })}>{[...new Set([connection.protocol, ...NEW_CONNECTION_PROTOCOLS])].map(id => <option key={id} value={id}>{protocols[id]}</option>)}</select></label>
         <label className="agent-config-field">接口地址<input required type="url" value={connection.baseUrl} onChange={event => change({ baseUrl: event.target.value })} placeholder={connection.protocol === "openai" ? "https://api.openai.com/v1" : connection.protocol === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : connection.protocol === "minimax" ? "https://api.minimax.cn" : connection.protocol === "wan" ? "https://ws.cn-beijing.maas.aliyuncs.com" : "https://供应商地址"} /></label>
-        <label className="agent-config-field">API Key<input type="text" value={connection.apiKey ?? ""} onChange={event => change({ apiKey: event.target.value || null })} autoComplete="off" spellCheck={false} placeholder="填写一次，所有已选型号共用" /></label>
+        <label className="agent-config-field">API Key<input type="text" value={connection.apiKey ?? ""} onChange={event => change({ apiKey: event.target.value || null })} autoComplete="off" spellCheck={false} placeholder={connection.credentialConfigured ? "已保存，不回显；留空保持不变" : "填写一次，所有已选型号共用"} /></label>
         {connection.protocol === "openai" ? <p className="agent-config-note">OpenAI 连接承载文本、图片、配音，三类共用这一份 Key；视频不在此连接。文本容量与推理档位来自 Pi 精确目录，不需要手填。</p> : null}
         <label className="agent-config-check"><input type="checkbox" checked={connection.enabled} onChange={event => change({ enabled: event.target.checked })} />启用此连接</label>
         {connection.models.length ? <p className="agent-config-note">关联 {connection.models.length} 个型号。修改影响后续调用，已开始的制作保留原版本。</p> : null}

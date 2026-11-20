@@ -39,11 +39,11 @@ const text = (id: string, overrides: Partial<ConnectionModel> = {}): ConnectionM
 });
 const openai = (models: ConnectionModel[]): ProviderConnection => ({
   id: "provider-openai", name: "OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1",
-  apiKey: "sk-synthetic-old", enabled: true, models,
+  apiKey: "sk-synthetic-old", credentialConfigured: true, enabled: true, models,
 });
 const arkVideo = (): ProviderConnection => {
   return { id: "provider-ark", name: "火山方舟", protocol: "ark", baseUrl: DEFAULT_ARK_VIDEO_PROFILE.baseUrl,
-    apiKey: "synthetic-ark-video", enabled: true, models: [mediaModel("ark-video", "video", DEFAULT_ARK_VIDEO_PROFILE.modelId, true)] };
+    apiKey: "synthetic-ark-video", credentialConfigured: true, enabled: true, models: [mediaModel("ark-video", "video", DEFAULT_ARK_VIDEO_PROFILE.modelId, true)] };
 };
 function save(value: ProviderConnection, commandId = crypto.randomUUID()) {
   return saveProviderConnection(db, clock, "owner", { commandId, expectedRevision: readProviderConnections(db).revision, connection: value });
@@ -53,13 +53,13 @@ const mediaModel = (id: string, kind: "image" | "speech" | "video", modelId: str
 });
 const minimaxConnection = (overrides: Partial<ProviderConnection> = {}): ProviderConnection => ({
   id: "provider-minimax", name: "MiniMax", protocol: "minimax", baseUrl: "https://api.minimax.io",
-  apiKey: "synthetic-minimax", enabled: true,
+  apiKey: "synthetic-minimax", credentialConfigured: true, enabled: true,
   models: [mediaModel("mm-speech", "speech", "speech-2.8-turbo", true), mediaModel("mm-video", "video", "MiniMax-H3", true)],
   ...overrides,
 });
 const wanConnection = (overrides: Partial<ProviderConnection> = {}): ProviderConnection => ({
   id: "provider-wan", name: "万相", protocol: "wan", baseUrl: "https://ws-demo.cn-beijing.maas.aliyuncs.com",
-  apiKey: "synthetic-wan", enabled: true,
+  apiKey: "synthetic-wan", credentialConfigured: true, enabled: true,
   models: [mediaModel("wan-video", "video", "wan3.0-video", true)],
   ...overrides,
 });
