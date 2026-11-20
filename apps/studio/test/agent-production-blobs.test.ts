@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, truncate } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -31,4 +32,30 @@ test("verify 常规路径按长度校验：命中即通过，截断与缺失仍�
   await rm(file, { force: true });
   assert.throws(() => blobs.verify(row), (error: unknown) =>
     error instanceof AgentError && error.code === "CAPABILITY_UNAVAILABLE", "文件缺失应拒绝");
+});
+
+// 审计第二阶段：成片经 64KB 流式哈希 + 同盘 rename 零拷贝落盘，与 Buffer 路径共用内容寻址与去重。
+test("persistFromFile：流式哈希等价于 Buffer 路径，零拷贝移动源文件，去重复用原行", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-blobs-file-"));
+  t.after(async () => { await rm(directory, { recursive: true, force: true }); });
+  const db = openAgentDatabase(directory);
+  t.after(() => db.close());
+  const blobs = new ProductionBlobs(db, directory, staticClock);
+
+  const bytes = Buffer.from("streamed-render-output-bytes");
+  const source = path.join(directory, "work", "final.mp4");
+  await mkdir(path.join(directory, "work"), { recursive: true });
+  await writeFile(source, bytes);
+  const streamed = await blobs.persistFromFile("local-owner", "conv-2", source, "video/mp4", 12_345);
+  assert.ok(!existsSync(source), "源文件应被零拷贝移动");
+  assert.equal(existsSync(blobs.filePath(streamed.digest)), true);
+  assert.equal(streamed.size_bytes, bytes.length);
+  assert.equal(streamed.mime_type, "video/mp4");
+  assert.equal(streamed.duration_ms, 12_345);
+  blobs.verify(streamed);
+
+  // 与 Buffer 路径互为去重：同内容不另建行，只按只升级规则补齐标签。
+  const buffered = blobs.persist("local-owner", "conv-2", bytes, "application/octet-stream", null);
+  assert.equal(buffered.id, streamed.id);
+  assert.equal(buffered.mime_type, "video/mp4", "标签只升级不降级");
 });

@@ -682,7 +682,12 @@ it("C1 审计：video 输出接入真实 ordered_concat，重复片段保留顺�
       assert.equal(result.state, "succeeded");
       assert.equal(result.outputRevisions.length, 2, "生成片段与最终拼接各发布一份");
       const render = attemptsFor(runtime.database, runId).find(attempt => attempt.operation_id === "cut")!;
-      const facts = await probeVideoFile(path.join(directory, "media-work", render.id, "output.mp4"));
+      // 零拷贝落库后成片移入 blob 库；从收据解析最终持久化产物。
+      const output = runtime.database.prepare(
+        "SELECT b.digest AS digest FROM production_attempt_outputs o JOIN production_blobs b ON b.id=o.blob_id WHERE o.attempt_id=?",
+      ).get(render.id) as { digest: string } | undefined;
+      assert.ok(output, "成片收据应已写入");
+      const facts = await probeVideoFile(path.join(directory, "blobs", output.digest));
       assert.equal(facts.width, 1280); assert.equal(facts.height, 720); assert.equal(facts.frameRate, 24);
       assert.ok(Math.abs(facts.durationMs - 10000) <= 125);
       assert.equal(stub.state.posts.length, 1);

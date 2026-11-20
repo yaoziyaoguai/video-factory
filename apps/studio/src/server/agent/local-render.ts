@@ -145,8 +145,7 @@ export class LocalRenderPort implements MediaExecutionPort {
         `拼接输出时长 ${outputFacts.durationMs} ms 与输入总和 ${expectedMs} ms 不符。`);
     }
     renameSync(temporary, finalFile);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id,
-      readFileSync(finalFile), "video/mp4", outputFacts.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(input.attemptId, blob.id, blob.digest);
@@ -226,8 +225,7 @@ export class LocalRenderPort implements MediaExecutionPort {
         `有声拼接输出时长 ${outputFacts.durationMs} ms 与画面/旁白上限 ${targetMs} ms 不符。`);
     }
     renameSync(temporary, finalFile);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id,
-      readFileSync(finalFile), "video/mp4", outputFacts.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(input.attemptId, blob.id, blob.digest);
@@ -329,8 +327,7 @@ export class LocalRenderPort implements MediaExecutionPort {
         `剪辑输出时长 ${outputFacts.durationMs} ms 与片段总长 ${targetMs} ms 不符。`);
     }
     renameSync(temporary, finalFile);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id,
-      readFileSync(finalFile), "video/mp4", outputFacts.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(input.attemptId, blob.id, blob.digest);
@@ -459,7 +456,7 @@ export class LocalRenderPort implements MediaExecutionPort {
       return this.terminal(input.attemptId, "failed", `混音输出时长 ${outputFacts.durationMs} ms 与片段总长 ${targetMs} ms 不符。`);
     }
     renameSync(temporary, finalFile);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), "video/mp4", outputFacts.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(input.attemptId, blob.id, blob.digest);
@@ -591,7 +588,7 @@ export class LocalRenderPort implements MediaExecutionPort {
       // 成品尚不可读：稳定 unknown，保留本地占用，不自动重新渲染。
       return this.stableUnknown(query.attemptId, "本地执行没有退出证据；保留本地执行占用，不会重新渲染或重新提交。");
     }
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), "video/mp4", facts.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", facts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), query.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(query.attemptId, blob.id, blob.digest);
@@ -608,7 +605,7 @@ export class LocalRenderPort implements MediaExecutionPort {
       }
       throw error;
     }
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), verified.mimeType, verified.durationMs);
+    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, verified.mimeType, verified.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(attemptId, blob.id, blob.digest, verified.mimeType);
