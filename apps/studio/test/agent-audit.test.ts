@@ -331,7 +331,7 @@ test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real ent
   const { StudioAuthenticator, createPasswordHash } = await import("../src/server/auth.js");
   const { validatorFor } = await import("../src/server/agent/validate.js");
   const { MaintenanceGate } = await import("../src/server/maintenance-gate.js");
-  const { transitionMaintenanceGate } = await import("@video-factory/production-pipeline/maintenance");
+  const { transitionMaintenanceGate } = await import("../src/server/maintenance.js");
   const a = await fixture(t); let now = Date.now();
   for (const method of ["GET", "POST"] as const) {
     const remote = await a.app.inject({ method, url: method === "GET" ? "/api/agent/v1/bootstrap" : "/api/agent/v1/conversations",

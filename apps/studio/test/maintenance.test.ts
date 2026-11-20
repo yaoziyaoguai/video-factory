@@ -12,7 +12,7 @@ import {
   MaintenanceCoordinator, MaintenancePausedError, holdMaintenanceWork, maintenanceRequestHeaders,
   readMaintenanceGate, runWithMaintenanceAdmission, transitionMaintenanceGate,
   transitionMaintenanceGateLocked, withMaintenanceLock,
-} from "../src/maintenance.js";
+} from "../src/server/maintenance.js";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -39,7 +39,7 @@ async function fixture(t: TestContext) {
 const childScript = `
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { MaintenanceCoordinator, transitionMaintenanceGateLocked, withMaintenanceLock } from ${JSON.stringify(new URL("../src/maintenance.ts", import.meta.url).href)};
+import { MaintenanceCoordinator, transitionMaintenanceGateLocked, withMaintenanceLock } from ${JSON.stringify(new URL("../src/server/maintenance.ts", import.meta.url).href)};
 const [directory, action] = process.argv.slice(2);
 const inbox = [];
 const waiters = [];

@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import {
   holdMaintenanceWork, maintenanceRequestHeaders, runWithMaintenanceAdmission, transitionMaintenanceGate,
-} from "@video-factory/production-pipeline/maintenance";
+} from "../src/server/maintenance.js";
 import { MAINTENANCE_ADMISSION_PROTOCOL, MaintenanceGate, StudioMaintenanceError } from "../src/server/maintenance-gate.js";
 
 function deferred<T = void>() {

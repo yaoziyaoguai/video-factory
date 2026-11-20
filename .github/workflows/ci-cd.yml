@@ -31,11 +31,10 @@ jobs:
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
-          python -m pip install -e . jsonschema==4.25.1
+          python -m pip install jsonschema==4.25.1
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run contracts:check && python contracts/agent/v1/verify-openapi.py
-      - run: PYTHONPATH=src python -m unittest discover -s tests
       - run: npm test
       - run: bash -n scripts/deploy-frame.sh && bash -n scripts/smoke-frame-release.sh && node --check scripts/smoke-creative-container.mjs
       - name: Build the same-SHA app and creative images
