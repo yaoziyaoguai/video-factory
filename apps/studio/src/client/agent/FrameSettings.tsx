@@ -3,6 +3,7 @@ import { VIDEO_TOPIC_CHARTS, TIKTOK_CREATIVE_CENTER, GOOGLE_TRENDS } from "../..
 import { ModelConnectionsPanel } from "./ModelConnectionsPanel.js";
 import { SkillPackagesPanel } from "./SkillPackagesPanel.js";
 import { WorkLibrary } from "./WorkLibrary.js";
+import { framePageTitle, type FramePage } from "./frame-pages.js";
 import type { SkillPackageMutation } from "../../shared/agent/generated/contracts.js";
 import type { LibraryPick } from "./workspace-state.js";
 import { SavedConfigurationDetails } from "./SavedConfigurationDetails.js";
@@ -11,8 +12,8 @@ import { Check, ChevronRight, Cpu, Film, FolderOpen, Image, Mic, Music2, Search,
 import { agentApi, AgentApiError, type UserProfile, type PexelsSettings, type NewsNowSettings, type KeyedMaterialSettings, type EdgeTtsSettings, type SavePexelsSettings, type SaveNewsNowSettings, type SaveEdgeTtsSettings, type FreeServiceSettings, type SaveFreeServiceSettingsInput } from "./api.js";
 import type { Bootstrap, Conversation, SaveUserProfile } from "./api.js";
 
-export type FramePage = "chat" | "models" | "services" | "skills" | "library" | "profile";
-export const framePageTitle = { chat: "对话", models: "模型配置", services: "免费服务", skills: "Skill 管理", library: "作品库", profile: "用户页" };
+export type { FramePage } from "./frame-pages.js";
+export { framePageTitle } from "./frame-pages.js";
 export function FrameSettings({ page, bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onSkillMutationChange, onLibraryBringIn, libraryBringTarget }: {
   page: FramePage; bootstrap: Bootstrap | null; conversations: Conversation[];
   onConversation: (id: string) => void; onPage: (page: FramePage) => void; onLogout?: (() => Promise<void>) | undefined;
