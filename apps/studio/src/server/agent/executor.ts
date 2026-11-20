@@ -89,6 +89,11 @@ export class ConversationRunner {
     return this.sessionHandle?.session ?? null;
   }
 
+  /** 本轮执行中（含领取循环未退出）的 Runner 不参与空闲回收。 */
+  get busy(): boolean {
+    return this.current !== null || this.loopPromise !== null;
+  }
+
   kick(): void {
     if (this.closing) return;
     if (this.loopPromise) { this.kickPending = true; return; }
@@ -719,21 +724,62 @@ function turnFailureDetail(epoch: number, turnElapsedMs: number | null, lastBoun
   return ` (${parts.join(" ")})`;
 }
 
+export interface RunnerRecyclingOptions {
+  /** 闲置多久后释放会话内存句柄；默认 10 分钟（审计第二阶段）。 */
+  idleMs?: number;
+  /** 空闲扫描周期，默认 60 秒；测试注入假时钟后可直接调用 sweepIdle()。 */
+  sweepIntervalMs?: number;
+  nowMs?: () => number;
+}
+
 export class ConversationRunnerRegistry {
   private readonly runners = new Map<string, ConversationRunner>();
+  private readonly lastActivity = new Map<ConversationRunner, number>();
+  private readonly recycling: Required<RunnerRecyclingOptions>;
+  private readonly sweepTimer: NodeJS.Timeout;
 
-  constructor(private readonly options: ExecutorOptions) {}
+  constructor(private readonly options: ExecutorOptions, recycling: RunnerRecyclingOptions = {}) {
+    this.recycling = {
+      idleMs: recycling.idleMs ?? 10 * 60_000,
+      sweepIntervalMs: recycling.sweepIntervalMs ?? 60_000,
+      nowMs: recycling.nowMs ?? (() => Date.now()),
+    };
+    // 闲置 Runner 只驻留 Pi AgentSession 内存句柄；持久状态都在数据库检查点里，
+    // 回收后下一次请求照常从检查点重建会话（与服务重启同一恢复路径）。
+    this.sweepTimer = setInterval(() => this.sweepIdle(), this.recycling.sweepIntervalMs);
+    this.sweepTimer.unref();
+  }
 
   for(conversationId: string): ConversationRunner {
     const existing = this.runners.get(conversationId);
     if (existing) return existing;
     const runner = new ConversationRunner(conversationId, this.options, { current: null });
     this.runners.set(conversationId, runner);
+    this.lastActivity.set(runner, this.recycling.nowMs());
     return runner;
   }
 
   kick(conversationId: string): void {
-    this.for(conversationId).kick();
+    const runner = this.for(conversationId);
+    this.lastActivity.set(runner, this.recycling.nowMs());
+    runner.kick();
+  }
+
+  /** 释放闲置超时的会话 Runner，返回本次回收数量；忙碌中的 Runner 只刷新活跃时间。 */
+  sweepIdle(): number {
+    let disposed = 0;
+    for (const [conversationId, runner] of this.runners) {
+      if (runner.busy) { this.lastActivity.set(runner, this.recycling.nowMs()); continue; }
+      if (this.recycling.nowMs() - (this.lastActivity.get(runner) ?? 0) < this.recycling.idleMs) continue;
+      // 先摘除映射再释放：并发的 for() 会直接建新 Runner，不会把请求路由进正在关闭的实例。
+      this.runners.delete(conversationId);
+      this.lastActivity.delete(runner);
+      void runner.dispose().catch(error => {
+        process.emitWarning(`agent runner ${conversationId} 空闲回收异常: ${String(error)}`);
+      });
+      disposed += 1;
+    }
+    return disposed;
   }
 
   kickAllWithQueued(): void {
@@ -752,8 +798,10 @@ export class ConversationRunnerRegistry {
   }
 
   async close(): Promise<void> {
+    clearInterval(this.sweepTimer);
     await Promise.all([...this.runners.values()].map(runner => runner.dispose()));
     this.runners.clear();
+    this.lastActivity.clear();
   }
 }
 

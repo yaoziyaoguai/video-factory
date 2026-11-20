@@ -40,6 +40,7 @@ export function buildFrameApp(options: { agent: AgentPluginOptions; auth?: Studi
   });
   app.register(agentRoutes, { prefix: "/api/agent/v1", ...options.agent,
     resolveOwner: request => auth ? auth.authenticatedUsername(request.headers.cookie) : options.agent.resolveOwner(request), localOwnerOnly: !auth,
+    sessionAuthorization: auth ? { expiresAtMs: request => auth.sessionExpiryMs(request.headers.cookie), nowMs: () => auth.nowMs() } : undefined,
   });
   app.get("/api/health", async () => ({ status: "ok", product: "frame", runtime: "pi", ...(process.env.RELEASE_SHA ? { release: process.env.RELEASE_SHA } : {}) }));
   return app;

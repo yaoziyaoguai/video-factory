@@ -152,6 +152,26 @@ export class StudioAuthenticator {
     }
   }
 
+  // 读取已验签会话的过期时间戳（毫秒）。仅解码负载、不做 HMAC——调用方必须先用
+  // authenticatedUsername 验签同一请求的 Cookie；流式推送据此做廉价的逐帧时间戳比对。
+  sessionExpiryMs(cookieHeader: string | undefined): number | null {
+    const token = readCookie(cookieHeader, COOKIE_NAME);
+    if (!token) return null;
+    const [encoded, signature, extra] = token.split(".");
+    if (!encoded || !signature || extra) return null;
+    try {
+      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<SessionPayload>;
+      return typeof payload.expiresAt === "number" ? payload.expiresAt : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 认证时钟（测试可注入）；与会话过期判定使用同一时钟。 */
+  nowMs(): number {
+    return this.now();
+  }
+
   private sign(value: string): string {
     return createHmac("sha256", this.options.sessionSecret).update(value).digest("base64url");
   }
