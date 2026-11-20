@@ -4,7 +4,9 @@
 
 ## 从 main 到线上
 
-[CI/CD 工作流](../../.github/workflows/ci-cd.yml)在功能分支手动触发或面向 main 的 PR 中验证完整候选，合入 main 后对最终 SHA 再验证并部署。原有契约、测试、依赖检查保留；同一 SHA 构建 `video-factory:release-<SHA>` 和 `frame-creative:release-<SHA>` 两个 Linux amd64 镜像，记录实际 image ID，运行正式应用、原生 UDS 和恢复预演。通过后将**这一批双镜像**、`frame-release.json` 清单与同 SHA Git bundle 传至 ECS，不在 ECS 重新安装 npm 或构建。运输包只含两个明确的 release 标签，不携带创作固定别名，避免 `docker load` 提前影响运行中的 runner。
+[CI/CD 工作流](../../.github/workflows/ci-cd.yml)在功能分支手动触发或面向 main 的 PR 中验证完整候选，合入 main 后对最终 SHA 再验证并部署。原有契约、测试、依赖检查保留；系统与字体依赖收敛为按内容哈希标签的[稳定基础镜像](../../docker/base.Dockerfile)，CI 命中远端标签时直接拉取复用，保证层摘要稳定。同一 SHA 在其上构建 `video-factory:release-<SHA>` 和 `frame-creative:release-<SHA>` 两个 Linux amd64 镜像，记录实际 image ID，运行正式应用、原生 UDS 和恢复预演。
+
+配置 `ACR_REGISTRY`、`ACR_NAMESPACE`、`ACR_USERNAME`、`ACR_PASSWORD` 四个 secret 后启用[阿里云 ACR](https://www.alibabacloud.com/product/container-registry) 分层运输：验证通过即推送基础（仅新哈希时）、app 与 creative 镜像，ECS 用[拉取脚本](../../scripts/acr-pull-frame.sh)从同区域 ACR 按层增量拉取并还原本地发布标签，常规发布只传输业务层；随后照旧执行发布脚本完成原子切换，镜像 ID 仍对照 `frame-release.json` 清单核对。密码不进部署命令行：CI 以 0600 文件经 scp 送达 ECS，拉取脚本从文件读取并在结束时清理。四个 secret 缺任一个时自动退回原路径：双镜像 tar 与清单、同 SHA Git bundle 经 scp 传至 ECS 后 `docker load`。两种运输都不在 ECS 重新安装 npm 或构建；运输内容只含两个明确的 release 标签，不携带创作固定别名，避免提前影响运行中的 runner。
 
 GitHub 的 `production` 环境使用既有 `SERVER_HOST`、`SERVER_USER`、`SSH_PRIVATE_KEY`、`PROJECT_PATH` 和 `PUBLIC_HEALTH_URL`。健康地址应为站点的公开 HTTPS 地址，例如 `https://video.example.com/api/health`。服务器已有 Git 工作副本、Docker Compose、反向代理和站点证书；首次安装另需创建 `video-factory_video_factory_workspace` 卷和 `video-factory-trends` 外部网络，卷根应可由 uid/gid 1001 写入。外部只暴露反向代理，应用端口绑定 127.0.0.1:4317。代理需要对 SSE 禁用响应缓冲。
 
@@ -37,7 +39,7 @@ CI 在独占可销毁 Linux VM 中调用同一个发布脚本，经真实 HTTPS 
 
 默认安装脚本为 `/opt/frame-creative/creative-runner-host.mjs`，工程根为 `/var/lib/frame-creative`，宿主 socket 父目录为 `/var/lib/frame-creative/runtime`（1001:1001、0700），socket为0600。该父目录持久保留，由部署安装准备，systemd 不创建或删除它；重启 runner 后原应用 bind mount 仍可连接。Compose 使用 [creative overlay](../../docker/creative.compose.yml)，只读挂载已存在的父目录，`create_host_path: false`。
 
-原 runner 存在时沿用其真实 `workspaceRoot`；卷 namespace 始终为 `frame-creative-<sha256(realpath(workspaceRoot))前12位>`，不能随发布 SHA 或临时目录变动。runner 在启动时捕获固定创作别名 `frame-creative:pi-1.4-v1` 的实际 ID，后续容器按该 ID 执行；改标签本身不代表 runner 已升级。创作容器仍禁网、只读根、非 root，且没有模型 Key、应用数据或 Docker socket。
+原 runner 存在时沿用其真实 `workspaceRoot`；卷 namespace 始终为 `frame-creative-<sha256(realpath(workspaceRoot))前12位>`，不能随发布 SHA 或临时目录变动。runner 在启动时捕获固定创作别名 `frame-creative:pi-1.5-v1` 的实际 ID，后续容器按该 ID 执行；改标签本身不代表 runner 已升级。创作容器仍禁网、只读根、非 root，且没有模型 Key、应用数据或 Docker socket。
 
 如实际路径不同，可在部署进程中显式指定 `FRAME_CREATIVE_NODE`、`FRAME_CREATIVE_WORKSPACE_ROOT`、`FRAME_CREATIVE_SOCKET_DIRECTORY`、`FRAME_CREATIVE_DOCKER_SOCKET`；`FRAME_NGINX_SITE` 指向本应用现有 Nginx 配置。默认 User/Group 为 `frame-creative`；`FRAME_CREATIVE_USER/GROUP` 仅用于已核实合适的1001服务身份，CI 显式复用其临时 VM 的1001身份，不修改 Actions runner 账号。以上是宿主安装参数，不把完整应用环境传给创作 runner。
 
