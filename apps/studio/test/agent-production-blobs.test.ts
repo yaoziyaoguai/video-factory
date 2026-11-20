@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -58,4 +58,36 @@ test("persistFromFile：流式哈希等价于 Buffer 路径，零拷贝移动源
   const buffered = blobs.persist("local-owner", "conv-2", bytes, "application/octet-stream", null);
   assert.equal(buffered.id, streamed.id);
   assert.equal(buffered.mime_type, "video/mp4", "标签只升级不降级");
+});
+
+// 审计第三阶段：未入库草稿媒体（崩溃遗留 tmp-* 与无行引用的 digest 文件）按天龄清扫；
+// 入库文件与新鲜孤儿不动，非预期文件名保守跳过。
+test("sweepOrphans：删除超龄孤儿与 tmp 残留，保留入库文件与新鲜文件", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-blobs-sweep-"));
+  t.after(async () => { await rm(directory, { recursive: true, force: true }); });
+  const db = openAgentDatabase(directory);
+  t.after(() => db.close());
+  const blobs = new ProductionBlobs(db, directory, staticClock);
+  const root = path.join(directory, "blobs");
+
+  const kept = blobs.persist("local-owner", "conv-3", Buffer.from("kept-blob"), "application/octet-stream", null);
+  const oldDigest = "b".repeat(64);
+  const freshDigest = "c".repeat(64);
+  await writeFile(path.join(root, oldDigest), "orphan-old");
+  await writeFile(path.join(root, freshDigest), "orphan-fresh");
+  await writeFile(path.join(root, "tmp-stale-upload"), "stale");
+  await writeFile(path.join(root, "unexpected-name.txt"), "keep");
+  // 把两个“应删”文件的 mtime 回拨到 3 天前（fresh 与 tmp 之外的新鲜对照走当前 mtime）。
+  const threeDaysAgo = new Date(Date.now() - 3 * 86400_000);
+  await utimes(path.join(root, oldDigest), threeDaysAgo, threeDaysAgo);
+  await utimes(path.join(root, "tmp-stale-upload"), threeDaysAgo, threeDaysAgo);
+
+  const result = await blobs.sweepOrphans({ olderThanMs: 86400_000 });
+  assert.equal(result.files, 2);
+  assert.equal(result.bytes, "orphan-old".length + "stale".length);
+  assert.equal(existsSync(blobs.filePath(kept.digest)), true, "入库文件保留");
+  assert.equal(existsSync(path.join(root, oldDigest)), false, "超龄无行 digest 删除");
+  assert.equal(existsSync(path.join(root, freshDigest)), true, "新鲜孤儿保留（并发窗口保护）");
+  assert.equal(existsSync(path.join(root, "unexpected-name.txt")), true, "非预期文件名不动");
+  assert.equal((await blobs.sweepOrphans({ olderThanMs: 86400_000 })).files, 0, "幂等");
 });

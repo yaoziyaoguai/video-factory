@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, statSync } from "node:fs";
+import { readdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { AgentDatabase } from "./db.js";
 import { newAgentId, type AgentClock } from "./util.js";
@@ -83,4 +84,30 @@ export class ProductionBlobs {
     throw new AgentError("CAPABILITY_UNAVAILABLE", "媒体文件缺失或内容校验失败。");
   }
   filePath(digest: string): string { return path.join(this.root, digest); }
+
+  /** 审计第三阶段：清扫未入库的草稿媒体——写入中途崩溃遗留的 tmp-* 临时文件，以及目录中
+   * 存在但 production_blobs 已无行引用的 digest 文件。persist/persistFromFile 的“落盘→登记”
+   * 在同一同步段完成，正常流程不会留下跨事件循环的孤儿；仅删 mtime 超过阈龄的文件，
+   * 保守处理并发窗口。非预期文件名一律不动。 */
+  async sweepOrphans(options: { now?: () => Date; olderThanMs?: number } = {}): Promise<{ files: number; bytes: number }> {
+    const olderThanMs = options.olderThanMs ?? 24 * 60 * 60 * 1000;
+    const cutoff = (options.now ?? (() => new Date()))().getTime() - olderThanMs;
+    const referenced = new Set((this.db.prepare("SELECT DISTINCT digest FROM production_blobs").all() as { digest: string }[]).map(row => row.digest));
+    let files = 0;
+    let bytes = 0;
+    for (const name of await readdir(this.root)) {
+      const temporary = name.startsWith("tmp-");
+      const digestLike = /^[a-f0-9]{64}$/.test(name);
+      if (!temporary && (digestLike ? referenced.has(name) : true)) continue;
+      const file = path.join(this.root, name);
+      try {
+        const info = await stat(file);
+        if (!info.isFile() || info.mtimeMs >= cutoff) continue;
+        bytes += info.size;
+        await unlink(file);
+        files += 1;
+      } catch { /* 并发消失或不可删的文件留待下次扫尾。 */ }
+    }
+    return { files, bytes };
+  }
 }

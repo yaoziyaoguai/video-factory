@@ -23,6 +23,7 @@ import {
 import { ImageGenerationPort } from "./agent/image-generation.js";
 import { OpenAISpeechPort } from "./agent/openai-speech.js";
 import { CreativeRunner } from "./agent/creative-runner.js";
+import { scheduleHistoryTrim } from "./agent/history-trim.js";
 import { validatorFor } from "./agent/validate.js";
 import type { ImportedSettings } from "../shared/agent/generated/contracts.js";
 import { systemClock } from "./agent/util.js";
@@ -135,6 +136,26 @@ const app = buildFrameApp({ logger: true, ...(auth ? { auth } : {}), maintenance
   },
 });
 app.addHook("onClose", runtime.close);
+// 审计第三阶段：定期裁剪事件与回执，防止 agent.db 无界增长（规则见 history-trim.ts）。
+const stopHistoryTrim = scheduleHistoryTrim(runtime.database, {
+  info: message => app.log.info(message),
+  warn: message => app.log.warn(message),
+});
+app.addHook("onClose", async () => stopHistoryTrim());
+// 未入库草稿媒体（崩溃遗留的 tmp-* 与无行引用的 digest 文件）按天龄清扫。
+const draftBlobs = runtime.production?.blobs;
+const sweepDraftBlobs = () => {
+  void draftBlobs!.sweepOrphans().then(result => {
+    if (result.files > 0) app.log.info(`草稿媒体清扫：删除未入库文件 ${result.files} 个，释放 ${(result.bytes / 1048576).toFixed(1)} MiB。`);
+  }).catch(error => app.log.warn(`草稿媒体清扫失败：${error instanceof Error ? error.message : String(error)}`));
+};
+if (draftBlobs) {
+  const firstSweep = setTimeout(sweepDraftBlobs, 60_000);
+  firstSweep.unref();
+  const draftSweepTimer = setInterval(sweepDraftBlobs, 24 * 60 * 60 * 1000);
+  draftSweepTimer.unref();
+  app.addHook("onClose", () => { clearTimeout(firstSweep); clearInterval(draftSweepTimer); });
+}
 const distDir = path.join(repositoryRoot, "apps/studio/dist/client");
 if (existsSync(distDir)) {
   await app.register(fastifyStatic, { root: distDir, wildcard: false, preCompressed: true });
