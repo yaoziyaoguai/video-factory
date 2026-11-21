@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, statSync } from "node:fs";
-import { readdir, stat, unlink } from "node:fs/promises";
+import { createReadStream, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, linkSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { AgentDatabase } from "./db.js";
 import { newAgentId, type AgentClock } from "./util.js";
@@ -29,8 +29,10 @@ export class ProductionBlobs {
     this.syncDirectory();
     return this.register(ownerId, conversationId, digest, mimeType, bytes.length, durationMs);
   }
-  // 成片落盘：64KB 分块流式哈希 + 同盘 rename 零拷贝，避免整读数百 MB 成片造成主线程内存峰值
+  // 成片落盘：64KB 分块流式哈希 + 同盘硬链接零拷贝，避免整读数百 MB 成片造成主线程内存峰值
   // （审计第二阶段）。file 必须与 blobs 根同卷——调用方的 work 根在 dataDir 之下。
+  // 不再 move 走源文件（P1 已渲染成片无法恢复）：摘要文件就位后源文件留在原处，调用方在
+  // 制作回执落库后用 release() 归还；崩溃窗口内恢复仍能从尝试目录读到同一份数据。
   async persistFromFile(ownerId: string, conversationId: string, file: string, mimeType: string, durationMs: number | null): Promise<BlobRow> {
     const hash = createHash("sha256");
     let sizeBytes = 0;
@@ -42,9 +44,19 @@ export class ProductionBlobs {
     const digest = hash.digest("hex");
     const existing = this.dedupe(ownerId, conversationId, digest, mimeType, durationMs);
     if (existing) return existing;
-    renameSync(file, this.filePath(digest));
+    try {
+      linkSync(file, this.filePath(digest));
+    } catch (error) {
+      // EEXIST：同摘要文件已在位（内容寻址保证同字节），直接复用；其余错误如实抛出。
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
     this.syncDirectory();
     return this.register(ownerId, conversationId, digest, mimeType, sizeBytes, durationMs);
+  }
+  // persistFromFile 的配对归还：删除调用方持有的源文件（尝试目录产物）。摘要文件按内容寻址
+  // 共享，可能仍被其他引用使用，这里绝不动 blobs 根。
+  release(file: string): void {
+    try { unlinkSync(file); } catch { /* 源文件已消失（重复归还或崩溃残留已清理）。 */ }
   }
   // 命中同内容已有行时按只升级不降级规则复用（同一字节可先按工程文件登记、再按媒体成品补齐标签）；
   // 返回 undefined 表示需要新建行。
@@ -88,24 +100,32 @@ export class ProductionBlobs {
   /** 审计第三阶段：清扫未入库的草稿媒体——写入中途崩溃遗留的 tmp-* 临时文件，以及目录中
    * 存在但 production_blobs 已无行引用的 digest 文件。persist/persistFromFile 的“落盘→登记”
    * 在同一同步段完成，正常流程不会留下跨事件循环的孤儿；仅删 mtime 超过阈龄的文件，
-   * 保守处理并发窗口。非预期文件名一律不动。 */
+   * 保守处理并发窗口。非预期文件名一律不动。
+   *
+   * P1 刚登记的媒体被清理：不再依赖进入扫描时快照的引用集合——每个候选在删除前于同一同步段
+   * 内重查最新引用并重取 mtime（persist 全程同步，同步段内不会交错），扫描启动后新保存的同
+   * 摘要文件不会被按旧快照删掉。 */
   async sweepOrphans(options: { now?: () => Date; olderThanMs?: number } = {}): Promise<{ files: number; bytes: number }> {
     const olderThanMs = options.olderThanMs ?? 24 * 60 * 60 * 1000;
     const cutoff = (options.now ?? (() => new Date()))().getTime() - olderThanMs;
-    const referenced = new Set((this.db.prepare("SELECT DISTINCT digest FROM production_blobs").all() as { digest: string }[]).map(row => row.digest));
     let files = 0;
     let bytes = 0;
     for (const name of await readdir(this.root)) {
       const temporary = name.startsWith("tmp-");
       const digestLike = /^[a-f0-9]{64}$/.test(name);
-      if (!temporary && (digestLike ? referenced.has(name) : true)) continue;
-      const file = path.join(this.root, name);
+      if (!temporary && !digestLike) continue;
       try {
-        const info = await stat(file);
+        // 同步段：引用复查、mtime 复取与删除原子于本事件循环，杜绝“检查后被保存”的交错。
+        if (digestLike) {
+          const referenced = this.db.prepare("SELECT 1 FROM production_blobs WHERE digest = ? LIMIT 1").get(name);
+          if (referenced) continue;
+        }
+        const file = path.join(this.root, name);
+        const info = statSync(file);
         if (!info.isFile() || info.mtimeMs >= cutoff) continue;
-        bytes += info.size;
-        await unlink(file);
+        unlinkSync(file);
         files += 1;
+        bytes += info.size;
       } catch { /* 并发消失或不可删的文件留待下次扫尾。 */ }
     }
     return { files, bytes };

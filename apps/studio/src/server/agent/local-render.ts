@@ -148,6 +148,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
@@ -228,6 +230,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
   // S3-04 timed_narrated_concat：按冻结 segments 顺序裁切视频/停留图片，统一为冻结规格后连接；
@@ -330,6 +334,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
@@ -459,6 +465,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
@@ -591,6 +599,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", facts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), query.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(query.attemptId, blob.id, blob.digest);
   }
 
@@ -608,6 +618,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, verified.mimeType, verified.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
+    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
+    this.blobs.release(finalFile);
     return this.succeeded(attemptId, blob.id, blob.digest, verified.mimeType);
   }
 
