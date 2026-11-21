@@ -534,6 +534,19 @@ export function listWorkRows(db: AgentDatabase, conversationId: string, limit: n
     .all(conversationId, limit) as WorkRow[]).reverse();
 }
 
+// 分页页行：works 表没有 created_seq，页位置用插入序 rowid（需显式 SELECT）。取 limit+1 条
+// newest-first，多出的一条仅用于判断“还有更早”，返回时剔除并给出下一页位置（页内最小 rowid）。
+export function listWorkPageRows(db: AgentDatabase, conversationId: string, limit: number, beforeRowid?: number): { rows: WorkRow[]; nextBeforeRowid: number | null } {
+  const rows = (beforeRowid === undefined
+    ? db.prepare("SELECT rowid AS paging_rowid, * FROM works WHERE conversation_id = ? AND creation_state_json IS NOT NULL ORDER BY rowid DESC LIMIT ?")
+    : db.prepare("SELECT rowid AS paging_rowid, * FROM works WHERE conversation_id = ? AND creation_state_json IS NOT NULL AND rowid < ? ORDER BY rowid DESC LIMIT ?")
+  ).all(...(beforeRowid === undefined ? [conversationId, limit + 1] : [conversationId, beforeRowid, limit + 1])) as (WorkRow & { paging_rowid: number })[];
+  const hasMore = rows.length > limit;
+  const page = (hasMore ? rows.slice(0, limit) : rows).reverse();
+  // 下一页从页内最旧一条（DESC 结果的第 limit 条）之前继续；多取的那条只用于判断还有更早。
+  return { rows: page, nextBeforeRowid: hasMore ? rows[limit - 1]!.paging_rowid : null };
+}
+
 // 提案与方案主稿的准确关联现由 proposals.plan_source_json 持久承载（§10.1），
 // 读取入口是 artifact-store.ts 的 proposalPlanSource；此处不再保留历史修订反查。
 

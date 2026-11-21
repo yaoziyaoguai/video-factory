@@ -938,6 +938,71 @@
     }
   },
   {
+    "name": "works page continues older works via rowid cursor",
+    "schema": "WorkPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "id": "work_creation",
+          "title": "林间散步",
+          "revision": 2,
+          "reviewGroups": [
+            {
+              "id": "visual_1",
+              "title": "视觉方向",
+              "revision": 2,
+              "nextIntent": "人物和背景认可后试做片段",
+              "items": [
+                {
+                  "id": "character_item",
+                  "label": "人物",
+                  "role": "character",
+                  "required": true,
+                  "draft": {
+                    "kind": "artifact_revision",
+                    "artifactId": "character_1",
+                    "revisionId": "character_v1",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "approved": {
+                    "kind": "artifact_revision",
+                    "artifactId": "character_1",
+                    "revisionId": "character_v1",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "confirmationId": "confirmation_1",
+                  "approvedAt": "2026-11-07T08:00:00.000Z",
+                  "finalizedSource": null
+                },
+                {
+                  "id": "scene_item",
+                  "label": "背景",
+                  "role": "scene",
+                  "required": true,
+                  "draft": {
+                    "kind": "artifact_revision",
+                    "artifactId": "scene_1",
+                    "revisionId": "scene_v2",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "approved": null,
+                  "confirmationId": null,
+                  "approvedAt": null,
+                  "finalizedSource": null
+                }
+              ]
+            }
+          ],
+          "createdAt": "2026-11-07T08:00:00.000Z",
+          "updatedAt": "2026-11-07T08:00:00.000Z"
+        }
+      ],
+      "nextCursor": "cursor_1",
+      "watermark": "cursor_2"
+    }
+  },
+  {
     "name": "standalone prompt revision",
     "schema": "ArtifactRevision",
     "valid": true,
@@ -2063,7 +2128,8 @@
         "watermark": "cursor_1"
       },
       "works": [],
-      "materialBatches": []
+      "materialBatches": [],
+      "worksNextCursor": null
     }
   },
   {
@@ -3233,7 +3299,8 @@
         "watermark": "cursor_1"
       },
       "works": [],
-      "materialBatches": []
+      "materialBatches": [],
+      "worksNextCursor": null
     }
   },
   {

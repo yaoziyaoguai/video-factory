@@ -4455,6 +4455,38 @@
       ],
       "additionalProperties": false
     },
+    "WorkPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Work"
+          },
+          "minItems": 0,
+          "maxItems": 50
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watermark": {
+          "$ref": "#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "watermark"
+      ],
+      "additionalProperties": false
+    },
     "Snapshot": {
       "type": "object",
       "properties": {
@@ -4493,6 +4525,16 @@
           },
           "maxItems": 50
         },
+        "worksNextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "materialBatches": {
           "type": "array",
           "items": {
@@ -4510,6 +4552,7 @@
         "activeRequestId",
         "proposals",
         "works",
+        "worksNextCursor",
         "materialBatches"
       ],
       "additionalProperties": false

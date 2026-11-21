@@ -4456,6 +4456,38 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "WorkPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Work"
+          },
+          "minItems": 0,
+          "maxItems": 50
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watermark": {
+          "$ref": "#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "watermark"
+      ],
+      "additionalProperties": false
+    },
     "Snapshot": {
       "type": "object",
       "properties": {
@@ -4494,6 +4526,16 @@ export const contractsSchema: Record<string, unknown> = {
           },
           "maxItems": 50
         },
+        "worksNextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "materialBatches": {
           "type": "array",
           "items": {
@@ -4511,6 +4553,7 @@ export const contractsSchema: Record<string, unknown> = {
         "activeRequestId",
         "proposals",
         "works",
+        "worksNextCursor",
         "materialBatches"
       ],
       "additionalProperties": false

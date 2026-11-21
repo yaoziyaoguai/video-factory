@@ -175,7 +175,7 @@ function snapshotOf(state: MockState): Snapshot {
     artifacts: { items: state.artifacts, nextCursor: null, watermark: "wm-preview" },
     runs: { items: state.runs, nextCursor: null, watermark: "wm-preview" },
     proposals: { items: state.proposals, nextCursor: null, watermark: "wm-preview" },
-    activeRequestId: state.activeRequestId, works: state.works, materialBatches: state.materialBatches,
+    activeRequestId: state.activeRequestId, works: state.works, worksNextCursor: null, materialBatches: state.materialBatches,
   };
 }
 

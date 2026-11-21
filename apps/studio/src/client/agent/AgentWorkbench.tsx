@@ -46,6 +46,8 @@ interface ConversationView {
   artifactCursor: string | null;
   proposalCursor: string | null;
   runCursor: string | null;
+  /** 服务端还有更早的作品（R8）：快照只载最新 50 件，其余按此游标续拉。 */
+  workCursor: string | null;
   /** 定位窗口（§6）：非 null 时消息列表止于该锚点，更晚消息只提示不插入。 */
   windowAnchor: { messageId: string; seq: number } | null;
   /** 曾从最新快照页离开且尚未取得终态的排队消息 id，由后台轮询按 id 补读。 */
@@ -54,7 +56,7 @@ interface ConversationView {
 
 const EMPTY_VIEW: ConversationView = {
   conversation: { id: "", title: "", revision: 1, updatedAt: "" },
-  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, windowAnchor: null, queuedOffPage: [],
+  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, workCursor: null, windowAnchor: null, queuedOffPage: [],
 };
 
 export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) | undefined } = {}) {
@@ -306,6 +308,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         artifactCursor: prior.conversation.id ? prior.artifactCursor : snapshot.artifacts.nextCursor,
         proposalCursor: prior.conversation.id ? prior.proposalCursor : snapshot.proposals.nextCursor,
         runCursor: prior.conversation.id ? prior.runCursor : snapshot.runs.nextCursor,
+        // 会话内新作品会把更早的顶出 50 件窗口，快照的续拉游标随之出现：null 只代表当时没有更早。
+        workCursor: prior.conversation.id ? prior.workCursor ?? snapshot.worksNextCursor : snapshot.worksNextCursor,
         windowAnchor,
         queuedOffPage: queuedOffPageIds,
       };
@@ -486,6 +490,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       onDelta: delta => {
         if (disposed || disconnected || activeId.current !== id || !live(delta.requestId)) return;
         if (delta.requestId !== deltaRequest) { deltaRequest = delta.requestId; lastDelta = -1; deltaText = ""; }
+        // 服务端在慢连接上会收流而非丢帧，但重连后可能从流中段继续收到暂态增量；
+        // 没见过本轮第 0 帧、也不是新段开头（replace）的增量一律不拼接，避免拼错进行中的回复。
+        if (lastDelta < 0 && delta.sequence > 0 && !delta.replace) return;
         if (delta.sequence <= lastDelta) return;
         lastDelta = delta.sequence;
         deltaText = (delta.replace ? "" : deltaText) + delta.text;
@@ -970,6 +977,23 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     } catch (error) { if (viewGeneration.current.token === generation) setActionError(error instanceof Error ? error.message : "读取失败。"); }
     finally { paging.current.delete(key); }
   };
+  const loadMoreWorks = async () => {
+    if (!conversationId) return;
+    const id = conversationId, generation = viewGeneration.current.token;
+    const cursor = view.workCursor; if (!cursor) return;
+    const key = `${generation}:${id}:works:${cursor}`;
+    if (paging.current.has(key)) return;
+    paging.current.add(key);
+    try {
+      const page = await agentApi.loadMoreWorks(id, cursor);
+      if (!mounted.current || viewGeneration.current.token !== generation) return;
+      const latest = cache.current.get(id); if (!latest) return;
+      // 作品投影自包含，无引用补读；旧页晚到按 id+版本由 mergeWorks 吸收。
+      const next = { ...latest, works: mergeWorks(latest.works, page.items), workCursor: latest.workCursor === cursor ? page.nextCursor : latest.workCursor };
+      cache.current.set(id, next); setView(next);
+    } catch (error) { if (viewGeneration.current.token === generation) setActionError(error instanceof Error ? error.message : "读取失败。"); }
+    finally { paging.current.delete(key); }
+  };
   const loadMoreConversations = async () => {
     if (!conversationCursor) return;
     try { const page = await agentApi.listConversations(conversationCursor); setConversations(current => mergeConversations(current, page.items)); setConversationCursor(page.nextCursor); }
@@ -1230,7 +1254,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 </div>}
                 works={view.works} selectedWorkId={selectedWorkId} onSelectWork={selectWork} onOpenReview={openReview}
                 revisions={revisionCache} onRevisionLoaded={cacheRevision} artifacts={view.artifacts} onOpenArtifact={openArtifact}
-                hasMoreArtifacts={Boolean(view.artifactCursor)} onMoreArtifacts={() => void loadMoreOutputs("artifacts")}>
+                hasMoreArtifacts={Boolean(view.artifactCursor)} onMoreArtifacts={() => void loadMoreOutputs("artifacts")}
+                hasMoreWorks={Boolean(view.workCursor)} onMoreWorks={() => void loadMoreWorks()}>
               <WorkStagePanel key={conversationId}
                 active={page === "chat" && workMode && selectedWorkId !== null} onOpenReview={openReview}
                 conversationId={conversationId!}

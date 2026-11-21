@@ -242,6 +242,7 @@ function installStageRoutes(options: {
     activeRequestId: null,
     proposals: { items: options.proposals ?? [], nextCursor: null, watermark: "wm-1" },
     works: options.works ?? [],
+    worksNextCursor: null,
     materialBatches: options.materialBatches ?? [],
   };
   // 本套件覆盖单件审阅，从该作品的持久阅读位置进入；首次进入的多作品总览单独覆盖。

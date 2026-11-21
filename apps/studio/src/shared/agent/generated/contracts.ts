@@ -926,6 +926,7 @@ export interface ContractPayloads {
   MessagePage: MessagePage;
   ArtifactPage: ArtifactPage;
   RunPage: RunPage;
+  WorkPage: WorkPage;
   Snapshot: Snapshot;
   BusinessEvent: BusinessEvent;
   TextDelta: TextDelta;
@@ -2555,35 +2556,14 @@ export interface RunPage {
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "Snapshot".
+ * via the `definition` "WorkPage".
  */
-export interface Snapshot {
-  conversation: Conversation;
-  eventCursor: Cursor;
-  messages: MessagePage;
-  artifacts: ArtifactPage;
-  runs: RunPage;
-  activeRequestId: Id | null;
-  proposals: ProposalPage;
-  /**
-   * @maxItems 50
-   */
-  works: Work[];
-  /**
-   * @maxItems 100
-   */
-  materialBatches: MaterialBatchIndexItem[];
-}
-/**
- * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "ProposalPage".
- */
-export interface ProposalPage {
+export interface WorkPage {
   /**
    * @minItems 0
    * @maxItems 50
    */
-  items: Proposal[];
+  items: Work[];
   nextCursor: Cursor | null;
   watermark: Cursor;
 }
@@ -2637,6 +2617,41 @@ export interface ReviewItem {
   finalizedSource: ContentSource | null;
   confirmationId: Id | null;
   approvedAt: Time | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "Snapshot".
+ */
+export interface Snapshot {
+  conversation: Conversation;
+  eventCursor: Cursor;
+  messages: MessagePage;
+  artifacts: ArtifactPage;
+  runs: RunPage;
+  activeRequestId: Id | null;
+  proposals: ProposalPage;
+  /**
+   * @maxItems 50
+   */
+  works: Work[];
+  worksNextCursor: Cursor | null;
+  /**
+   * @maxItems 100
+   */
+  materialBatches: MaterialBatchIndexItem[];
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ProposalPage".
+ */
+export interface ProposalPage {
+  /**
+   * @minItems 0
+   * @maxItems 50
+   */
+  items: Proposal[];
+  nextCursor: Cursor | null;
+  watermark: Cursor;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema

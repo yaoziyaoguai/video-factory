@@ -8,7 +8,7 @@ import { AgentError } from "./errors.js";
 type ListCursorPayload = { v: 1; c: string; k: string; p: number; w: number };
 type EventCursorPayload = { v: 1; c: string; s: number };
 
-export type CollectionKind = "conversations" | "messages" | "artifacts" | "proposals" | "runs" | "library" | "review_approvals";
+export type CollectionKind = "conversations" | "messages" | "artifacts" | "proposals" | "runs" | "library" | "review_approvals" | "works";
 
 function encode(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
