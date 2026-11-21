@@ -3,6 +3,7 @@ import type { AgentService } from "./agent-service.js";
 import { AgentError } from "./errors.js";
 import { decodeEventCursor } from "./paging.js";
 import { maxEventSeq, minEventSeq } from "./event-log.js";
+import { requireConversation } from "./conversation-store.js";
 import { newAgentId } from "./util.js";
 import { createReadStream } from "node:fs";
 import { extractVideoFrames, InvalidVideoFile } from "./media-probe.js";
@@ -200,6 +201,12 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return service.listRuns(requireOwner(request), params.conversationId, query.cursor, query.limit);
   });
 
+  app.get("/conversations/:conversationId/works", async request => {
+    const params = request.params as { conversationId: string };
+    const query = pageQuery(request);
+    return service.listWorks(requireOwner(request), params.conversationId, query.cursor, query.limit);
+  });
+
   app.post("/requests/:requestId/stop", async (request, reply) => {
     const params = request.params as { requestId: string };
     return reply.send(service.stopRequest(requireOwner(request), params.requestId, body(request)));
@@ -364,9 +371,11 @@ async function streamEvents(
   sessionExpiresAtMs: number | null, nowMs: () => number,
 ): Promise<FastifyReply> {
   // 打开连接前做归属与游标检查；保留缺口返回 410 CURSOR_EXPIRED。
+  // 归属核对走 requireConversation 轻量查询——此前这里调 snapshot() 全量组装
+  // （P1 重连事件流重复读取作品状态：客户端已取快照，握手又逐作品查 50 次定稿）。
   decodeEventCursor(cursorParam, conversationId);
   const db = service.database();
-  service.snapshot(ownerId, conversationId); // 归属检查 + 确保会话存在
+  requireConversation(db, ownerId, conversationId);
   const afterSeq = decodeEventCursor(cursorParam, conversationId);
   const minimum = minEventSeq(db, conversationId);
   if (afterSeq > 0 && minimum !== null && minimum > afterSeq + 1) {
@@ -405,8 +414,9 @@ async function streamEvents(
   };
 
   // 背压：raw.write 返回 false 后套接字缓冲已过高位线，继续写会在内存里无界堆积。
-  // 暂态帧（delta/草稿/进度）此后直接丢弃——持久事件由游标重传；持久批次遇背压立即收流，
-  // 客户端按 Last-Event-ID 重连补齐。
+  // 持久事件由游标重传，遇背压立即收流，客户端按 Last-Event-ID 重连补齐；暂态帧
+  // （delta/草稿/进度）没有持久 id，丢失即无法重传——同样收流而不是静默丢帧：
+  // 客户端重连后取新快照恢复，进行中预览按序列守卫失效重建，绝不拼接缺字的文字。
   let flowing = true;
   raw.on("drain", () => { flowing = true; });
   const write = (chunk: string): boolean => {
@@ -440,17 +450,18 @@ async function streamEvents(
   };
 
   const unsubscribeDeltas = hub.subscribeDeltas(conversationId, delta => {
-    write(`event: text.delta\ndata: ${JSON.stringify(delta)}\n\n`);
+    if (!write(`event: text.delta\ndata: ${JSON.stringify(delta)}\n\n`)) closeStream();
   });
-  // 暂态事件没有持久 id，也不推进游标；断线重连后自然消失。
+  // 暂态事件没有持久 id，也不推进游标；断线重连后自然消失。写不进（背压/收流）时
+  // 立即收流，让客户端重连取新快照，而不是留下一段拼错的实时预览。
   const unsubscribeDrafts = hub.subscribeDrafts(conversationId, draft => {
-    write(`event: artifact.draft\ndata: ${JSON.stringify(draft)}\n\n`);
+    if (!write(`event: artifact.draft\ndata: ${JSON.stringify(draft)}\n\n`)) closeStream();
   });
   const unsubscribeContext = hub.subscribeContextStatus(conversationId, status => {
-    write(`event: context.status\ndata: ${JSON.stringify(status)}\n\n`);
+    if (!write(`event: context.status\ndata: ${JSON.stringify(status)}\n\n`)) closeStream();
   });
   const unsubscribeProgress = hub.subscribeProgress(conversationId, progress => {
-    write(`event: request.progress\ndata: ${JSON.stringify(progress)}\n\n`);
+    if (!write(`event: request.progress\ndata: ${JSON.stringify(progress)}\n\n`)) closeStream();
   });
   const unsubscribe = hub.subscribe(conversationId, pump);
   const poll = setInterval(pump, POLL_MS);
