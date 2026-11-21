@@ -13,12 +13,14 @@ const counts = (work: Work) => {
   return { pending: items.filter(isPending).length, approved: items.filter(item => item.approved).length };
 };
 
-export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, revisions, onRevisionLoaded, artifacts, onOpenArtifact, hasMoreArtifacts = false, onMoreArtifacts, active = true, children, toolbar }: {
+export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, revisions, onRevisionLoaded, artifacts, onOpenArtifact, hasMoreArtifacts = false, onMoreArtifacts, hasMoreWorks = false, onMoreWorks, active = true, children, toolbar }: {
   works: Work[]; selectedWorkId: string | null; onSelectWork: (id: string | null) => void;
   onOpenReview: (target: ReviewNavigation) => void; revisions: Record<string, ArtifactRevision>;
   onRevisionLoaded: (revision: ArtifactRevision) => void; artifacts: ArtifactHead[];
-  onOpenArtifact: (id: string) => void; hasMoreArtifacts?: boolean; onMoreArtifacts?: () => void; children: ReactNode;
-  active?: boolean; toolbar?: ReactNode;
+  onOpenArtifact: (id: string) => void; hasMoreArtifacts?: boolean; onMoreArtifacts?: () => void;
+  /** 服务端还有更早的作品：快照只载最新一页，数量与搜索都不得当作全集。 */
+  hasMoreWorks?: boolean; onMoreWorks?: () => void;
+  children: ReactNode; active?: boolean; toolbar?: ReactNode;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
@@ -52,7 +54,7 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
   return <div className="agent-work-center" data-view={selected ? "review" : "overview"}>
     <header className="agent-center-toolbar">
       {selected ? <><button type="button" className="agent-center-back" aria-label={`全部作品 ${works.length} 件`} onClick={() => onSelectWork(null)}><ArrowLeft />全部作品 <small>{works.length} 件</small></button><h2 tabIndex={-1} className="agent-current-work-title" title={selected.title}>{selected.title}</h2></>
-        : <h2>本次对话的作品 <span>{matching.length} 件{matching.length !== works.length ? ` / 共 ${works.length} 件` : ""}</span></h2>}
+        : <h2>本次对话的作品 <span>{matching.length} 件{hasMoreWorks ? ` / 已载 ${works.length} 件，还有更早` : matching.length !== works.length ? ` / 共 ${works.length} 件` : ""}</span></h2>}
       {selected ? <label className="agent-work-switch"><select aria-label="切换作品" title="切换作品" value={selected.id} onChange={event => onSelectWork(event.target.value)}>{works.map(work => <option key={work.id} value={work.id}>{work.title}</option>)}</select></label>
         : <div className="agent-center-filters"><label className="agent-center-search"><Search /><input ref={search} aria-label="搜索作品和交付内容" placeholder="搜索作品或内容" value={query} onChange={event => { setQuery(event.target.value); setLimit(PAGE_SIZE); }} />
           {query ? <button type="button" aria-label="清除搜索" onClick={() => { setQuery(""); setLimit(PAGE_SIZE); }}><X /></button> : null}</label>
@@ -67,7 +69,7 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
         <h3 className="approved"><span className="agent-lane-marker"><Check /></span>已确认 <small>{totals.approved} 项</small></h3>
       </div>
       <div className="agent-board-scroll">
-        {!matching.length ? <div className="agent-center-empty" role="status"><Search /><h3>没有符合条件的作品</h3><button type="button" onClick={() => { setQuery(""); setFilter("all"); setLimit(PAGE_SIZE); }}>显示全部作品</button></div> : null}
+        {!matching.length ? <div className="agent-center-empty" role="status"><Search /><h3>{hasMoreWorks ? "已载作品里没有符合条件的" : "没有符合条件的作品"}</h3>{hasMoreWorks ? <button type="button" onClick={() => onMoreWorks?.()}>在更早的作品中搜索</button> : null}<button type="button" onClick={() => { setQuery(""); setFilter("all"); setLimit(PAGE_SIZE); }}>显示全部作品</button></div> : null}
         {visible.map(work => {
           const candidates = work.reviewGroups.flatMap(group => group.items).map(item => {
             const source = item.draft ?? item.approved;
@@ -93,6 +95,7 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
           </div>
         </section>; })}
         {matching.length > limit ? <button type="button" className="agent-center-more" onClick={() => setLimit(value => value + PAGE_SIZE)}>再显示 {Math.min(PAGE_SIZE, matching.length - limit)} 件作品 <span>{Math.min(limit, matching.length)} / {matching.length}</span></button> : null}
+        {matching.length <= limit && hasMoreWorks ? <button type="button" className="agent-center-more" onClick={() => onMoreWorks?.()}>载入更早的作品</button> : null}
         {matching.length > 0 && !totals.pending && !totals.approved ? <p className="agent-center-waiting">作品已建立，Frame 交付的内容会出现在这里。</p> : null}
         {independent.length || hasMoreArtifacts ? <details className="agent-independent-outputs"><summary>对话中的其他产物 · {independent.length}</summary><div>{independent.map(artifact => <button key={artifact.id} type="button" onClick={() => onOpenArtifact(artifact.id)}><FileText />{artifact.title}<ChevronRight /></button>)}{hasMoreArtifacts ? <button type="button" onClick={onMoreArtifacts}>更多产物</button> : null}</div></details> : null}
       </div>

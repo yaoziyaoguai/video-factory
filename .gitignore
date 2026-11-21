@@ -35,3 +35,6 @@ docs/guides/*
 docs/过期文档/本机资料/
 apps/studio/test/evidence/
 contracts/agent/v1/evidence/
+
+# tsc 增量构建缓存，不入库。
+*.tsbuildinfo

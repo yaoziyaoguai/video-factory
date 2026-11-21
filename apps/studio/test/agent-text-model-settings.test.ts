@@ -128,7 +128,7 @@ const text = (id: string, overrides: Partial<ConnectionModel> = {}): ConnectionM
 });
 const openaiConnection = (models: ConnectionModel[]): ProviderConnection => ({
   id: "provider-openai", name: "OpenAI", protocol: "openai", baseUrl: "https://api.openai.com/v1",
-  apiKey: "sk-key-A", enabled: true, models,
+  apiKey: "sk-key-A", credentialConfigured: true, enabled: true, models,
 });
 
 async function waitTerminalVia(db: AgentDatabase, requestId: string): Promise<string> {

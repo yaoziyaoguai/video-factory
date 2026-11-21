@@ -83,7 +83,14 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
   boundaries: [{ text: "山路", offsetMs: 0, durationMs: 300 }, { text: "晨光", offsetMs: 350, durationMs: 350 }] })));
 `, { mode: 0o755 });
     saveEdgeTtsServiceSettings(f.app.database, f.clock, "local-owner", {
-      commandId: cmd(), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: pythonStub,
+      commandId: cmd(), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
+    });
+    // 桩解释器经服务端环境变量注入（设置不再携带可写的解释器命令）；结束恢复原值。
+    const previousInterpreter = process.env.AGENT_EDGE_TTS_PYTHON;
+    process.env.AGENT_EDGE_TTS_PYTHON = pythonStub;
+    context.after(() => {
+      if (previousInterpreter === undefined) delete process.env.AGENT_EDGE_TTS_PYTHON;
+      else process.env.AGENT_EDGE_TTS_PYTHON = previousInterpreter;
     });
     let generated!: DubFreeResult, audioDelivery!: DeliveryReceipt;
     f.app.faux!.setResponses([

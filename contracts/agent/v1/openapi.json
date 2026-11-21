@@ -805,6 +805,74 @@
         ]
       }
     },
+    "/conversations/{conversationId}/works": {
+      "get": {
+        "operationId": "listWorks",
+        "description": "Works page keyed by insertion rowid; first page mirrors snapshot works, nextCursor continues older works.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/WorkPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "$ref": "#/components/responses/Error410"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 50
+            }
+          }
+        ]
+      }
+    },
     "/requests/{requestId}/stop": {
       "post": {
         "operationId": "stopRequest",

@@ -15,12 +15,14 @@ export class SkillPackages {
   mutation: SkillPackageMutation | null = null;
   refreshing = false;
   get available(): boolean { return this.catalog !== null; }
+  private readonly dataRoot: string;
   private catalog: LoadSkillsResult | null = null;
   private packages: SkillPackage[] = [];
 
   constructor(dataDir: string, private readonly skillsRoot: string) {
     const directory = path.join(dataDir, "skill-packages");
     mkdirSync(directory, { recursive: true });
+    this.dataRoot = realpathSync(dataDir);
     this.directory = realpathSync(directory);
     this.settings = SettingsManager.create(this.directory, this.directory);
     this.settings.setNpmCommand(["npm", "--ignore-scripts"]);
@@ -75,11 +77,17 @@ export class SkillPackages {
       const pkg = packages[index + 1]!;
       if (!entry.installedPath) { pkg.diagnostics.push("已配置来源不存在；请卸载后重新安装。"); continue; }
       const root = realpathSync(entry.installedPath);
-      // 原生将本地来源持久化为相对 agentDir 的路径；托管 npm/git 的真实根必须留在应用目录。
+      // npm:/git: 之外且能按 agentDir 基准解析到宿主存在路径的来源是本地安装：所有者显式指定的目录，
+      // SDK 对本地来源不复制、installedPath 与这里同基准解析，因此允许位于受管目录之外。
       const localPath = path.resolve(this.directory, entry.source);
-      const local = !entry.source.startsWith("npm:") && existsSync(localPath) && realpathSync(localPath) === root;
+      const local = !entry.source.startsWith("npm:") && existsSync(localPath);
       if (!local && !within(path.join(this.directory, "npm"), root) && !within(path.join(this.directory, "git"), root)) {
         pkg.diagnostics.push("来源不在本应用受管安装目录，未加载。"); continue;
+      }
+      // 数据目录边界：本地包的真实根不得等于数据目录、作为其祖先，或落在 skill-packages 之外的数据区；
+      // Skill 加载面与沙盒只读副本不应覆盖数据库、凭据和媒体。受管 npm/git 根在 skill-packages 内，自然放行。
+      if (within(root, this.dataRoot) || (within(this.dataRoot, root) && !within(this.directory, root))) {
+        pkg.diagnostics.push("本地包来源覆盖应用数据目录，未加载。"); continue;
       }
       if (entry.source.startsWith("npm:") && !within(path.join(this.directory, "npm", "node_modules"), root)) {
         pkg.diagnostics.push("npm 来源不在本应用受管目录，未加载宿主全局安装。"); continue;

@@ -1,9 +1,14 @@
 import type { TrendSnapshot } from "../../shared/agent/generated/contracts.js";
+import { AgentError } from "./errors.js";
 import type { CapturedNewsNowConfig } from "./free-service-settings.js";
+import { assertPublicResolvedHost, newsNowOriginAllowed, type HostResolver } from "./network-policy.js";
 
 // NewsNow 自托管实例的边界适配：固定 /api/s?id= 路径，逐个来源读取。
 // 上游真实形状是 {status,id,updatedTime,items:[...]}；数值时间只按已明确的毫秒处理，
 // 条目 pubDate 只接受可明确解释的 ISO，无法确定则 null，不猜秒/毫秒。
+// 每次请求前核对 DNS 解析结果不在私网段，防止保存时是域名、之后被解析到内网或云元数据端点。
+// 运维在 NEWSNOW_ALLOWED_ORIGINS 显式授权的同网 origin（如 http://vf-newsnow:4444）跳过私网核对，
+// 与保存侧共用同一授权目标；其余地址维持既有网络限制。
 
 const SOURCE_TIMEOUT_MS = 15_000;
 
@@ -18,6 +23,7 @@ export class NewsNowClient {
   constructor(
     private readonly config: CapturedNewsNowConfig,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly resolveHost: HostResolver | undefined = undefined,
   ) {}
 
   /** 逐个读取选定来源；单个失败只标记该来源 unavailable，不影响其他来源。 */
@@ -32,6 +38,8 @@ export class NewsNowClient {
   private async readOne(sourceId: string, limit: number, signal: AbortSignal | undefined): Promise<TrendSnapshot> {
     const timeout = AbortSignal.timeout(SOURCE_TIMEOUT_MS);
     try {
+      const target = new URL(this.config.endpoint);
+      if (!newsNowOriginAllowed(target)) await assertPublicResolvedHost(target.hostname, this.resolveHost);
       const response = await this.fetchImpl(`${this.config.endpoint}/api/s?id=${encodeURIComponent(sourceId)}`, {
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         redirect: "manual",
@@ -60,7 +68,7 @@ export class NewsNowClient {
       };
       return snapshot;
     } catch (error) {
-      if (signal?.aborted) throw error;
+      if (signal?.aborted || error instanceof AgentError) throw error;
       return unavailable(sourceId, "来源暂时不可用。");
     }
   }

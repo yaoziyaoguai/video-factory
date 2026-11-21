@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { StudioMaintenanceError, type Admission, type MaintenanceGate } from "./maintenance-gate.js";
-import { runWithMaintenanceAdmission } from "@video-factory/production-pipeline/maintenance";
+import { runWithMaintenanceAdmission } from "./maintenance.js";
 
 const MAINTENANCE_EXEMPT_ROUTES = /^\/api\/(?:auth|health)(?:\/|$)/;
 const MAINTENANCE_WORK_GET_ROUTES = /^\/api\/(?:series|cases|candidate-inbox)(?:\/|$)/;

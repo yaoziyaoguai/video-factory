@@ -296,7 +296,12 @@ it("T7-06 场景④：素材正式交付后下一请求准备有声提案，一�
     const revision = runtime.service.readRevision("local-owner", output.artifactId, output.revisionId);
     assert.equal(revision.content.format, "media");
     const attempt = attemptsFor(runtime.database, confirmed.receipt.runId!).find(row => row.operation_id === "render")!;
-    const file = path.join(workRoot, attempt.id, "output.mp4");
+    // 零拷贝落库后成片移入 blob 库；从收据解析最终持久化产物。
+    const receipt = runtime.database.prepare(
+      "SELECT b.digest AS digest FROM production_attempt_outputs o JOIN production_blobs b ON b.id=o.blob_id WHERE o.attempt_id=?",
+    ).get(attempt.id) as { digest: string } | undefined;
+    assert.ok(receipt, "成片收据应已写入");
+    const file = runtime.production!.blobs.filePath(receipt.digest);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, true, "成片含旁白音轨");
     assert.ok(Math.abs(facts.durationMs - 2000) <= 250, "preserve_all：成片时长=画面 2s");
@@ -381,7 +386,7 @@ it("T7-05 场景③：制作进行中另聊热点并切默认模型，旧制作�
     const saveConnection = (models: ConnectionModel[]) => {
       const state = readProviderConnections(db);
       const connection: ProviderConnection = { id: connectionId, name: "OpenAI 文本", protocol: "openai",
-        baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-t7", enabled: true, models };
+        baseUrl: "https://api.openai.com/v1", apiKey: "sk-key-t7", credentialConfigured: true, enabled: true, models };
       return saveProviderConnection(db, staticClock, "local-owner",
         { commandId: cmd(), expectedRevision: state.revision, connection });
     };

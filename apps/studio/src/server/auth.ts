@@ -1,9 +1,14 @@
 import {
   createHmac,
   randomBytes,
+  scrypt,
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
+import { promisify } from "node:util";
+
+// scrypt 带重载（可选 options），promisify 推断不出回调签名，这里固定三参形态。
+const scryptAsync = promisify(scrypt) as unknown as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
 
 const COOKIE_NAME = "vf_session";
 const HASH_PREFIX = "scrypt:v1";
@@ -67,6 +72,7 @@ export class StudioAuthenticator {
   private readonly loginAttemptLimit: number;
   private readonly now: () => number;
   private readonly loginWindows = new Map<string, LoginWindow>();
+  private readonly revokedSessions = new Map<string, number>();
 
   constructor(private readonly options: StudioAuthOptions) {
     if (!options.username.trim()) throw new Error("Studio auth username is required.");
@@ -78,17 +84,18 @@ export class StudioAuthenticator {
     this.now = options.now ?? Date.now;
   }
 
-  authenticate(username: string, password: string, clientId: string): "accepted" | "rejected" | "limited" {
+  // 异步校验：scrypt 派生是数十毫秒级计算，同步变体会阻塞事件循环（登录风暴时放大）。
+  async authenticate(username: string, password: string, clientId: string): Promise<"accepted" | "rejected" | "limited"> {
     const now = this.now();
     const window = this.currentLoginWindow(clientId, now);
     if (window.attempts >= this.loginAttemptLimit) return "limited";
 
+    // 先计数、后异步校验：scrypt 让出事件循环期间，并发请求不得越过单窗口尝试上限。
+    // 上限本就只统计失败尝试，登录成功时作废整个窗口。
+    window.attempts += 1;
     const validUsername = safeTextEqual(username, this.options.username);
-    const validPassword = verifyPassword(password, this.options.passwordHash);
-    if (!validUsername || !validPassword) {
-      window.attempts += 1;
-      return "rejected";
-    }
+    const validPassword = await verifyPassword(password, this.options.passwordHash);
+    if (!validUsername || !validPassword) return "rejected";
     this.loginWindows.delete(clientId);
     return "accepted";
   }
@@ -109,6 +116,23 @@ export class StudioAuthenticator {
     return serializeCookie("", 0, this.options.secureCookie);
   }
 
+  // 登出即时吊销：会话本身是无状态签名 Cookie，这里在内存记录已吊销的 nonce 直到其自然过期，
+  // 使已签发的 Cookie（含可能被复制的）立即失效。进程重启后吊销记录丢失，剩余会话按原 TTL 过期。
+  revokeSession(cookieHeader: string | undefined): void {
+    const token = readCookie(cookieHeader, COOKIE_NAME);
+    if (!token) return;
+    const [encoded, signature, extra] = token.split(".");
+    if (!encoded || !signature || extra) return;
+    if (!safeTextEqual(signature, this.sign(encoded))) return;
+    try {
+      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<SessionPayload>;
+      if (payload.version !== 1 || typeof payload.nonce !== "string" || typeof payload.expiresAt !== "number") return;
+      if (payload.expiresAt <= this.now()) return;
+      this.revokedSessions.set(payload.nonce, payload.expiresAt);
+      this.purgeRevokedSessions(this.now());
+    } catch { /* 无法解析的 Cookie 无需吊销。 */ }
+  }
+
   authenticatedUsername(cookieHeader: string | undefined): string | undefined {
     const token = readCookie(cookieHeader, COOKIE_NAME);
     if (!token) return undefined;
@@ -121,10 +145,31 @@ export class StudioAuthenticator {
       if (payload.version !== 1 || payload.username !== this.options.username || typeof payload.expiresAt !== "number") {
         return undefined;
       }
+      if (typeof payload.nonce === "string" && this.revokedSessions.has(payload.nonce)) return undefined;
       return payload.expiresAt > this.now() ? payload.username : undefined;
     } catch {
       return undefined;
     }
+  }
+
+  // 读取已验签会话的过期时间戳（毫秒）。仅解码负载、不做 HMAC——调用方必须先用
+  // authenticatedUsername 验签同一请求的 Cookie；流式推送据此做廉价的逐帧时间戳比对。
+  sessionExpiryMs(cookieHeader: string | undefined): number | null {
+    const token = readCookie(cookieHeader, COOKIE_NAME);
+    if (!token) return null;
+    const [encoded, signature, extra] = token.split(".");
+    if (!encoded || !signature || extra) return null;
+    try {
+      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<SessionPayload>;
+      return typeof payload.expiresAt === "number" ? payload.expiresAt : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 认证时钟（测试可注入）；与会话过期判定使用同一时钟。 */
+  nowMs(): number {
+    return this.now();
   }
 
   private sign(value: string): string {
@@ -134,9 +179,19 @@ export class StudioAuthenticator {
   private currentLoginWindow(clientId: string, now: number): LoginWindow {
     const current = this.loginWindows.get(clientId);
     if (current && now - current.startedAt < this.loginWindowMs) return current;
+    // 顺带清理过期窗口，避免未成功登录的 clientId 长期累积占用内存。
+    for (const [key, window] of this.loginWindows) {
+      if (now - window.startedAt >= this.loginWindowMs) this.loginWindows.delete(key);
+    }
     const next = { attempts: 0, startedAt: now };
     this.loginWindows.set(clientId, next);
     return next;
+  }
+
+  private purgeRevokedSessions(now: number): void {
+    for (const [nonce, expiresAt] of this.revokedSessions) {
+      if (expiresAt <= now) this.revokedSessions.delete(nonce);
+    }
   }
 }
 
@@ -146,9 +201,9 @@ export function createPasswordHash(password: string, salt = randomBytes(16)): st
   return `${HASH_PREFIX}:${salt.toString("base64url")}:${derived.toString("base64url")}`;
 }
 
-function verifyPassword(password: string, encodedHash: string): boolean {
+async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
   const { salt, expected } = parsePasswordHash(encodedHash);
-  const actual = scryptSync(password, salt, expected.length);
+  const actual = await scryptAsync(password, salt, expected.length);
   return timingSafeEqual(actual, expected);
 }
 
@@ -167,7 +222,8 @@ function readCookie(header: string | undefined, name: string): string | undefine
   for (const item of header?.split(";") ?? []) {
     const separator = item.indexOf("=");
     if (separator < 0 || item.slice(0, separator).trim() !== name) continue;
-    return decodeURIComponent(item.slice(separator + 1).trim());
+    // 畸形百分号编码按无有效 Cookie 处理，而不是抛 URIError 变成 500。
+    try { return decodeURIComponent(item.slice(separator + 1).trim()); } catch { return undefined; }
   }
   return undefined;
 }

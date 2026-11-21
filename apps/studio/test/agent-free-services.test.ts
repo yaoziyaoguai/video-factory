@@ -140,7 +140,12 @@ test("T3-01 设置默认、启用/停用、Key 保留与幂等重放（保存零
   assert.equal((enabled.settings as PexelsSettings).credentialConfigured, true);
   assert.equal(enabled.replayed, false);
   assert.equal(captureStockConfigs(a.db).pexels?.apiKey, "pexels-key-1");
-  assert.equal((readFreeServiceSettings(a.db, "pexels") as PexelsSettings).apiKey, "pexels-key-1");
+  // 读取形状不回传明文 Key：对外只见 credentialConfigured；内部执行路径显式取 Key 且已修剪。
+  const pexelsRead = readFreeServiceSettings(a.db, "pexels");
+  assert.equal("apiKey" in pexelsRead, false, "设置读取不回传 Key");
+  assert.equal((pexelsRead as PexelsSettings).credentialConfigured, true);
+  const pexelsInternal = readFreeServiceSettings(a.db, "pexels", true) as PexelsSettings & { apiKey: string | null };
+  assert.equal(pexelsInternal.apiKey, "pexels-key-1");
   assert.equal("apiKey" in enabled.settings, false, "保存回执不复制 Key");
 
   // 幂等重放：同命令同体重放，不再递增 revision
@@ -170,23 +175,54 @@ test("T3-01 设置默认、启用/停用、Key 保留与幂等重放（保存零
   await assert.rejects(async () => saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
     commandId: "cmd-n2", expectedRevision: 0, enabled: true, endpoint: "https://news.example.dev/?x=1", sourceIds: ["github"], topics: [],
   }), (error: any) => error.code === "INVALID_INPUT");
+  // 私网边界（默认非联调环境）：环回、内网与云元数据字面量在保存时拒绝
+  for (const blocked of ["http://127.0.0.1:8787/", "http://10.0.0.5:4444/", "http://169.254.169.254/latest/meta-data/", "http://[::1]:8787/"]) {
+    await assert.rejects(async () => saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+      commandId: "cmd-n-private", expectedRevision: 0, enabled: true, endpoint: blocked, sourceIds: ["github"], topics: [],
+    }), (error: any) => error.code === "INVALID_INPUT", `应拒绝私网地址：${blocked}`);
+  }
 
   await assert.rejects(async () => saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
     commandId: "cmd-n4", expectedRevision: 0, enabled: true,
-    endpoint: "http://127.0.0.1:8787/", sourceIds: ["github", "github"], topics: ["AI"],
+    endpoint: "http://news.example.dev/", sourceIds: ["github", "github"], topics: ["AI"],
   }), (error: any) => error.code === "INVALID_INPUT", "重复来源在契约边界拒绝");
   const news = saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
     commandId: "cmd-n3", expectedRevision: 0, enabled: true,
-    endpoint: "http://127.0.0.1:8787/", sourceIds: ["github", "weibo"], topics: ["AI", "AI "],
+    endpoint: "http://news.example.dev/", sourceIds: ["github", "weibo"], topics: ["AI", "AI "],
   });
   assert.equal(news.settings.revision, 1);
   const newsSettings = news.settings as NewsNowSettings;
   assert.deepEqual(newsSettings.sourceIds, ["github", "weibo"]);
   assert.deepEqual(newsSettings.topics, ["AI"], "主题做空白归一去重");
-  assert.equal(captureNewsNowConfig(a.db)!.endpoint, "http://127.0.0.1:8787");
+  assert.equal(captureNewsNowConfig(a.db)!.endpoint, "http://news.example.dev");
   assert.deepEqual(captureNewsNowConfig(a.db)!.sourceIds, ["github", "weibo"]);
   // 保存全程零网络（pexels 替身未被调用）
   assert.equal(a.pexelsCalls.length, 0);
+});
+
+test("C1 保存链路：NEWSNOW_ALLOWED_ORIGINS 命中的同网 origin 可保存，未列出的仍按原策略拒绝", async t => {
+  const previous = process.env.NEWSNOW_ALLOWED_ORIGINS;
+  process.env.NEWSNOW_ALLOWED_ORIGINS = "http://vf-newsnow:4444,http://127.0.0.1:4444";
+  t.after(() => {
+    if (previous === undefined) delete process.env.NEWSNOW_ALLOWED_ORIGINS;
+    else process.env.NEWSNOW_ALLOWED_ORIGINS = previous;
+  });
+  const a = await fixture(t, {});
+  // 127.0.0.1 字面量默认在保存时拒绝（上例覆盖）；命中运维显式授权的 origin 后可保存。
+  const first = saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+    commandId: "cmd-c1-a", expectedRevision: 0, enabled: true, endpoint: "http://127.0.0.1:4444", sourceIds: ["github"], topics: [],
+  });
+  assert.equal((first.settings as NewsNowSettings).endpoint, "http://127.0.0.1:4444");
+  const second = saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+    commandId: "cmd-c1-b", expectedRevision: 1, enabled: true, endpoint: "http://vf-newsnow:4444", sourceIds: ["github"], topics: [],
+  });
+  assert.equal((second.settings as NewsNowSettings).endpoint, "http://vf-newsnow:4444");
+  // origin 精确匹配：端口不同或别的私网字面量未列出，维持既有拒绝。
+  for (const blocked of ["http://127.0.0.1:5555", "http://10.0.0.5:4444"]) {
+    await assert.rejects(async () => saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+      commandId: `cmd-c1-bad-${blocked}`, expectedRevision: 2, enabled: true, endpoint: blocked, sourceIds: ["github"], topics: [],
+    }), (error: any) => error.code === "INVALID_INPUT", `应拒绝未授权地址：${blocked}`);
+  }
 });
 
 test("T3-02 图片/视频两种 kind 解析真实形状；候选关联本请求，外部引用拒绝", async t => {
@@ -358,6 +394,13 @@ test("T3-05b 伪造媒体引用（未采用 blob）整批拒绝，不产生部�
 });
 
 test("T3-07 NewsNow 真实上游形状：items/cache/时间/null 与局部失败（本地 HTTP 桩）", async t => {
+  // 本机回环 NewsNow 桩按联调口径显式放行私网（默认拒绝的用例在设置测试里）。
+  const previousPolicy = process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+  process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = "1";
+  t.after(() => {
+    if (previousPolicy === undefined) delete process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+    else process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = previousPolicy;
+  });
   const a = await fixture(t, {});
   const updatedTime = Date.UTC(2026, 9, 27, 8, 0, 0);
   let failWeibo = true;
@@ -493,7 +536,7 @@ test("T3 审计回归：上游数字 ID 保留，模糊日期不猜，坏响应�
       items: [{ id: 42, title: "数字 ID", url: "https://example.test/42", pubDate: "01/02/2026" }],
     } : { status: "success" };
     return new Response(JSON.stringify(data));
-  });
+  }, async () => [{ address: "93.184.216.34" }]);
   const [valid, broken] = await client.readSources(["valid", "broken"], 5);
   assert.equal(valid!.sourceUpdatedAt, "2026-10-27T08:00:00.000Z");
   assert.equal(valid!.items[0]?.id, "42");
@@ -596,7 +639,8 @@ test("Oracle 回归：服务更新时间与 Key 换入、保留按正确 SQL 槽
 
 test("Oracle 回归：合法空榜和非空坏条目有不同结果", async () => {
   const client = new NewsNowClient({ enabled: true, endpoint: "https://news.example.test", sourceIds: ["empty", "bad"], topics: [] }, async url =>
-    new Response(JSON.stringify({ status: "success", items: String(url).includes("id=empty") ? [] : [{ id: 1, title: "缺 URL" }] })));
+    new Response(JSON.stringify({ status: "success", items: String(url).includes("id=empty") ? [] : [{ id: 1, title: "缺 URL" }] })),
+  async () => [{ address: "93.184.216.34" }]);
   const [empty, bad] = await client.readSources(["empty", "bad"], 5);
   assert.equal(empty!.status, "success"); assert.deepEqual(empty!.items, []);
   assert.equal(bad!.status, "unavailable");
@@ -652,7 +696,9 @@ test("T3-D1 多来源设置行：Keyed/Keyless 保存、Key 保留与捕获快�
   assert.deepEqual([enabledSettings.revision, enabledSettings.enabled, enabledSettings.credentialConfigured], [1, true, true]);
   assert.equal("apiKey" in enabledSettings, false, "保存回执不带 Key");
   assert.deepEqual(captureStockConfigs(a.db).pixabay, { enabled: true, apiKey: "pixabay-key-1" });
-  assert.equal((readFreeServiceSettings(a.db, "pixabay") as KeyedMaterialSettings).apiKey, "pixabay-key-1", "设置 GET 返回完整 Key 且已修剪");
+  // 读取形状不回传 Key；内部执行路径显式取 Key 且已修剪
+  assert.equal("apiKey" in readFreeServiceSettings(a.db, "pixabay"), false, "设置读取不回传 Key");
+  assert.equal((readFreeServiceSettings(a.db, "pixabay", true) as KeyedMaterialSettings & { apiKey: string | null }).apiKey, "pixabay-key-1", "内部读取返回完整 Key 且已修剪");
 
   // 幂等重放：同命令同体重放，不递增 revision
   const replay = saveKeyedServiceSettings(a.db, systemClock, "local-owner", "pixabay", {
@@ -716,7 +762,7 @@ test("T3-D1 多来源设置行：Keyed/Keyless 保存、Key 保留与捕获快�
   // NewsNow 行不属于素材来源捕获
   saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
     commandId: "nn-on", expectedRevision: 0, enabled: true,
-    endpoint: "http://127.0.0.1:8787/", sourceIds: ["github"], topics: [],
+    endpoint: "http://news.example.dev/", sourceIds: ["github"], topics: [],
   });
   assert.equal("newsnow" in (captureStockConfigs(a.db) as Record<string, unknown>), false);
 
@@ -1032,7 +1078,7 @@ test("T3-D6 升级路径：v13 库带已启用 Pexels 升级 v14，存量行与 
     savePexelsServiceSettings(db, systemClock, "local-owner", { commandId: "m-1", expectedRevision: 0, enabled: true, apiKey: "prod-key" });
     saveNewsNowServiceSettings(db, systemClock, "local-owner", {
       commandId: "m-2", expectedRevision: 0, enabled: true,
-      endpoint: "http://127.0.0.1:8787/", sourceIds: ["github"], topics: [],
+      endpoint: "http://news.example.dev/", sourceIds: ["github"], topics: [],
     });
     // 回退到 v13 形态：旧 CHECK 表 + 未应用 14 号迁移，模拟生产库升级前状态
     db.exec("ALTER TABLE free_service_settings RENAME TO free_service_settings_new");
@@ -1050,9 +1096,9 @@ test("T3-D6 升级路径：v13 库带已启用 Pexels 升级 v14，存量行与 
   }
   const db = openAgentDatabase(directory);
   t.after(() => { if (db.open) db.close(); });
-  const pexels = readFreeServiceSettings(db, "pexels") as PexelsSettings;
+  const pexels = readFreeServiceSettings(db, "pexels", true) as PexelsSettings & { apiKey: string | null };
   assert.deepEqual([pexels.revision, pexels.enabled, pexels.credentialConfigured, pexels.apiKey], [1, true, true, "prod-key"]);
-  assert.equal(captureNewsNowConfig(db)?.endpoint, "http://127.0.0.1:8787");
+  assert.equal(captureNewsNowConfig(db)?.endpoint, "http://news.example.dev");
   // 升级只开放新行，不创建行、不改存量
   assert.equal(captureStockConfigs(db).wikimedia, undefined);
   saveKeylessServiceSettings(db, systemClock, "local-owner", "wikimedia", { commandId: "m-3", expectedRevision: 0, enabled: true });

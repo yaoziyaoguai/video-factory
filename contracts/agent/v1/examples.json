@@ -938,6 +938,71 @@
     }
   },
   {
+    "name": "works page continues older works via rowid cursor",
+    "schema": "WorkPage",
+    "valid": true,
+    "value": {
+      "items": [
+        {
+          "id": "work_creation",
+          "title": "林间散步",
+          "revision": 2,
+          "reviewGroups": [
+            {
+              "id": "visual_1",
+              "title": "视觉方向",
+              "revision": 2,
+              "nextIntent": "人物和背景认可后试做片段",
+              "items": [
+                {
+                  "id": "character_item",
+                  "label": "人物",
+                  "role": "character",
+                  "required": true,
+                  "draft": {
+                    "kind": "artifact_revision",
+                    "artifactId": "character_1",
+                    "revisionId": "character_v1",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "approved": {
+                    "kind": "artifact_revision",
+                    "artifactId": "character_1",
+                    "revisionId": "character_v1",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "confirmationId": "confirmation_1",
+                  "approvedAt": "2026-11-07T08:00:00.000Z",
+                  "finalizedSource": null
+                },
+                {
+                  "id": "scene_item",
+                  "label": "背景",
+                  "role": "scene",
+                  "required": true,
+                  "draft": {
+                    "kind": "artifact_revision",
+                    "artifactId": "scene_1",
+                    "revisionId": "scene_v2",
+                    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  },
+                  "approved": null,
+                  "confirmationId": null,
+                  "approvedAt": null,
+                  "finalizedSource": null
+                }
+              ]
+            }
+          ],
+          "createdAt": "2026-11-07T08:00:00.000Z",
+          "updatedAt": "2026-11-07T08:00:00.000Z"
+        }
+      ],
+      "nextCursor": "cursor_1",
+      "watermark": "cursor_2"
+    }
+  },
+  {
     "name": "standalone prompt revision",
     "schema": "ArtifactRevision",
     "valid": true,
@@ -2063,7 +2128,8 @@
         "watermark": "cursor_1"
       },
       "works": [],
-      "materialBatches": []
+      "materialBatches": [],
+      "worksNextCursor": null
     }
   },
   {
@@ -3233,7 +3299,8 @@
         "watermark": "cursor_1"
       },
       "works": [],
-      "materialBatches": []
+      "materialBatches": [],
+      "worksNextCursor": null
     }
   },
   {
@@ -4766,7 +4833,7 @@
         "name": "Pixabay",
         "endpoint": "https://pixabay.com/api/",
         "modelId": null,
-        "apiKey": "synthetic-local-key",
+        "apiKey": null,
         "details": []
       }
     ]
@@ -4826,7 +4893,7 @@
       "name": "供应商",
       "protocol": "openai-chat-completions",
       "baseUrl": "https://example.com/v1",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4843,7 +4910,8 @@
           "isDefault": true,
           "thinkingLevel": "default"
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4855,7 +4923,7 @@
       "name": "OpenAI",
       "protocol": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4892,7 +4960,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4904,7 +4973,7 @@
       "name": "MiniMax",
       "protocol": "minimax",
       "baseUrl": "https://api.minimax.io",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4933,7 +5002,8 @@
           "enabled": true,
           "isDefault": false
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4945,7 +5015,7 @@
       "name": "阿里万相",
       "protocol": "wan",
       "baseUrl": "https://dashscope-async.aliyuncs.com",
-      "apiKey": "example-only-key",
+      "apiKey": null,
       "enabled": true,
       "models": [
         {
@@ -4961,7 +5031,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -4976,7 +5047,7 @@
           "name": "供应商",
           "protocol": "openai-chat-completions",
           "baseUrl": "https://example.com/v1",
-          "apiKey": "example-only-key",
+          "apiKey": null,
           "enabled": true,
           "models": [
             {
@@ -4993,7 +5064,8 @@
               "isDefault": true,
               "thinkingLevel": "high"
             }
-          ]
+          ],
+          "credentialConfigured": true
         }
       ],
       "modelStatuses": [
@@ -5057,7 +5129,8 @@
             "isDefault": true,
             "thinkingLevel": "default"
           }
-        ]
+        ],
+        "credentialConfigured": true
       }
     }
   },
@@ -5116,7 +5189,8 @@
           "enabled": true,
           "isDefault": true
         }
-      ]
+      ],
+      "credentialConfigured": true
     }
   },
   {
@@ -10357,8 +10431,7 @@
       "serviceId": "edge-tts",
       "revision": 0,
       "enabled": false,
-      "voice": "zh-CN-XiaoxiaoNeural",
-      "pythonCommand": "python3"
+      "voice": "zh-CN-XiaoxiaoNeural"
     }
   },
   {
@@ -10369,8 +10442,7 @@
       "serviceId": "edge-tts",
       "revision": 1,
       "enabled": true,
-      "voice": "随便一个声音",
-      "pythonCommand": "python3"
+      "voice": "随便一个声音"
     }
   },
   {
@@ -10381,8 +10453,7 @@
       "commandId": "cmd_edge_1",
       "expectedRevision": 0,
       "enabled": true,
-      "voice": "zh-CN-YunxiNeural",
-      "pythonCommand": "/opt/venv/bin/python3"
+      "voice": "zh-CN-YunxiNeural"
     }
   },
   {

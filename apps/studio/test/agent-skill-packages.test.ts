@@ -206,7 +206,9 @@ test("S5 queued/running 阻止管理；管理中消息不入队，连续 reload 
 
 test("S5 已确认后台媒体运行不阻塞 Skill 管理", async t => {
   const root = await mkdtemp(path.join(tmpdir(), "frame-skill-media-"));
-  const runtime = await createAgentRuntime({ ...options(root), media: { autoStart: false, factory: (db, blobs) => ({
+  const source = path.join(root, "empty"); await mkdir(source); await writeFile(path.join(source, "package.json"), '{"name":"empty","pi":{"skills":[]}}');
+  // 本地包须位于数据目录之外（兄弟目录），数据目录内部会被边界校验拒绝。
+  const runtime = await createAgentRuntime({ ...options(path.join(root, "data")), media: { autoStart: false, factory: (db, blobs) => ({
     port: new FauxMediaPort(root, db, blobs, () => new Date().toISOString(), { fixtureRoot: path.join(studioRoot, "fixtures/agent"), delayMs: 2000 }),
     catalog: () => OFFLINE_QUOTE_CATALOG, models: () => [],
   }) } });
@@ -223,7 +225,6 @@ test("S5 已确认后台媒体运行不阻塞 Skill 管理", async t => {
   } });
   const { run } = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: "confirm", proposalDigest: proposal.digest });
   assert.equal(run.state, "queued");
-  const source = path.join(root, "empty"); await mkdir(source); await writeFile(path.join(source, "package.json"), '{"name":"empty","pi":{"skills":[]}}');
   assert.equal((await runtime.service.installSkillPackage({ source })).packages.some(pkg => pkg.name === "empty"), true);
   assert.equal((runtime.database.prepare("SELECT state FROM production_runs WHERE id=?").get(run.id) as { state: string }).state, "queued");
 });
@@ -296,6 +297,44 @@ test("S3/S6 包发布过滤宿主自动发现和全局 npm 回退；缺源只诊
   assert.equal(view.packages.find(pkg => pkg.source.startsWith("npm:missing-native-fixture"))!.status, "invalid");
   assert.equal(missingCount, 1);
   assert.equal(validatorFor("SkillPackagesView")(view).ok, true);
+});
+
+test("S7 本地包数据目录边界：等于/祖先/数据区拒绝加载，兄弟目录保持本机安装能力", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "frame-skill-boundary-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const app = path.join(root, "app");
+  const skills = new SkillPackages(app, defaultSkillsRoot);
+  await skills.initialize();
+  const configure = async (source: string) => {
+    skills.settings.setPackages([{ source, extensions: [], prompts: [], themes: [] }]);
+    await skills.settings.flush();
+    return skills.refresh();
+  };
+
+  // 受保护目标：数据目录自身、其祖先、数据目录内 skill-packages 之外的业务数据区
+  const blobs = path.join(app, "blobs");
+  await mkdir(blobs, { recursive: true });
+  for (const directory of [app, root, blobs]) {
+    await writeFile(path.join(directory, "package.json"), `{"name":"boundary-${path.basename(directory)}","pi":{"skills":[]}}`);
+  }
+  for (const [label, source] of [["数据目录自身", app], ["数据目录祖先", root], ["数据目录业务区", blobs]] as const) {
+    const view = await configure(source);
+    const pkg = view.packages.find(item => item.origin === "installed")!;
+    assert.deepEqual(pkg.skillIds, [], `${label} 不加载任何 Skill`);
+    assert.ok(pkg.diagnostics.some(note => note.includes("数据目录")), `${label} 应给出边界诊断：${JSON.stringify(pkg.diagnostics)}`);
+    assert.equal(pkg.status, "invalid");
+  }
+
+  // 兄弟目录（tmpdir 布局）是文档化的本机安装能力，保持放行
+  const sibling = path.join(root, "source");
+  await mkdir(sibling);
+  await writeFile(path.join(sibling, "package.json"), '{"name":"sibling-package","pi":{"skills":[]}}');
+  const allowed = await configure(sibling);
+  const pkg = allowed.packages.find(item => item.origin === "installed")!;
+  assert.equal(pkg.name, "sibling-package");
+  assert.deepEqual(pkg.diagnostics, []);
+  assert.equal(pkg.status, "no_skills");
+  assert.equal(validatorFor("SkillPackagesView")(allowed).ok, true);
 });
 
 test("S6 native 持久化错误回读实际配置；无效源和缺源不冒充安装成功", async t => {

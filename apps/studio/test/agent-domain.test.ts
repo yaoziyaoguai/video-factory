@@ -661,7 +661,12 @@ describe("agent domain rules", () => {
       const rows = upgraded.prepare("SELECT * FROM work_review_confirmations ORDER BY rowid").all() as Record<string, unknown>[];
       assert.deepEqual(rows.map(({ subject_scope, ...row }) => row), before, "id/source/subject/action/归属/时间及原顺序保持");
       assert.deepEqual(rows.map(row => row.subject_scope), ["work_item", "work_item", "work_item"]);
-      assert.deepEqual(upgraded.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='work_review_confirmations' ORDER BY name").all(), indexes);
+      // 迁移不丢失既有索引；后续迁移（如 v26 表达式索引）允许追加新索引。
+      const upgradedIndexes = upgraded.prepare("SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='work_review_confirmations' ORDER BY name").all() as { name: string; sql: string | null }[];
+      const upgradedByName = new Map(upgradedIndexes.map(index => [index.name, index.sql]));
+      for (const index of indexes as { name: string; sql: string | null }[]) {
+        assert.equal(upgradedByName.get(index.name), index.sql, `迁移后应保留索引 ${index.name} 的原始定义`);
+      }
       const insert = upgraded.prepare(`INSERT INTO work_review_confirmations(id,owner_id,conversation_id,subject_scope,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
         VALUES (?,'local-owner','conv-m23','standalone_artifact',?,NULL,NULL,?,?,'user_message','msg-m23',?)`);
       assert.throws(() => insert.run("bad-work", "work-m23", "approve", subject, now), /CHECK/);

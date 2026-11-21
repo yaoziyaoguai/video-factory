@@ -27,7 +27,7 @@ const UNCONFIGURED_NEWSNOW: NewsNowSettings = {
   serviceId: "newsnow", revision: 0, enabled: false, endpoint: null, sourceIds: [], topics: [],
 };
 const UNCONFIGURED_EDGE_TTS: EdgeTtsSettings = {
-  serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3",
+  serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural",
 };
 const unconfiguredKeyed = (serviceId: "pixabay" | "unsplash" | "coverr"): KeyedMaterialSettings =>
   ({ serviceId, revision: 0, enabled: false, credentialConfigured: false, writeUnavailableReason: null });
@@ -40,7 +40,7 @@ type AnyServiceSettings = PexelsSettings | KeyedMaterialSettings | KeylessMateri
 
 type RouteHandler = (call: FetchCall) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }> | undefined;
 
-interface ServiceState { settings: Record<ServiceId, AnyServiceSettings> }
+interface ServiceState { settings: Record<ServiceId, AnyServiceSettings & { apiKey?: string | null }> }
 
 function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) {
   const calls: FetchCall[] = [];
@@ -76,12 +76,15 @@ function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) 
   return { calls, state };
 }
 
-// 缺省路由：GET 回当前事实；PATCH 按服务形状推进 revision 并回公开回执（Keyed 保存的 Key 会存回状态）。
+// 缺省路由：GET 回当前公开事实（Key 不回显，服务端另行持有）；PATCH 按服务形状推进 revision 并回公开回执。
 function defaultRoute(state: ServiceState, service: ServiceId, call: FetchCall) {
   const current = state.settings[service];
-  if (call.method === "GET") return { status: 200, body: current };
-  const input = call.body as { enabled: boolean; apiKey?: string | null; endpoint?: string | null; sourceIds?: string[]; topics?: string[]; voice?: string; pythonCommand?: string };
-  let next: AnyServiceSettings;
+  if (call.method === "GET") {
+    const { apiKey: _stored, ...published } = current;
+    return { status: 200, body: published };
+  }
+  const input = call.body as { enabled: boolean; apiKey?: string | null; endpoint?: string | null; sourceIds?: string[]; topics?: string[]; voice?: string };
+  let next: AnyServiceSettings & { apiKey?: string | null };
   if ("credentialConfigured" in current) {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled,
       credentialConfigured: input.apiKey ? true : current.credentialConfigured,
@@ -91,12 +94,13 @@ function defaultRoute(state: ServiceState, service: ServiceId, call: FetchCall) 
       endpoint: input.endpoint ?? null, sourceIds: input.sourceIds ?? [], topics: input.topics ?? [] };
   } else if (current.serviceId === "edge-tts") {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled,
-      voice: input.voice ?? current.voice, pythonCommand: input.pythonCommand ?? current.pythonCommand };
+      voice: input.voice ?? current.voice };
   } else {
     next = { ...current, revision: current.revision + 1, enabled: input.enabled };
   }
   state.settings[service] = next;
-  return { status: 200, body: { settings: next, replayed: false } satisfies SaveFreeServiceSettingsReceipt };
+  const { apiKey: _saved, ...published } = next;
+  return { status: 200, body: { settings: published, replayed: false } satisfies SaveFreeServiceSettingsReceipt };
 }
 
 function renderServicesPage() {
@@ -150,7 +154,9 @@ describe("T3 免费服务列表与配置面板", () => {
     await screen.findByText("1 个来源已选用");
     await userEvent.click(screen.getByRole("tab", { name: "视频素材" }));
     expect(screen.getByRole("switch", { name: "允许 Agent 使用 Pexels" })).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByLabelText("Pexels API Key")).toHaveValue("shared-key");
+    // Key 不回显：行内只显示是否已配置，明文不进 DOM
+    expect(screen.getByLabelText("Pexels API Key")).toHaveTextContent("已保存（不回显）");
+    expect(document.body.textContent).not.toContain("shared-key");
     expect(screen.getByRole("switch", { name: "允许 Agent 使用 Coverr" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "允许 Agent 使用 Internet Archive" })).toBeInTheDocument();
     expect(screen.queryByRole("switch", { name: "允许 Agent 使用 Unsplash" })).toBeNull();
@@ -200,7 +206,8 @@ describe("T3 免费服务列表与配置面板", () => {
     await userEvent.type(within(dialog).getByLabelText("API Key"), "pix-key-1");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "配置 Pixabay" })).toBeNull());
-    expect(await screen.findByLabelText("Pixabay API Key")).toHaveValue("pix-key-1");
+    expect(await screen.findByLabelText("Pixabay API Key")).toHaveTextContent("已保存（不回显）");
+    expect(document.body.textContent).not.toContain("pix-key-1");
     const row = screen.getByText("Pixabay").closest(".agent-service-row") as HTMLElement;
     expect(within(row).getByText("已选用 · 未验证")).toBeVisible();
     const patch = patches(calls).find(call => call.url.endsWith("/settings/services/pixabay"))!;
@@ -225,46 +232,42 @@ describe("T3 免费服务列表与配置面板", () => {
     expect(patch.body).toEqual({ commandId: expect.any(String), expectedRevision: 3, enabled: false, endpoint: "https://news.example", sourceIds: ["zhihu", "weibo"], topics: ["科技"] });
   });
 
-  it("配音页只显示语音；运行命令默认折叠，展开编辑保存后保持折叠", async () => {
+  it("配音页只显示语音；解释器命令由服务端配置，不出现在设置界面", async () => {
     const { calls } = installRoutes();
     renderServicesPage();
     await userEvent.click(screen.getByRole("tab", { name: "配音" }));
     const toggle = await screen.findByRole("switch", { name: "允许 Agent 使用 Edge 免费配音" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
-    // 未配置时读取形状也带缺省语音，开关直接保存启用（无 Key 门槛）
+    // 未配置时读取形状也带缺省语音，开关直接保存启用（无 Key 门槛，也不携带解释器命令）
     await userEvent.click(toggle);
     await waitFor(() => expect(screen.getByText("已选用 · 未验证")).toBeVisible());
     const firstPatch = patches(calls).find(call => call.url.endsWith("/settings/services/edge-tts"))!;
-    expect(firstPatch.body).toEqual({ commandId: expect.any(String), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3" });
+    expect(firstPatch.body).toEqual({ commandId: expect.any(String), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural" });
 
     await userEvent.click(screen.getByRole("button", { name: /配置 Edge 免费配音/ }));
     const dialog = await screen.findByRole("dialog", { name: "配置 Edge 免费配音" });
     const voice = within(dialog).getByLabelText("语音");
     expect(voice).toHaveValue("zh-CN-XiaoxiaoNeural");
-    expect(within(dialog).getByLabelText("Python 命令")).not.toBeVisible();
-    await userEvent.click(within(dialog).getByText("运行设置"));
-    expect(within(dialog).getByLabelText("Python 命令")).toBeVisible();
-    await userEvent.clear(within(dialog).getByLabelText("Python 命令"));
-    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-    expect(await within(dialog).findByText(/Python 命令不能为空/)).toBeVisible();
-    await userEvent.type(within(dialog).getByLabelText("Python 命令"), "/opt/venv/bin/python3");
+    // 运行依赖只在服务端环境配置：面板没有解释器命令入口
+    expect(within(dialog).queryByLabelText("Python 命令")).toBeNull();
+    expect(within(dialog).getByText(/运行依赖由管理员在服务端配置/)).toBeVisible();
     await userEvent.clear(voice);
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    expect(await within(dialog).findByText(/语音必须是 Edge 神经语音 ID/)).toBeVisible();
+    expect(patches(calls).filter(call => call.url.endsWith("/settings/services/edge-tts"))).toHaveLength(1);
     await userEvent.type(voice, "zh-CN-XiaoyiNeural");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     const patchesForDub = patches(calls).filter(call => call.url.endsWith("/settings/services/edge-tts"));
     expect(patchesForDub[patchesForDub.length - 1]!.body).toEqual({
-      commandId: expect.any(String), expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoyiNeural", pythonCommand: "/opt/venv/bin/python3",
+      commandId: expect.any(String), expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoyiNeural",
     });
     const row = screen.getByText("Edge 免费配音").closest(".agent-service-row") as HTMLElement;
     expect(within(row).getByText("zh-CN-XiaoyiNeural")).toBeVisible();
-    expect(within(row).queryByText("/opt/venv/bin/python3")).toBeNull();
-    expect(screen.getByText(/第三方维护的免费客户端/)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /配置 Edge 免费配音/ }));
     const reopened = await screen.findByRole("dialog", { name: "配置 Edge 免费配音" });
     expect(within(reopened).getByLabelText("语音")).toHaveValue("zh-CN-XiaoyiNeural");
-    expect(within(reopened).getByLabelText("Python 命令")).toHaveValue("/opt/venv/bin/python3");
-    expect(within(reopened).getByLabelText("Python 命令")).not.toBeVisible();
+    expect(within(reopened).queryByLabelText("Python 命令")).toBeNull();
   });
 
   it("Pexels 首次启用无 Key 只提示，不发命令；有 Key 后刷新页面开关直接保存", async () => {
@@ -432,7 +435,9 @@ describe("T3 免费服务列表与配置面板", () => {
     await userEvent.click(await screen.findByRole("button", { name: "配置 Pexels" }));
     const dialog = await screen.findByRole("dialog", { name: "配置 Pexels" });
     const keyInput = within(dialog).getByLabelText("API Key");
-    expect(keyInput).toHaveValue("saved-key");
+    // 已保存的 Key 不回显：打开即为空，只提示留空保持
+    expect(keyInput).toHaveValue("");
+    expect(keyInput).toHaveAttribute("placeholder", "已保存，留空保持不变");
     // 未编辑时 Esc 直接关闭
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -440,7 +445,6 @@ describe("T3 免费服务列表与配置面板", () => {
     const reopened = await screen.findByRole("dialog", { name: "配置 Pexels" });
     // 编辑未保存：Esc 只出现确认，不直接丢弃
     const draftInput = within(reopened).getByLabelText("API Key");
-    await userEvent.clear(draftInput);
     await userEvent.type(draftInput, "draft-key-new");
     await userEvent.keyboard("{Escape}");
     expect(await within(reopened).findByText("本次编辑尚未保存，关闭会放弃这些修改。")).toBeVisible();
@@ -455,7 +459,9 @@ describe("T3 免费服务列表与配置面板", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "配置 Pexels" }));
     expect(Array.from(document.querySelectorAll("input")).map(input => input.value)).not.toContain("draft-key-new");
-    expect(screen.getByLabelText("Pexels API Key")).toHaveValue("saved-key");
+    // 关闭后回到行内摘要：只显示已配置状态，不出现明文 Key
+    expect(screen.getByLabelText("Pexels API Key")).toHaveTextContent("已保存（不回显）");
+    expect(document.body.textContent).not.toContain("saved-key");
     for (const storage of [window.localStorage, window.sessionStorage]) {
       for (let index = 0; index < storage.length; index++) expect(storage.getItem(storage.key(index)!)).not.toContain("draft-key-new");
     }
@@ -497,18 +503,21 @@ describe("T3 产物来源署名显示", () => {
   });
 });
 
-it("已保存的素材 Key 直接展示在行内；Pexels Key 可在配置面板查看编辑；占位热点不再渲染", async () => {
+it("素材 Key 不回显：行内只显示配置状态，配置面板留空表示保持已保存 Key", async () => {
   const { state } = installRoutes();
-  state.settings.pexels = { ...UNCONFIGURED_PEXELS, apiKey: "pexels-visible", credentialConfigured: true };
+  state.settings.pexels = { ...UNCONFIGURED_PEXELS, credentialConfigured: true, apiKey: "pexels-visible" };
   state.settings.pixabay = { serviceId: "pixabay", revision: 2, enabled: true, credentialConfigured: true, apiKey: "pixabay-visible", writeUnavailableReason: null };
   renderServicesPage();
-  expect(await screen.findByLabelText("Pexels API Key")).toHaveValue("pexels-visible");
-  expect(await screen.findByLabelText("Pixabay API Key")).toHaveValue("pixabay-visible");
+  expect(await screen.findByLabelText("Pexels API Key")).toHaveTextContent("已保存（不回显）");
+  expect(await screen.findByLabelText("Pixabay API Key")).toHaveTextContent("已保存（不回显）");
+  expect(document.body.textContent).not.toContain("pexels-visible");
+  expect(document.body.textContent).not.toContain("pixabay-visible");
   expect(screen.queryByRole("switch", { name: "允许 Agent 使用 Pixabay" })).not.toBeNull();
   expect(await screen.findByText("1 个来源已选用")).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "配置 Pexels" }));
-  expect(await screen.findByLabelText("API Key")).toHaveValue("pexels-visible");
-  expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "text");
+  const keyInput = await screen.findByLabelText("API Key");
+  expect(keyInput).toHaveValue("");
+  expect(keyInput).toHaveAttribute("placeholder", "已保存，留空保持不变");
   await userEvent.click(screen.getByRole("button", { name: "关闭配置" }));
   await userEvent.click(screen.getByRole("tab", { name: "视频选题" }));
   expect(await screen.findByRole("switch", { name: "允许 Agent 使用 国内平台榜单" })).toBeInTheDocument();

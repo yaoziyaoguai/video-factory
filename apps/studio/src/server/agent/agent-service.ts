@@ -4,7 +4,7 @@ import type {
   ContentSource, CreateConversation, FeedbackInput, FeedbackReceipt, LibrarySelection, LibraryVideo, LibraryVideoPage, Message,
   MessageInput, MessagePage, MessageReferences, ModelBinding, Proposal, ProposalPage, RenameConversation,
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
-  PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch,
+  PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch, WorkPage,
   FreeServiceSettings, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
   CreationBinding, ReviewApprovalHistoryPage, ReviewApprovalHistoryItem,
 } from "../../shared/agent/generated/contracts.js";
@@ -28,7 +28,7 @@ import {
   type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import { probeRenderInputs } from "./media-probe.js";
-import { getWorkRow, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, withStandaloneApproval, workInFlight, workProjection } from "./creative-work.js";
+import { getWorkRow, listWorkPageRows, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, withStandaloneApproval, workInFlight, workProjection } from "./creative-work.js";
 import { adoptPreview } from "./preview-adoption.js";
 import { listMaterialBatches, readMaterialBatch as readMaterialBatchRow } from "./material-store.js";
 import { ConversationRunnerRegistry, recoverInterruptedRequests } from "./executor.js";
@@ -166,7 +166,10 @@ export class AgentService {
 
   readProviderConnections() {
     if (!this.options.providerConnections) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口未启用供应商连接设置。");
-    return readProviderConnections(this.options.db);
+    // 对外读取不回传明文 Key：apiKey 恒为 null，是否已配置改由 credentialConfigured 表达；
+    // 保存时 null 表示保留已存 Key。内部执行路径仍直接读库取真实凭据。
+    const view = readProviderConnections(this.options.db);
+    return { ...view, connections: view.connections.map(connection => ({ ...connection, apiKey: null, credentialConfigured: connection.apiKey != null })) };
   }
 
   saveProviderConnection(ownerId: string, input: unknown) {
@@ -183,7 +186,8 @@ export class AgentService {
 
   readImportedSettings(ownerId: string): ImportedSettings {
     void ownerId;
-    return this.options.importedSettings ?? [];
+    // 导入文件里的旧 Key 只在启动建连时使用；读取视图与模型/素材设置同口径，不回传明文。
+    return (this.options.importedSettings ?? []).map(entry => ({ ...entry, apiKey: null }));
   }
 
   // —— 免费服务设置（素材来源与 NewsNow；与业务库同库，直接读写当前配置） ——
@@ -276,13 +280,17 @@ export class AgentService {
       const messages = this.messagePage(ownerId, conversationId, undefined, PAGE_SIZE);
       const artifacts = this.artifactPage(ownerId, conversationId, undefined, PAGE_SIZE);
       const proposals = this.proposalPage(ownerId, conversationId, undefined, PAGE_SIZE);
+      // 作品首页与翻页共用 workPage：快照返回最新 50 件 + worksNextCursor，更早的按需续拉，
+      // 而不是把 50 当作总数——长会话里最早的作品（搜索目标）仍可达。
+      const works = this.workPage(conversationId, undefined, 50);
       return {
         conversation,
         eventCursor: encodeEventCursor(conversationId, maxEventSeq(this.options.db, conversationId)),
         messages, artifacts, proposals,
         runs: this.runPage(conversationId, undefined, PAGE_SIZE),
         activeRequestId: activeRequestId(this.options.db, conversationId),
-        works: listWorkRows(this.options.db, conversationId, 50).map(row => workProjection(this.options.db, row)),
+        works: works.items,
+        worksNextCursor: works.nextCursor,
         materialBatches: listMaterialBatches(this.options.db, conversationId, 100),
       };
     })();
@@ -365,6 +373,11 @@ export class AgentService {
   listRuns(ownerId: string, conversationId: string, cursor: string | undefined, limit: number | undefined): RunPage {
     requireConversation(this.options.db, ownerId, conversationId);
     return this.runPage(conversationId, cursor, boundedPageSize(limit));
+  }
+
+  listWorks(ownerId: string, conversationId: string, cursor: string | undefined, limit: number | undefined): WorkPage {
+    requireConversation(this.options.db, ownerId, conversationId);
+    return this.workPage(conversationId, cursor, boundedPageSize(limit));
   }
 
   private messagePage(ownerId: string, conversationId: string, cursor: string | undefined, pageSize: number): MessagePage {
@@ -561,6 +574,18 @@ export class AgentService {
       items: rows.slice(0, limit).map(row => toRun(this.options.db, row)),
       nextCursor: pageCursor(rows, limit, { v: 1, c: conversationId, k: "runs", w: maxEventSeq(this.options.db, conversationId) }),
       watermark: encodeEventCursor(conversationId, maxEventSeq(this.options.db, conversationId)),
+    };
+  }
+
+  // works 页位置是插入序 rowid（表没有 created_seq），游标单独构造；watermark 语义与其他集合一致。
+  private workPage(conversationId: string, cursor: string | undefined, limit: number): WorkPage {
+    const before = cursor === undefined ? undefined : decodeListCursor(cursor, conversationId, "works").p;
+    const watermark = cursor === undefined ? maxEventSeq(this.options.db, conversationId) : decodeListCursor(cursor, conversationId, "works").w;
+    const { rows, nextBeforeRowid } = listWorkPageRows(this.options.db, conversationId, limit, before);
+    return {
+      items: rows.map(row => workProjection(this.options.db, row)),
+      nextCursor: nextBeforeRowid === null ? null : encodeListCursor({ v: 1, c: conversationId, k: "works", p: nextBeforeRowid, w: watermark }),
+      watermark: encodeEventCursor(conversationId, watermark),
     };
   }
 

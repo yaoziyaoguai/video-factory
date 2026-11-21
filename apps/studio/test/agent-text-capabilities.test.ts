@@ -517,7 +517,7 @@ test("R06/R08 冻结档位随请求生效：运行中改档不重新解释已受
   const model = { id: "model-r06", kind: "text" as const, name: "Sol", modelId: "gpt-6.1-sol", features: [],
     contextWindowTokens: 200_000, maxOutputTokens: 4_096, enabled: true, isDefault: true, thinkingLevel: "medium" as const };
   const connection = { id: "provider-r06", name: "OpenAI", protocol: "openai" as const,
-    baseUrl: OPENAI, apiKey: "sk-synthetic-r06-key", enabled: true, models: [model] };
+    baseUrl: OPENAI, apiKey: "sk-synthetic-r06-key", enabled: true, credentialConfigured: true, models: [model] };
   runtime.service.saveProviderConnection("local-owner", { commandId: "save-r06-a", expectedRevision: 0, connection });
   const conversation = runtime.service.createConversation("local-owner", { commandId: "conv-r06", title: "R06" }).conversation.id;
   const input = (commandId: string, text: string) => ({ commandId, text, target: null, skillId: null, proposalRef: null, mode: "new" as const, steerRequestId: null });
@@ -614,7 +614,7 @@ test("R09 Skill reload 后就地复用会话并保持本次档位、压缩参数
   const model = { id: "model-r09", kind: "text" as const, name: "Sol", modelId: "gpt-6.1-sol", features: [],
     contextWindowTokens: 16_384, maxOutputTokens: 4_096, enabled: true, isDefault: true, thinkingLevel: "medium" as const };
   const connection = { id: "provider-r09", name: "OpenAI", protocol: "openai" as const,
-    baseUrl: OPENAI, apiKey: "sk-synthetic-r09-key", enabled: true, models: [model] };
+    baseUrl: OPENAI, apiKey: "sk-synthetic-r09-key", enabled: true, credentialConfigured: true, models: [model] };
   runtime.service.saveProviderConnection("local-owner", { commandId: "save-r09-a", expectedRevision: 0, connection });
   const conversation = runtime.service.createConversation("local-owner", { commandId: "conv-r09", title: "R09" }).conversation.id;
   const input = (commandId: string, text: string) => ({ commandId, text, target: null, skillId: null, proposalRef: null, mode: "new" as const, steerRequestId: null });

@@ -8,7 +8,7 @@ import { openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js
 import { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import { BusinessTools } from "../src/server/agent/pi-tools.js";
 import {
-  captureEdgeTtsConfig, readFreeServiceSettings, saveEdgeTtsServiceSettings,
+  captureEdgeTtsConfig, edgeTtsPythonCommand, readFreeServiceSettings, saveEdgeTtsServiceSettings,
 } from "../src/server/agent/free-service-settings.js";
 import { systemClock } from "../src/server/agent/util.js";
 import {
@@ -20,11 +20,22 @@ import { validatorFor } from "../src/server/agent/validate.js";
 import type { DubFreeResult, EdgeTtsSettings, MediaContent, MediaProvenance, ToolDelivery } from "../src/shared/agent/generated/contracts.js";
 
 // G3-2 免费配音（edge-tts 维护版客户端）：
-// - 设置行为（保存/重放/冲突/边界拒绝）离线验证；
+// - 设置行为（保存/重放/冲突/边界拒绝）与解释器命令的环境变量解析离线验证；
 // - 工具链路用“桩解释器 + 真实 FFmpeg 探测”验证（桩只替代外部语音服务，落库/探测/边界映射全部真实）；
 // - 真实 edge-tts 调用由 FRAME_EDGE_TTS_PYTHON 门控，未设置时跳过，不假装真实供应商验证。
 
 interface TestCtx { after: (fn: () => Promise<void> | void) => void }
+
+// Node 22 的 node:test 尚无 mock.env：直接改 process.env，测试结束恢复原值。
+function useInterpreter(t: TestCtx, command: string | undefined): void {
+  const previous = process.env.AGENT_EDGE_TTS_PYTHON;
+  if (command === undefined) delete process.env.AGENT_EDGE_TTS_PYTHON;
+  else process.env.AGENT_EDGE_TTS_PYTHON = command;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AGENT_EDGE_TTS_PYTHON;
+    else process.env.AGENT_EDGE_TTS_PYTHON = previous;
+  });
+}
 
 interface DubFixture {
   db: AgentDatabase;
@@ -91,50 +102,60 @@ process.stdin.on("end", () => {
 
 test("G3-2 设置：默认缺省、非法形状拒绝、保存/重放/冲突（零网络）", async t => {
   const a = await dubFixture(t);
-  // 未配置：默认投影恒带语音与命令，捕获为 null（工具据此报 CAPABILITY_UNAVAILABLE）
+  useInterpreter(t, undefined);
+  // 未配置：默认投影恒带语音，捕获为 null（工具据此报 CAPABILITY_UNAVAILABLE）；解释器命令不进读取形状。
   const initial = readFreeServiceSettings(a.db, "edge-tts") as EdgeTtsSettings;
-  assert.deepEqual([initial.serviceId, initial.revision, initial.enabled, initial.voice, initial.pythonCommand],
-    ["edge-tts", 0, false, "zh-CN-XiaoxiaoNeural", "python3"]);
+  assert.deepEqual([initial.serviceId, initial.revision, initial.enabled, initial.voice],
+    ["edge-tts", 0, false, "zh-CN-XiaoxiaoNeural"]);
+  assert.equal("pythonCommand" in initial, false, "读取形状不应再携带解释器命令");
   assert.equal(captureEdgeTtsConfig(a.db), null);
 
   // 语音形状由契约在边界拒绝（FreeServiceId 分发先于本测试存在前，非法语音根本无法保存）
   await assert.rejects(async () => saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "随便一个声音", pythonCommand: "python3",
-  }), (error: any) => error.code === "INVALID_INPUT");
-  await assert.rejects(async () => saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "  ",
-  }), (error: any) => error.code === "INVALID_INPUT" && error.message.includes("Python 命令"));
-  await assert.rejects(async () => saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3\n-c bad",
+    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "随便一个声音",
   }), (error: any) => error.code === "INVALID_INPUT");
 
   const saved = saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "/opt/venv/bin/python3",
+    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural",
   });
   assert.equal(saved.replayed, false);
   assert.deepEqual(saved.settings, {
-    serviceId: "edge-tts", revision: 1, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "/opt/venv/bin/python3",
+    serviceId: "edge-tts", revision: 1, enabled: true, voice: "zh-CN-YunxiNeural",
   } satisfies EdgeTtsSettings);
-  assert.deepEqual(captureEdgeTtsConfig(a.db), { enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "/opt/venv/bin/python3" });
+  // 解释器命令来自服务端环境变量：未设置时落到镜像 PATH 缺省 python3。
+  assert.deepEqual(captureEdgeTtsConfig(a.db), { enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "python3" });
 
   // 同命令同体幂等重放：不递增 revision
   const replay = saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "/opt/venv/bin/python3",
+    commandId: "cmd-dub-1", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural",
   });
   assert.equal(replay.replayed, true);
   assert.equal(replay.settings.revision, 1);
 
   // 旧 revision 保存冲突
   await assert.rejects(async () => saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-2", expectedRevision: 0, enabled: false, voice: "zh-CN-YunxiNeural", pythonCommand: "python3",
+    commandId: "cmd-dub-2", expectedRevision: 0, enabled: false, voice: "zh-CN-YunxiNeural",
   }), (error: any) => error.code === "STALE_REVISION");
 
   // 停用后捕获为 null，但配置保留
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-dub-3", expectedRevision: 1, enabled: false, voice: "zh-CN-YunxiNeural", pythonCommand: "/opt/venv/bin/python3",
+    commandId: "cmd-dub-3", expectedRevision: 1, enabled: false, voice: "zh-CN-YunxiNeural",
   });
   assert.equal(captureEdgeTtsConfig(a.db), null);
   assert.equal((readFreeServiceSettings(a.db, "edge-tts") as EdgeTtsSettings).voice, "zh-CN-YunxiNeural");
+});
+
+test("G3-2 解释器命令：只认服务端环境变量，控制字符拒绝", async t => {
+  useInterpreter(t, undefined);
+  assert.equal(edgeTtsPythonCommand(), "python3", "未设置时用镜像 PATH 缺省");
+  assert.equal(edgeTtsPythonCommand({ AGENT_EDGE_TTS_PYTHON: " /opt/frame-tts/bin/python3 " }), "/opt/frame-tts/bin/python3", "去除首尾空白");
+  assert.throws(() => edgeTtsPythonCommand({ AGENT_EDGE_TTS_PYTHON: "python3\n-c bad" }), /控制字符/);
+  const a = await dubFixture(t);
+  useInterpreter(t, "/opt/venv/bin/python3");
+  saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
+    commandId: "cmd-env", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural",
+  });
+  assert.equal(captureEdgeTtsConfig(a.db)?.pythonCommand, "/opt/venv/bin/python3", "捕获时按当前环境解析");
 });
 
 test("DF44 Edge TTS 配置 GET/PATCH 与 OpenAPI 路径一致", async t => {
@@ -147,16 +168,16 @@ test("DF44 Edge TTS 配置 GET/PATCH 与 OpenAPI 路径一致", async t => {
   const initial = await app.inject({ method: "GET", url });
   assert.equal(initial.statusCode, 200);
   assert.deepEqual(initial.json(), {
-    serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: "python3",
+    serviceId: "edge-tts", revision: 0, enabled: false, voice: "zh-CN-XiaoxiaoNeural",
   } satisfies EdgeTtsSettings);
 
   const saved = await app.inject({
     method: "PATCH", url, headers: { "content-type": "application/json", origin: uiOrigin, "x-video-factory-request": "studio" },
-    payload: { commandId: "edge-settings-df44", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "python3" },
+    payload: { commandId: "edge-settings-df44", expectedRevision: 0, enabled: true, voice: "zh-CN-YunxiNeural" },
   });
   assert.equal(saved.statusCode, 200);
   assert.equal(validatorFor("SaveFreeServiceSettingsReceipt")(saved.json()).ok, true);
-  const settings = { serviceId: "edge-tts", revision: 1, enabled: true, voice: "zh-CN-YunxiNeural", pythonCommand: "python3" } satisfies EdgeTtsSettings;
+  const settings = { serviceId: "edge-tts", revision: 1, enabled: true, voice: "zh-CN-YunxiNeural" } satisfies EdgeTtsSettings;
   assert.deepEqual(saved.json(), { replayed: false, settings });
 
   const reread = await app.inject({ method: "GET", url });
@@ -190,8 +211,10 @@ test("G3-2 工具：桩配音生成→正式交付→read_artifact 保留同字�
   const stub = await writeStubInterpreter(a.directory, requestFile,
     { audioB64: audio.toString("base64"), boundaries });
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-stub", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: stub,
+    commandId: "cmd-stub", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
   });
+  // 桩解释器经服务端环境变量注入：设置不再携带可写的解释器命令。
+  useInterpreter(t, stub);
 
   const result: DubFreeResult = await a.tools.dubFree(a.context("call-2"), { text: "你好世界" });
   assert.equal(result.granularity, "word");
@@ -221,8 +244,9 @@ test("G3-2 工具：桩配音生成→正式交付→read_artifact 保留同字�
   const stub2 = await writeStubInterpreter(a.directory, requestFile2,
     { audioB64: audio.toString("base64"), boundaries: [] });
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-stub-2", expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: stub2,
+    commandId: "cmd-stub-2", expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
   });
+  useInterpreter(t, stub2);
   const override = await a.tools.dubFree(a.context("call-3"), { text: "Hello", voice: "en-US-AriaNeural", rate: "+10%" });
   assert.deepEqual(JSON.parse(await readFile(requestFile2, "utf8")), { text: "Hello", voice: "en-US-AriaNeural", rate: "+10%" });
   assert.equal(override.granularity, "none");
@@ -268,8 +292,9 @@ test("G3-2 工具：客户端失败原样透传真实原因，不落任何工件
     failStderr: "Traceback (most recent call last):\n  ...\nedge_tts.exceptions.NoAudioReceived: 没有收到音频数据\n", failCode: 3,
   });
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-fail", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: stub,
+    commandId: "cmd-fail", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
   });
+  useInterpreter(t, stub);
   const failure = await rejection(() => a.tools.dubFree(a.context("call-1"), { text: "你好" }));
   assert.equal(failure.code, "TEMPORARILY_UNAVAILABLE");
   assert.ok(failure.message.includes("NoAudioReceived"), `应包含真实原因：${failure.message}`);
@@ -280,8 +305,9 @@ test("G3-2 工具：客户端失败原样透传真实原因，不落任何工件
   const emptyAudioStub = await writeStubInterpreter(a.directory, path.join(a.directory, "stub-request-empty.json"),
     { audioB64: Buffer.alloc(0).toString("base64"), boundaries: [] });
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-empty", expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: emptyAudioStub,
+    commandId: "cmd-empty", expectedRevision: 1, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
   });
+  useInterpreter(t, emptyAudioStub);
   const empty = await rejection(() => a.tools.dubFree(a.context("call-2"), { text: "你好" }));
   assert.equal(empty.code, "TEMPORARILY_UNAVAILABLE");
   assert.ok(empty.message.includes("没有返回音频数据"));
@@ -293,8 +319,9 @@ test("G3-2 真实 edge-tts 调用：词级边界递增且落在真实时长内�
   if (!python) { t.skip("未设置 FRAME_EDGE_TTS_PYTHON，跳过真实调用（离线桩链路已覆盖其余行为）"); return; }
   const a = await dubFixture(t);
   saveEdgeTtsServiceSettings(a.db, systemClock, "local-owner", {
-    commandId: "cmd-real", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural", pythonCommand: python,
+    commandId: "cmd-real", expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
   });
+  useInterpreter(t, python);
   const result = await a.tools.dubFree(a.context("call-real"), { text: "今天天气很好，适合出门散步。" });
   assert.equal(result.granularity, "word");
   // 真实探测：该句返回 7 个词边界（标点不产生事件）；阈值只证明是词级而非句级/整段。

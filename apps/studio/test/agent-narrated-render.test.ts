@@ -187,11 +187,16 @@ async function outputRevisionOf(runtime: AgentRuntime, result: Run) {
   return revision.content as Extract<MediaContent, { format: "media" }>;
 }
 
-async function outputFileOf(runtime: AgentRuntime, runId: string, workRoot: string, operationId = "render"): Promise<string> {
+async function outputFileOf(runtime: AgentRuntime, runId: string, operationId = "render"): Promise<string> {
   const attempt = attemptsFor(runtime.database, runId).find(row => row.operation_id === operationId)!;
   assert.ok(attempt, `应存在 ${operationId} 尝试`);
-  const file = path.join(workRoot, attempt.id, "output.mp4");
-  assert.ok(existsSync(file), "成片应落在确定性位置");
+  // 零拷贝落库后成片移入 blob 库；从收据解析最终持久化产物，而不是工作目录里的临时位置。
+  const output = runtime.database.prepare(
+    "SELECT b.digest AS digest FROM production_attempt_outputs o JOIN production_blobs b ON b.id=o.blob_id WHERE o.attempt_id=?",
+  ).get(attempt.id) as { digest: string } | undefined;
+  assert.ok(output, "成片收据应已写入");
+  const file = runtime.production!.blobs.filePath(output.digest);
+  assert.ok(existsSync(file), "成片应已持久化在 blob 库");
   return file;
 }
 
@@ -416,7 +421,7 @@ it("T6-01/02：video+speech+render 一图一次确认完成，7.91 估算一次�
     assert.notEqual(result.finance!.state, "settled", "估价不能被称为已结算");
     const content = await outputRevisionOf(runtime, result);
     assert.equal(content.mimeType, "video/mp4");
-    const file = await outputFileOf(runtime, admitted.run.id, workRootOf(directory));
+    const file = await outputFileOf(runtime, admitted.run.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.width, 1280); assert.equal(facts.height, 720);
     assert.equal(Math.round(facts.frameRate ?? 0), 24);
@@ -440,7 +445,7 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     const longRun = await drive(runtime, await acceptIntent(runtime, conversation.id,
       narratedIntent([clipA, clipB], mediaRevision(runtime, conversation.id, assets.narrationLong, "audio/mpeg", assets.longMs))));
     assert.equal(longRun.state, "succeeded");
-    const longFile = await outputFileOf(runtime, longRun.id, workRootOf(assets.directory));
+    const longFile = await outputFileOf(runtime, longRun.id);
     const longFacts = await probeVideoFile(longFile);
     assert.ok(Math.abs(longFacts.durationMs - assets.longMs) <= 200, `长旁白输出 ${longFacts.durationMs}ms 应≈${assets.longMs}ms`);
     assert.ok(isRed(await frameColor(longFile, 0.2)));
@@ -455,7 +460,7 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     const shortRun = await drive(runtime, await acceptIntent(runtime, conversation.id,
       narratedIntent([clipA, clipB], shortNarration)));
     assert.equal(shortRun.state, "succeeded");
-    const shortFile = await outputFileOf(runtime, shortRun.id, workRootOf(assets.directory));
+    const shortFile = await outputFileOf(runtime, shortRun.id);
     const shortFacts = await probeVideoFile(shortFile);
     assert.ok(Math.abs(shortFacts.durationMs - 2000) <= 250, `短旁白输出 ${shortFacts.durationMs}ms 应≈2000ms`);
     assert.ok(isRed(await frameColor(shortFile, 0.2)));
@@ -473,7 +478,7 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     });
     const shiftedRun = await drive(runtime, await acceptIntent(runtime, conversation.id, shifted));
     assert.equal(shiftedRun.state, "succeeded");
-    const shiftedFile = await outputFileOf(runtime, shiftedRun.id, workRootOf(assets.directory));
+    const shiftedFile = await outputFileOf(runtime, shiftedRun.id);
     assert.ok(Math.abs((await probeVideoFile(shiftedFile)).durationMs - 2000) <= 250);
     assert.ok(await maxVolumeDb(shiftedFile, 0.2, 0.3) < -60, "起播偏移之前应静音");
     const sourceRevision = runtime.service.readRevision("local-owner", shortNarration.artifactId, shortNarration.revisionId);
@@ -505,11 +510,11 @@ it("T6-04：含原声的视频 ordered 省略 audioMode 输出无声，narrated 
     // 0.1.23 起 ordered 声音方案由 audioMode 冻结：省略仍输出无声，有声输入整条去原声。
     const quietRun = await drive(runtime, await acceptIntent(runtime, conversation.id, orderedIntent([loud])));
     assert.equal(quietRun.state, "succeeded");
-    const quietFile = await outputFileOf(runtime, quietRun.id, workRootOf(assets.directory));
+    const quietFile = await outputFileOf(runtime, quietRun.id);
     assert.equal((await probeVideoFile(quietFile)).hasAudio, false, "省略 audioMode 应输出无声成片");
     const result = await drive(runtime, await acceptIntent(runtime, conversation.id, narratedIntent([loud], narration)));
     assert.equal(result.state, "succeeded");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, true);
     assert.ok(Math.abs(facts.durationMs - 2000) <= 250);
@@ -531,7 +536,7 @@ it("T6-05：旧 ordered_concat 无声分支与 narrated 共存且行为不变", 
       mediaRevision(runtime, conversation.id, assets.clipB, "video/mp4", 800),
     ])));
     assert.equal(result.state, "succeeded");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, false, "旧分支输出仍无声");
     assert.ok(Math.abs(facts.durationMs - 2000) <= 250);
@@ -845,7 +850,7 @@ it("T6-07b：成片落盘而收据未写的窗口，重启恢复恰好发布一�
     const goodRunId = await acceptIntent(first, goodConversation.id, narratedIntent([goodRefs[0]!], goodRefs[1]!));
     const goodRun = await drive(first, goodRunId);
     assert.equal(goodRun.state, "succeeded");
-    const goodFile = await outputFileOf(first, goodRunId, workRootOf(assets.directory));
+    const goodFile = await outputFileOf(first, goodRunId);
     await first.close();
     // 窗口运行：黑洞端口把尝试停在 unknown。
     second = await buildLocalRuntime(assets.directory, blackHole);
@@ -905,7 +910,7 @@ it("T6-08：有声拼接在后台执行时另聊话题不受影响，成片含�
     assert.equal(content.mimeType, "video/mp4");
     const blob = runtime.database.prepare("SELECT mime_type FROM production_blobs WHERE id=?").get(content.blobId) as { mime_type: string };
     assert.equal(blob.mime_type, "video/mp4", "成片 blob 可按归属读取下载");
-    const facts = await probeVideoFile(await outputFileOf(runtime, runId, workRootOf(assets.directory)));
+    const facts = await probeVideoFile(await outputFileOf(runtime, runId));
     assert.equal(facts.hasAudio, true, "成片必须含旁白音轨");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
 });
@@ -1117,7 +1122,7 @@ it("T13-a/F07a：已有 17s 旁白按冻结片段裁切成 20s，源时间标记
     const footage = timedFootage(assets, runtime, conversation.id);
     const run = await drive(runtime, await acceptIntent(runtime, conversation.id, timedIntent(footage, mediaRevision(runtime, conversation.id, readFileSync(narration), "audio/mpeg", narrationMs))));
     assert.equal(run.state, "succeeded");
-    const file = await outputFileOf(runtime, run.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, run.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.width, 1280); assert.equal(facts.height, 720); assert.equal(Math.round(facts.frameRate ?? 0), 24);
     assert.ok(facts.hasAudio, "成片含旁白音轨");
@@ -1164,7 +1169,7 @@ it("T13-b/F07：待生成旁白的 20s timed 提案可准备；替身返回 17s 
     assert.equal(hub.sessions[0]!.sent.filter(event => event.type === "response.create").length, 1);
     assert.equal(stub.state.arkPosts.length, 0, "不得有任何图片/视频供应商创建");
     assert.equal(attemptsFor(runtime.database, admitted.run.id).length, 2, "speech+render 各一次尝试");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.ok(Math.abs(facts.durationMs - 20_000) <= 250, `成片时长 ${facts.durationMs}ms 应≈20000ms`);
     assert.ok(await maxVolumeDb(file, 17.6, 2.0) < -60, "17s 旁白后补尾静音到 20s");
@@ -1308,7 +1313,7 @@ it("R5 连续旅程：Pi 采用聊天原文、暂停、原批次素材、交付�
     const result = await drive(runtime, accepted.json().run.id);
     assert.equal(result.state, "succeeded");
     assert.equal(hub.sessions.length, 1); assert.equal(stub.state.arkPosts.length, 0);
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     assert.ok(Math.abs((await probeVideoFile(file)).durationMs - 20_000) < 250);
     assert.equal((await outputAudioFacts(file)).codec, "aac");
     // 受理后的产出登记：无既有视频事项时补建“成片”组，草稿即本次运行产出修订。
@@ -1450,7 +1455,7 @@ it("T6-11：videoInputSlots=[1,0] 按画面顺序署名，旁白独立角色，�
     const content = await outputRevisionOf(runtime, result);
     assert.deepEqual(content.sources?.map(item => item.assetId), ["B", "A", "N"], "署名按实际画面顺序 B→A 聚合，旁白作为独立角色在最后");
     assert.deepEqual(blobSources(runtime.database, content.blobId).map(item => item.assetId), ["B", "A", "N"]);
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     assert.ok(isBlue(await frameColor(file, 0.2)), "画面顺序应是 B 在前");
     assert.ok(isRed(await frameColor(file, 1.6)), "A 在后");
     // 刷新（重启装配）后来源仍一致。
@@ -1654,7 +1659,7 @@ it("DGR-03 native 三段 mixed_concat 经 render_project 与 worker 混入本地
     const result = await drive(runtime, row.id);
     assert.equal(result.state, "succeeded", JSON.stringify(result.issue));
     assert.equal(result.finance, null);
-    const output = await outputFileOf(runtime, row.id, workRootOf(directory));
+    const output = await outputFileOf(runtime, row.id);
     const facts = await probeVideoFile(output);
     assert.ok(Math.abs(facts.videoDurationMs - 1500) < 100, JSON.stringify(facts));
     assert.equal(facts.hasAudio, true);

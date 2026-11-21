@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import {
@@ -9,7 +9,7 @@ import {
 import type { MediaContent } from "../../shared/agent/generated/contracts.js";
 import { AgentError } from "./errors.js";
 
-export const CREATIVE_IMAGE = "frame-creative:pi-1.4-v1";
+export const CREATIVE_IMAGE = "frame-creative:pi-1.5-v1";
 export const CREATIVE_TOOL_NAMES = ["read", "write", "edit", "bash"] as const;
 export const CREATIVE_CWD = "/workspace";
 const WRITE_REQUEST_MAX_BYTES = 128 * 1024 * 1024;
@@ -52,7 +52,7 @@ export interface CreativeExecutionOptions {
 }
 export interface CreativeFile { path: string; size: number }
 interface SkillFile { path: string; data: string }
-interface RunnerReply { data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; error?: string }
+interface RunnerReply { data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; needed?: boolean; error?: string }
 
 export function creativeWorkspaceId(workspace: CreativeWorkspace | CreativeToolContext): string {
   for (const value of [workspace.conversationId, workspace.executionId, ...(workspace.workId === null ? [] : [workspace.workId])]) {
@@ -154,8 +154,11 @@ export class CreativeRunner {
     return { exitCode: result.exitCode! };
   }
 
+  /** Skill 快照缓存：stat 签名（路径+大小+mtime）未变时复用，避免每次工具调用整树重读。 */
+  private snapshotCache: { key: string; signature: string; snapshot: { revision: string; files: SkillFile[] } } | null = null;
+
   private async skillSnapshot(skills: CreativeSkill[]): Promise<{ revision: string; files: SkillFile[] }> {
-    const files: SkillFile[] = [];
+    const entries: { path: string; file: string }[] = [];
     for (const skill of skills) {
       if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(skill.id)) throw new AgentError("INVALID_INPUT", "Skill 身份无效。");
       const root = await realpath(skill.directory);
@@ -170,12 +173,19 @@ export class CreativeRunner {
           if (entry.isSymbolicLink()) throw new AgentError("FORBIDDEN", "Skill 只读副本不接受符号链接，请保留实际资源文件。");
           const relative = path.posix.join(prefix, entry.name);
           if (entry.isDirectory()) await visit(file, relative);
-          else if (entry.isFile()) files.push({ path: path.posix.join(skill.id, relative), data: (await readFile(file)).toString("base64") });
+          else if (entry.isFile()) entries.push({ path: path.posix.join(skill.id, relative), file });
         }
       };
       await visit(root, "");
     }
-    return { revision: createHash("sha256").update(JSON.stringify(files)).digest("hex"), files };
+    const key = JSON.stringify(skills.map(skill => [skill.id, skill.directory]));
+    const stats = await Promise.all(entries.map(async entry => { const info = await stat(entry.file); return [entry.path, info.size, info.mtimeMs] as const; }));
+    const signature = JSON.stringify(stats);
+    if (this.snapshotCache?.key === key && this.snapshotCache.signature === signature) return this.snapshotCache.snapshot;
+    const files = await Promise.all(entries.map(async entry => ({ path: entry.path, data: (await readFile(entry.file)).toString("base64") })));
+    const snapshot = { revision: createHash("sha256").update(JSON.stringify(files)).digest("hex"), files };
+    this.snapshotCache = { key, signature, snapshot };
+    return snapshot;
   }
 
   tools(current: () => CreativeToolContext | null): ToolDefinition[] {
@@ -227,7 +237,10 @@ export class CreativeRunner {
         if (definition.name !== "read" && context.deliveryClosed) throw new AgentError("DELIVERY_CLOSED", "本请求已交付；修改请发送新的明确请求。");
         if (definition.name !== "read" && context.readOnly) throw new AgentError("FORBIDDEN", "尚未明确作品；当前只允许读取 Skill 资源。");
         const snapshot = await this.skillSnapshot(context.skills);
-        await this.request(context, "skills", snapshot, signal ? { signal } : {});
+        // R11：先探测宿主是否已持有该修订（命中集合在宿主、随卷 GC 与重启失效），
+        // 仅未命中才传整份文件正文；探测请求只有工作区身份与修订摘要。
+        const probe = await this.request(context, "skills", { revision: snapshot.revision, probe: true }, signal ? { signal } : {});
+        if (probe.needed) await this.request(context, "skills", snapshot, signal ? { signal } : {});
         const args = { ...(input as Record<string, unknown>) };
         if (typeof args.path === "string") {
           let file = args.path;

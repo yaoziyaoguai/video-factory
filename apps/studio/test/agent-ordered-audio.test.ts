@@ -136,11 +136,16 @@ async function drive(runtime: AgentRuntime, runId: string, cap = 24): Promise<Ru
   return runtime.service.getRun("local-owner", runId);
 }
 
-async function outputFileOf(runtime: AgentRuntime, runId: string, workRoot: string, operationId = "render"): Promise<string> {
+async function outputFileOf(runtime: AgentRuntime, runId: string, operationId = "render"): Promise<string> {
   const attempt = attemptsFor(runtime.database, runId).find(row => row.operation_id === operationId)!;
   assert.ok(attempt, `应存在 ${operationId} 尝试`);
-  const file = path.join(workRoot, attempt.id, "output.mp4");
-  assert.ok(existsSync(file), "成片应落在确定性位置");
+  // 零拷贝落库后成片移入 blob 库；从收据解析最终持久化产物，而不是工作目录里的临时位置。
+  const output = runtime.database.prepare(
+    "SELECT b.digest AS digest FROM production_attempt_outputs o JOIN production_blobs b ON b.id=o.blob_id WHERE o.attempt_id=?",
+  ).get(attempt.id) as { digest: string } | undefined;
+  assert.ok(output, "成片收据应已写入");
+  const file = runtime.production!.blobs.filePath(output.digest);
+  assert.ok(existsSync(file), "成片应已持久化在 blob 库");
   return file;
 }
 
@@ -193,7 +198,7 @@ it("M3-01：preserve 保留各镜头原声且顺序跟随画面，调序后声�
     const xy = await drive(runtime, xyAccepted.runId);
     assert.equal(xy.state, "succeeded");
     assert.equal(xyAccepted.audioMode, "preserve", "免费快照仍冻结保留各镜头原声的选择");
-    const xyFile = await outputFileOf(runtime, xy.id, workRootOf(assets.directory));
+    const xyFile = await outputFileOf(runtime, xy.id);
     const xyFacts = await probeVideoFile(xyFile);
     assert.equal(xyFacts.hasAudio, true);
     assert.equal(xyFacts.width, 1280); assert.equal(xyFacts.height, 720);
@@ -212,14 +217,14 @@ it("M3-01：preserve 保留各镜头原声且顺序跟随画面，调序后声�
       mediaRevision(runtime, conversation.id, readFileSync(longFile), 3000),
     ], "preserve"))).runId);
     assert.equal(clipped.state, "succeeded");
-    const clippedFile = await outputFileOf(runtime, clipped.id, workRootOf(assets.directory));
+    const clippedFile = await outputFileOf(runtime, clipped.id);
     assert.ok(await bandVolumeDb(clippedFile, 1.25, 0.4, 1300) < -50, "A 尾部静音期不能提前听到 B");
     assert.ok(await bandVolumeDb(clippedFile, 2.25, 0.5, 1300) > -35, "B 声音在 B 画面开始后出现");
     assert.ok(Math.abs((await probeVideoFile(clippedFile)).durationMs - 4000) <= 250, "过长 B 原声裁至 2s 画面边界");
     // 调序 [Y,X]：声音窗口对调，证明按画面时段对齐而非按输入声道排序。
     const yx = await drive(runtime, (await acceptIntent(runtime, conversation.id, orderedIntent([clipY, clipX], "preserve"))).runId);
     assert.equal(yx.state, "succeeded");
-    const yxFile = await outputFileOf(runtime, yx.id, workRootOf(assets.directory));
+    const yxFile = await outputFileOf(runtime, yx.id);
     assert.ok(await bandVolumeDb(yxFile, 0.1, 0.6, 1300) > -35, "调序后第一段应是 1300Hz");
     assert.ok(await bandVolumeDb(yxFile, 1.0, 0.9, 440) > -35, "调序后第二段应是 440Hz");
     assert.ok(await bandVolumeDb(yxFile, 0.1, 0.6, 440) < -50, "调序后第一段不应残留 440Hz");
@@ -237,7 +242,7 @@ it("M3-02：preserve 遇无音轨片段按等长静音补位，时间线不塌�
     const clipZ = mediaRevision(runtime, conversation.id, assets.clipZ, 1000);
     const result = await drive(runtime, (await acceptIntent(runtime, conversation.id, orderedIntent([clipX, clipZ], "preserve"))).runId);
     assert.equal(result.state, "succeeded");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, true, "整条成片必须仍有统一音轨");
     assert.ok(Math.abs(facts.durationMs - 2200) <= 250, `成片时长 ${facts.durationMs}ms 应≈2200ms`);
@@ -259,7 +264,7 @@ it("M3-03：audioMode none 接受有声输入，输出整条无声", async () =>
     const result = await drive(runtime, noneAccepted.runId);
     assert.equal(result.state, "succeeded");
     assert.equal(noneAccepted.audioMode, "none", "免费快照仍冻结全片静音选择");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, false, "none 输出不得带音轨");
     assert.ok(Math.abs(facts.durationMs - 2000) <= 250);
@@ -280,7 +285,7 @@ it("M3-04：前序 render 成片经 operation_output 参与 preserve，原声逐
     assert.equal(result.state, "succeeded");
     assert.equal(result.outputRevisions.length, 2, "两个 render 各发布一个产出");
     assert.equal(attemptsFor(runtime.database, result.id).length, 2, "两个 render 各恰好一次尝试");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     assert.equal(facts.hasAudio, true);
     assert.ok(Math.abs(facts.durationMs - 3000) <= 300, `成片时长 ${facts.durationMs}ms 应≈3000ms`);
@@ -400,7 +405,8 @@ it("M2 V3/V4/V6/V7：真实三路混音的裁切、立体声、选区循环、�
     for (const input of [dryInput, duckInput, noVoiceInput, replacedInput]) {
       const result = await port.submit(input, issueSubmitPermit(input.attemptId, 1));
       assert.equal(result.state, "succeeded", result.message ?? input.attemptId);
-      const file = path.join(workRoot, input.attemptId, "output.mp4");
+      // 零拷贝落库后成片移入 blob 库；从收据解析最终持久化产物，而不是工作目录里的临时位置。
+      const file = blobs.filePath(attemptOutput(db, input.attemptId)!.digest!);
       if (evidence) copyFileSync(file, path.join(evidence, `${input.attemptId}.mp4`));
       assert.equal(existsSync(path.join(workRoot, input.attemptId, "output.part")), false, "成片通过检查后应原子改名");
       assert.equal(attemptOutput(db, input.attemptId)?.exit_kind, "completed");
@@ -540,7 +546,7 @@ it("M3-E2：音轨长于画面的有声 WebM 经本地受理→worker 真实拼�
     const accepted = await acceptIntent(runtime, conversation.id, orderedIntent([clipWebm, clipX], "preserve"));
     const result = await drive(runtime, accepted.runId);
     assert.equal(result.state, "succeeded");
-    const file = await outputFileOf(runtime, result.id, workRootOf(assets.directory));
+    const file = await outputFileOf(runtime, result.id);
     const facts = await probeVideoFile(file);
     await outputAudioSpec(file);
     // 时间线按画面时段 2s+1.2s，3.2s 的音轨裁在画面边界，不拖长成片也不渗进下一段。

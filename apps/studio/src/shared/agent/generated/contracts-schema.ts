@@ -622,20 +622,13 @@ export const contractsSchema: Record<string, unknown> = {
         "voice": {
           "type": "string",
           "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
-        },
-        "pythonCommand": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "description": "能在 -I 下 import edge_tts 的 Python 解释器可执行文件名或绝对路径，不含 shell 参数；部署统一配置 PATH 或在此覆盖。"
         }
       },
       "required": [
         "serviceId",
         "revision",
         "enabled",
-        "voice",
-        "pythonCommand"
+        "voice"
       ],
       "additionalProperties": false
     },
@@ -656,19 +649,13 @@ export const contractsSchema: Record<string, unknown> = {
         "voice": {
           "type": "string",
           "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
-        },
-        "pythonCommand": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
         }
       },
       "required": [
         "commandId",
         "expectedRevision",
         "enabled",
-        "voice",
-        "pythonCommand"
+        "voice"
       ],
       "additionalProperties": false
     },
@@ -775,13 +762,6 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
-        },
-        "apiKey": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "完整 Key 仅设置 GET 返回，供本机个人页面查看；保存回执省略，不进入 Bootstrap、事件或 Agent 上下文。"
         }
       },
       "required": [
@@ -4476,6 +4456,38 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "WorkPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Work"
+          },
+          "minItems": 0,
+          "maxItems": 50
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "watermark": {
+          "$ref": "#/$defs/Cursor"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "watermark"
+      ],
+      "additionalProperties": false
+    },
     "Snapshot": {
       "type": "object",
       "properties": {
@@ -4514,6 +4526,16 @@ export const contractsSchema: Record<string, unknown> = {
           },
           "maxItems": 50
         },
+        "worksNextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "materialBatches": {
           "type": "array",
           "items": {
@@ -4531,6 +4553,7 @@ export const contractsSchema: Record<string, unknown> = {
         "activeRequestId",
         "proposals",
         "works",
+        "worksNextCursor",
         "materialBatches"
       ],
       "additionalProperties": false
@@ -6232,6 +6255,7 @@ export const contractsSchema: Record<string, unknown> = {
           ]
         },
         "apiKey": {
+          "description": "启动建连使用文件中的真实值；HTTP 读取视图不回传明文，恒为 null。",
           "type": [
             "string",
             "null"
@@ -6376,7 +6400,12 @@ export const contractsSchema: Record<string, unknown> = {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "读取时恒为 null，不回传明文 Key；保存时 null 表示保留已存 Key。"
+        },
+        "credentialConfigured": {
+          "type": "boolean",
+          "description": "读取时表示是否已保存凭据；保存时由服务端按生效 Key 重算，客户端传值被忽略。"
         },
         "enabled": {
           "type": "boolean"
@@ -6394,6 +6423,7 @@ export const contractsSchema: Record<string, unknown> = {
         "protocol",
         "baseUrl",
         "apiKey",
+        "credentialConfigured",
         "enabled",
         "models"
       ],
@@ -7772,13 +7802,6 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
-        },
-        "apiKey": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "完整 Key 仅设置 GET 返回，供本机个人页面查看；保存回执省略，不进入 Bootstrap、事件或 Agent 上下文。"
         }
       },
       "required": [

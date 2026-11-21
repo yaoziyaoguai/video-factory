@@ -246,7 +246,8 @@ it("C1-04：不同帧率输入按声明顺序拼接并归一到冻结规格（A�
       const revision = runtime.service.readRevision("local-owner", result.outputRevisions[0]!.artifactId, result.outputRevisions[0]!.revisionId);
       assert.equal(revision.content.format, "media");
       if (revision.content.format !== "media") return;
-      const file = path.join(assets.workRoot, attemptsFor(runtime.database, runId).at(-1)!.id, "output.mp4");
+      // 零拷贝落库后成品移入 blob 库，工作目录不再保留副本；对最终持久化产物验收规格与帧序。
+      const file = runtime.production!.blobs.filePath(runtime.production!.blobs.get("local-owner", revision.content.blobId).digest);
       const facts = await probeVideoFile(file);
       assert.equal(facts.width, 1280); assert.equal(facts.height, 720);
       assert.equal(facts.hasAudio, false, "拼接输出必须无声");
@@ -321,12 +322,12 @@ it("C1-04：文件完成而业务未提交的窗口——重启后 query 发现�
     const probeRuntime = await buildRuntime(assets.directory, staticClock, (blobs, db) => new LocalRenderPort(db, blobs, staticClock, { workRoot: assets.workRoot }));
     try {
       const blobs = probeRuntime.production!.blobs;
-      const persist = blobs.persist;
+      const persistFromFile = blobs.persistFromFile;
       const port = new LocalRenderPort(probeRuntime.database, blobs, staticClock, { workRoot: assets.workRoot });
-      blobs.persist = () => { throw new Error("synthetic persist failure"); };
+      blobs.persistFromFile = () => { throw new Error("synthetic persist failure"); };
       try {
         await assert.rejects(port.query({ kind: "local", runId, operationId: attempt.operation_id, attemptId: attempt.id, requestIdentity: attempt.request_identity }), /synthetic persist failure/);
-      } finally { blobs.persist = persist; }
+      } finally { blobs.persistFromFile = persistFromFile; }
       assert.equal((probeRuntime.database.prepare("SELECT COUNT(*) AS n FROM production_attempt_outputs").get() as { n: number }).n, 0);
     } finally { await probeRuntime.close(); }
     // 第二段装配：真实端口按“收据缺失但成品在位”路径恢复。

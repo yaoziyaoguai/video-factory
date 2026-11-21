@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import {
@@ -18,13 +18,16 @@ export { ProposalCard } from "./ProductionCards.js";
 import { WorkStagePanel, MaterialBatchCard, StandaloneScriptApproval, type AdoptPreview, type ReviewAction, type ReviewEntry, type ReviewNavigation } from "./WorkStagePanel.js";
 import { ArrowLeft, ArrowUp, ChevronRight, Cpu, Film, Maximize2, MessageSquare, PanelLeft, Pencil, PlugZap, Plus, Sparkles, UserRound, X } from "lucide-react";
 import { ArtifactIcon, stageOwnedLabel, FrameEmptyPreview, FrameWelcome } from "./FramePresentation.js";
-import { FrameSettings, framePageTitle, type FramePage } from "./FrameSettings.js";
-import { LibraryPickerDialog } from "./WorkLibrary.js";
+import { framePageTitle, type FramePage } from "./frame-pages.js";
 import { hydrateReferences } from "./references.js";
 import { WorkCenter } from "./WorkCenter.js";
 import { ExecutionRecord, TaskProgress } from "./TaskProgress.js";
 import "./agent.css";
 import "./review-workspace.css";
+
+// 设置面板与作品库弹层懒加载：首屏聊天不打包模型连接/Skill/服务配置等设置页代码（审计第三阶段拆包）。
+const FrameSettings = lazy(() => import("./FrameSettings.js").then(module => ({ default: module.FrameSettings })));
+const LibraryPickerDialog = lazy(() => import("./WorkLibrary.js").then(module => ({ default: module.LibraryPickerDialog })));
 
 // 增量 A 工作台：会话列表 | 对话 | 产物预览 三栏（后两栏可拖动）。
 // 业务事实只来自 API；事件按 id+版本合并；新产出只提示不抢占预览与输入目标。
@@ -43,6 +46,8 @@ interface ConversationView {
   artifactCursor: string | null;
   proposalCursor: string | null;
   runCursor: string | null;
+  /** 服务端还有更早的作品（R8）：快照只载最新 50 件，其余按此游标续拉。 */
+  workCursor: string | null;
   /** 定位窗口（§6）：非 null 时消息列表止于该锚点，更晚消息只提示不插入。 */
   windowAnchor: { messageId: string; seq: number } | null;
   /** 曾从最新快照页离开且尚未取得终态的排队消息 id，由后台轮询按 id 补读。 */
@@ -51,7 +56,7 @@ interface ConversationView {
 
 const EMPTY_VIEW: ConversationView = {
   conversation: { id: "", title: "", revision: 1, updatedAt: "" },
-  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, windowAnchor: null, queuedOffPage: [],
+  messages: [], requestMessages: [], artifacts: [], proposals: [], runs: [], works: [], materialBatches: [], activeRequestId: null, olderCursor: null, artifactCursor: null, proposalCursor: null, runCursor: null, workCursor: null, windowAnchor: null, queuedOffPage: [],
 };
 
 export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) | undefined } = {}) {
@@ -62,6 +67,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const page: FramePage = requestedPage === "models" || requestedPage === "services" || requestedPage === "skills" || requestedPage === "library" || requestedPage === "profile" ? requestedPage : "chat";
   const anchorParam = params.get("anchor");
   const setPage = (value: FramePage) => setParams(value === "chat" ? (anchorParam ? { anchor: anchorParam } : {}) : { page: value });
+  // 设置页首次打开后才挂载懒加载的 FrameSettings；隐藏态由组件自身用 hidden 属性维持。
+  const [settingsVisited, setSettingsVisited] = useState(false);
+  useEffect(() => { if (page !== "chat") setSettingsVisited(true); }, [page]);
   const [sidebarHidden, setSidebarHidden] = useState(true);
   const chatPanel = usePanelRef();
   const [focusPreview, setFocusPreview] = useState(false);
@@ -98,7 +106,23 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const view = storedView.conversation.id === conversationId ? storedView : EMPTY_VIEW;
   const [revisionCache, setRevisionCache] = useState<Record<string, ArtifactRevision>>({});
   const [drafts, setDrafts] = useState<Record<string, DraftState>>(() => ({ new: loadDraft("new") ?? { text: "", targetArtifactId: null, targetRevisionId: null } }));
-  const [streaming, setStreaming] = useState<{ requestId: string; text: string } | null>(null);
+  // 流式文本下沉（审计第三阶段）：父级只跟踪回合身份（每回合至多两次状态变更），
+  // 增量文本经 sink 进子组件，避免每个 delta 重渲染整个工作台。
+  const [streamingRequestId, setStreamingRequestId] = useState<string | null>(null);
+  const streamingId = useRef<string | null>(null);
+  const streamingSink = useRef<StreamingSink | null>(null);
+  const streamingText = useRef("");
+  const bindStreamingSink = useCallback((sink: StreamingSink) => {
+    streamingSink.current = sink;
+    // 子组件挂载晚于首个增量时补投当前全文，避免首屏丢字。
+    if (streamingId.current !== null) sink.push(streamingId.current, streamingText.current);
+    return () => { if (streamingSink.current === sink) streamingSink.current = null; };
+  }, []);
+  const setStreamingRequest = (requestId: string | null) => {
+    streamingId.current = requestId;
+    setStreamingRequestId(current => current === requestId ? current : requestId);
+    if (requestId === null) streamingSink.current?.clear();
+  };
   // 两种暂态回合过程：不落库，断流或回合结束即消失，不与正式产出合并。
   const [draftPanels, setDraftPanels] = useState<Record<string, ArtifactDraft>>({});
   const [referenceErrors, setReferenceErrors] = useState<Record<string, string>>({});
@@ -284,6 +308,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         artifactCursor: prior.conversation.id ? prior.artifactCursor : snapshot.artifacts.nextCursor,
         proposalCursor: prior.conversation.id ? prior.proposalCursor : snapshot.proposals.nextCursor,
         runCursor: prior.conversation.id ? prior.runCursor : snapshot.runs.nextCursor,
+        // 会话内新作品会把更早的顶出 50 件窗口，快照的续拉游标随之出现：null 只代表当时没有更早。
+        workCursor: prior.conversation.id ? prior.workCursor ?? snapshot.worksNextCursor : snapshot.worksNextCursor,
         windowAnchor,
         queuedOffPage: queuedOffPageIds,
       };
@@ -296,7 +322,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       if (activeId.current !== id) return true;
       setView(next);
       const terminal = (requestId: string) => next.requestMessages.some(message => message.requestId === requestId && ["completed", "failed", "stopped"].includes(message.state));
-      setStreaming(current => current && !terminal(current.requestId) ? current : null);
+      if (streamingId.current !== null && terminal(streamingId.current)) setStreamingRequest(null);
       setDraftPanels(current => Object.fromEntries(Object.entries(current).filter(([, draft]) => !terminal(draft.requestId))));
       setContextNote(current => current && !terminal(current.requestId) ? current : null);
       setRequestProgress(current => current && !terminal(current.requestId) ? current : null);
@@ -414,7 +440,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   useEffect(() => {
     setView(conversationId ? cache.current.get(conversationId) ?? EMPTY_VIEW : EMPTY_VIEW);
     openIntent.current++;
-    setSelection(null); setReviewNavigation(null); setFeedbackOpen(false); setInspectedRun(null); setStreaming(null); setStreamCursor(null); setActionError("");
+    setSelection(null); setReviewNavigation(null); setFeedbackOpen(false); setInspectedRun(null); setStreamingRequest(null); setStreamCursor(null); setActionError("");
     setDraftPanels({}); setContextNote(null); setRequestProgress(null); setReferenceErrors({}); setReviewReceipts({}); setConnectionState(""); setStreamDisconnected(false);
     setSkillId(null); setUnseenMessages(false); pinnedBottom.current = true;
     setSelectedWorkId(null); lastSelectedWork.current = null; setOpenBatchId(null);
@@ -464,12 +490,19 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
       onDelta: delta => {
         if (disposed || disconnected || activeId.current !== id || !live(delta.requestId)) return;
         if (delta.requestId !== deltaRequest) { deltaRequest = delta.requestId; lastDelta = -1; deltaText = ""; }
+        // 服务端在慢连接上会收流而非丢帧，但重连后可能从流中段继续收到暂态增量；
+        // 没见过本轮第 0 帧、也不是新段开头（replace）的增量一律不拼接，避免拼错进行中的回复。
+        if (lastDelta < 0 && delta.sequence > 0 && !delta.replace) return;
         if (delta.sequence <= lastDelta) return;
         lastDelta = delta.sequence;
         deltaText = (delta.replace ? "" : deltaText) + delta.text;
         if (deltaTimer === undefined) deltaTimer = window.setTimeout(() => {
           deltaTimer = undefined;
-          if (!disposed && !disconnected && live(deltaRequest)) setStreaming({ requestId: deltaRequest, text: deltaText });
+          if (!disposed && !disconnected && live(deltaRequest)) {
+            if (streamingId.current !== deltaRequest) { streamingId.current = deltaRequest; setStreamingRequestId(deltaRequest); }
+            streamingText.current = deltaText;
+            streamingSink.current?.push(deltaRequest, deltaText);
+          }
         }, 80);
       },
       onDraft: draft => {
@@ -490,7 +523,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         disconnected = true;
         setStreamDisconnected(true);
         window.clearTimeout(deltaTimer);
-        setStreaming(null); setDraftPanels({}); setContextNote(null); setRequestProgress(null); setReferenceErrors({}); setConnectionState("连接已中断，正在重新同步…");
+        setStreamingRequest(null); setDraftPanels({}); setContextNote(null); setRequestProgress(null); setReferenceErrors({}); setConnectionState("连接已中断，正在重新同步…");
         stopRecovery = recoverSnapshot(() => refreshSnapshot(id, true),
           () => setConnectionState("连接尚未恢复，当前阅读和草稿已保留。可手动重连；网络恢复后也会再试。"));
       },
@@ -875,10 +908,12 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const updateFeedback = (text: string) => { if (feedbackTarget) feedback.edit(feedbackTarget, text); };
   const saveFeedback = () => { if (feedbackTarget) return feedback.submit(feedbackTarget); };
 
-  useEffect(() => {
+  // 钉底滚动：消息列表变化在父级处理；流式文本增长由子组件经 onGrow 通知（状态已下沉）。
+  const keepChatPinned = useCallback(() => {
     const element = chatScroll.current;
     if (element && pinnedBottom.current) element.scrollTop = element.scrollHeight;
-  }, [view.messages, streaming, draftPanels, contextNote]);
+  }, []);
+  useEffect(() => { keepChatPinned(); }, [view.messages, draftPanels, contextNote, keepChatPinned]);
   const onChatScroll = () => {
     scrollIntent.current++;
     const element = chatScroll.current;
@@ -939,6 +974,23 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
         [field]: latest[field] === cursor ? page.nextCursor : latest[field] };
       cache.current.set(id, next); setView(next); setRevisionCache(current => ({ ...current, ...refs.revisions }));
       setReferenceErrors(current => ({ ...current, ...refs.errors }));
+    } catch (error) { if (viewGeneration.current.token === generation) setActionError(error instanceof Error ? error.message : "读取失败。"); }
+    finally { paging.current.delete(key); }
+  };
+  const loadMoreWorks = async () => {
+    if (!conversationId) return;
+    const id = conversationId, generation = viewGeneration.current.token;
+    const cursor = view.workCursor; if (!cursor) return;
+    const key = `${generation}:${id}:works:${cursor}`;
+    if (paging.current.has(key)) return;
+    paging.current.add(key);
+    try {
+      const page = await agentApi.loadMoreWorks(id, cursor);
+      if (!mounted.current || viewGeneration.current.token !== generation) return;
+      const latest = cache.current.get(id); if (!latest) return;
+      // 作品投影自包含，无引用补读；旧页晚到按 id+版本由 mergeWorks 吸收。
+      const next = { ...latest, works: mergeWorks(latest.works, page.items), workCursor: latest.workCursor === cursor ? page.nextCursor : latest.workCursor };
+      cache.current.set(id, next); setView(next);
     } catch (error) { if (viewGeneration.current.token === generation) setActionError(error instanceof Error ? error.message : "读取失败。"); }
     finally { paging.current.delete(key); }
   };
@@ -1037,7 +1089,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     composerInput.current?.focus();
   };
   // 暂态事件只在本回合仍在进行时展示；回合结束即让位于正式事实。
-  const turnLive = (requestId: string | null) => requestId !== null && (view.activeRequestId === requestId || streaming?.requestId === requestId);
+  const turnLive = (requestId: string | null) => requestId !== null && (view.activeRequestId === requestId || streamingRequestId === requestId);
   const visibleDrafts = Object.values(draftPanels).filter(draft => draft.state === "streaming" && turnLive(draft.requestId));
   const visibleContextNote = contextNote && turnLive(contextNote.requestId) ? contextNote : null;
   const contextNoteText = visibleContextNote ? ({
@@ -1090,7 +1142,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
     </aside>
     <main className="agent-frame">
 
-      <FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} onLibraryBringIn={bringLibraryPicks} libraryBringTarget={conversationId ? "current" : "new"} />
+      {settingsVisited ? <Suspense fallback={null}><FrameSettings page={page} bootstrap={bootstrap} conversations={conversations} onConversation={openConversation} onPage={setPage} onLogout={onLogout} onCatalogRefresh={refreshBootstrap} onSkillMutationChange={setSkillMutation} onLibraryBringIn={bringLibraryPicks} libraryBringTarget={conversationId ? "current" : "new"} /></Suspense> : null}
       <div ref={chatWorkspace} className="agent-chat-workspace" hidden={page !== "chat"}>
       {connectionState ? <div role="status" className="agent-connection-state">{connectionState}<button type="button" onClick={() => conversationId && void refreshSnapshot(conversationId, true)}>重新连接</button></div> : null}
       {actionError || bootError ? <div className="agent-action-error" role="alert">{actionError || bootError}<button type="button" onClick={() => setActionError("")}>知道了</button></div> : null}
@@ -1125,7 +1177,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                   </div>)}
                 </div>
               </div>)}
-              {streaming ? <div className="agent-message assistant streaming" data-testid="streaming-message"><span className="agent-assistant-avatar">f·</span><div className="agent-message-content"><span className="agent-author">Frame</span><MarkdownText text={streaming.text || "正在想…"} /></div></div> : null}
+              {streamingRequestId ? <StreamingMessage bind={bindStreamingSink} onGrow={keepChatPinned} /> : null}
             </div>
             {!chatHidden ? progressCard() : null}
             {unseenMessages && !view.windowAnchor ? <button className="agent-new-messages" type="button" onClick={() => { pinnedBottom.current = true; setUnseenMessages(false); if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight; }}>回到最新消息 ↓</button> : null}
@@ -1147,9 +1199,9 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               {canSend ? <span id="agent-composer-hint" className="agent-composer-hint">Enter {view.activeRequestId ? "排队发送" : "发送"} · Shift + Enter 换行</span> : <div id="agent-composer-hint" className="agent-config-note" role="status">{bootstrap ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : "可以先写草稿。"}</div>}
               {conversationId && pendingSend[conversationId] && !sendingNow ? <button type="button" className="agent-retry-send" onClick={() => void sendMessage("new", true)}>重试上次发送（保留原请求）</button> : null}
             </footer>
-            {libraryPickerOpen ? <LibraryPickerDialog
+            {libraryPickerOpen ? <Suspense fallback={null}><LibraryPickerDialog
               onClose={() => { setLibraryPickerOpen(false); libraryPickerTrigger.current?.focus(); }}
-              onConfirm={picks => updateDraft(draft => ({ librarySelections: mergeLibraryPicks(draft.librarySelections, picks) }))} /> : null}
+              onConfirm={picks => updateDraft(draft => ({ librarySelections: mergeLibraryPicks(draft.librarySelections, picks) }))} /></Suspense> : null}
           </section>
         </Panel>
         <Separator className="agent-resizer" aria-label="调整对话与预览的宽度" title="拖动或用左右方向键调整宽度" />
@@ -1202,7 +1254,8 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
                 </div>}
                 works={view.works} selectedWorkId={selectedWorkId} onSelectWork={selectWork} onOpenReview={openReview}
                 revisions={revisionCache} onRevisionLoaded={cacheRevision} artifacts={view.artifacts} onOpenArtifact={openArtifact}
-                hasMoreArtifacts={Boolean(view.artifactCursor)} onMoreArtifacts={() => void loadMoreOutputs("artifacts")}>
+                hasMoreArtifacts={Boolean(view.artifactCursor)} onMoreArtifacts={() => void loadMoreOutputs("artifacts")}
+                hasMoreWorks={Boolean(view.workCursor)} onMoreWorks={() => void loadMoreWorks()}>
               <WorkStagePanel key={conversationId}
                 active={page === "chat" && workMode && selectedWorkId !== null} onOpenReview={openReview}
                 conversationId={conversationId!}
@@ -1284,4 +1337,20 @@ function MessageRow({ works, message, anchored, onOpenArtifact, artifacts, propo
       })}
     </div>
   </div>;
+}
+
+// 流式文本行（审计第三阶段状态下沉）：增量只驱动这一行重渲染，工作台其余部分不受 delta 影响。
+interface StreamingSink {
+  push: (requestId: string, text: string) => void;
+  clear: () => void;
+}
+function StreamingMessage({ bind, onGrow }: { bind: (sink: StreamingSink) => () => void; onGrow: () => void }) {
+  const [state, setState] = useState<{ requestId: string; text: string } | null>(null);
+  useEffect(() => bind({
+    push: (requestId, text) => setState(current => current?.requestId === requestId && current.text === text ? current : { requestId, text }),
+    clear: () => setState(null),
+  }), [bind]);
+  useEffect(() => { if (state) onGrow(); }, [state, onGrow]);
+  if (!state) return null;
+  return <div className="agent-message assistant streaming" data-testid="streaming-message"><span className="agent-assistant-avatar">f·</span><div className="agent-message-content"><span className="agent-author">Frame</span><MarkdownText text={state.text || "正在想…"} /></div></div>;
 }

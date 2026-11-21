@@ -755,6 +755,14 @@ export const MIGRATIONS: readonly {
   { version: 25, statements: [
     "ALTER TABLE messages ADD COLUMN execution_json TEXT",
   ] },
+  { version: 26, statements: [
+    // 审计第二阶段：确认表按 subject_json 内嵌 revisionId/artifactId 的等值关联此前
+    // 只能全表逐行 json_extract（listLibrary 的关联子查询为 O(N²)，独立稿审批为每次
+    // 读取全表扫描）。表达式索引让这些查找走 B 树；查询中的表达式须与索引一致。
+    `CREATE INDEX work_review_confirmations_revision ON work_review_confirmations(json_extract(subject_json, '$.revisionId'))`,
+    `CREATE INDEX work_stage_confirmations_revision ON work_stage_confirmations(json_extract(subject_json, '$.revisionId'))`,
+    `CREATE INDEX work_review_confirmations_standalone_artifact ON work_review_confirmations(json_extract(subject_json, '$.artifactId')) WHERE subject_scope = 'standalone_artifact' AND action = 'approve'`,
+  ] },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {

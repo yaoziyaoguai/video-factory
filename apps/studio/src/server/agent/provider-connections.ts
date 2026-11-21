@@ -19,10 +19,11 @@ import { ADDITIONAL_MEDIA_CHANNEL_KIND, insertAdditionalMediaVersion, readAdditi
 import type { QuoteCatalog } from "./artifact-store.js";
 
 // 连接保存当前地址与凭据；执行表仅保存不可变快照，已受理请求继续解析原版本。
+// credentialConfigured 是 apiKey 的派生只读投影，读取时重算，兼容不含该字段的历史行。
 export function readProviderConnections(db: AgentDatabase): ProviderConnectionSettings {
   const row = db.prepare("SELECT revision FROM provider_connection_settings WHERE id=1").get() as { revision: number };
   const connections = (db.prepare("SELECT configuration_json FROM provider_connections ORDER BY rowid").all() as { configuration_json: string }[])
-    .map(item => JSON.parse(item.configuration_json) as ProviderConnection);
+    .map(item => { const connection = JSON.parse(item.configuration_json) as ProviderConnection; return { ...connection, credentialConfigured: connection.apiKey != null }; });
   return { revision: row.revision, connections, modelStatuses: connections.flatMap(connection => connection.models.map(model => ({
     modelEntryId: model.id,
     unavailableReason: modelUnavailableReason(connection, model),
@@ -177,7 +178,7 @@ export function initializeProviderConnections(db: AgentDatabase, imported: Impor
     const connections: ProviderConnection[] = [];
     const add = (protocol: ProviderConnection["protocol"], baseUrl: string, apiKey: string | null, label: string, model: ConnectionModel) => {
       let connection = connections.find(item => item.protocol === protocol && item.baseUrl === baseUrl && item.apiKey === apiKey);
-      if (!connection) { connection = { id: newAgentId("provider"), name: label, protocol, baseUrl, apiKey, enabled: true, models: [] }; connections.push(connection); }
+      if (!connection) { connection = { id: newAgentId("provider"), name: label, protocol, baseUrl, apiKey, credentialConfigured: apiKey != null, enabled: true, models: [] }; connections.push(connection); }
       if (!connection.models.some(item => item.kind === model.kind && item.modelId === model.modelId)) connection.models.push(model);
     };
     // 只有已配置的旧视频连接可进入选择器。
@@ -371,7 +372,9 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
     const state = readProviderConnections(db);
     if (body.expectedRevision !== state.revision) throw new AgentError("STALE_REVISION", "配置已更新，请重新读取后再保存。");
     const old = state.connections.find(item => item.id === body.connection.id);
-    const connection: ProviderConnection = { ...body.connection, name: body.connection.name.trim(), baseUrl: normalizeBaseUrl(body.connection.baseUrl), apiKey: body.connection.apiKey === null ? old?.apiKey ?? null : normalizeApiKey(body.connection.apiKey), models: body.connection.models.map(model => ({ ...model, baseUrl: model.baseUrl ? normalizeBaseUrl(model.baseUrl) : null, name: model.name.trim(), modelId: model.modelId.trim(), features: model.features.map(item => item.trim()).filter(Boolean) })) };
+    const resolvedApiKey = body.connection.apiKey === null ? old?.apiKey ?? null : normalizeApiKey(body.connection.apiKey);
+    // credentialConfigured 由服务端按生效 Key 重算；客户端传值只用于回显，不作为凭据事实。
+    const connection: ProviderConnection = { ...body.connection, name: body.connection.name.trim(), baseUrl: normalizeBaseUrl(body.connection.baseUrl), apiKey: resolvedApiKey, credentialConfigured: resolvedApiKey != null, models: body.connection.models.map(model => ({ ...model, baseUrl: model.baseUrl ? normalizeBaseUrl(model.baseUrl) : null, name: model.name.trim(), modelId: model.modelId.trim(), features: model.features.map(item => item.trim()).filter(Boolean) })) };
     if (!connection.name || connection.models.some(model => !model.name || !model.modelId)) throw new AgentError("INVALID_INPUT", "连接名称、型号名称与型号 ID 不能为空。");
     for (const baseUrl of new Set([connection.baseUrl, ...connection.models.flatMap(model => model.baseUrl ? [model.baseUrl] : [])])) {
       const reason = providerEndpointReason(connection.protocol, baseUrl);

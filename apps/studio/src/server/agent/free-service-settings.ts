@@ -5,6 +5,7 @@ import type {
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { checkCommandReceipt, storeCommandReceipt } from "./conversation-store.js";
+import { assertPublicEndpointLiteral, newsNowOriginAllowed } from "./network-policy.js";
 import { validatorFor } from "./validate.js";
 import { canonicalJson, type AgentClock } from "./util.js";
 
@@ -28,7 +29,7 @@ export const FREE_SERVICE_LABELS: Readonly<Record<FreeServiceId, string>> = {
 
 export const PEXELS_API_ENDPOINT = "https://api.pexels.com/v1";
 
-/** 未配置时的免费配音缺省：中文女声与系统 python；保存时永远写入用户显式选择。 */
+/** 未配置时的免费配音缺省：中文女声；解释器命令由服务端环境变量解析，缺省为镜像内置 PATH 中的 python3。 */
 export const DEFAULT_EDGE_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_EDGE_TTS_PYTHON = "python3";
 
@@ -73,7 +74,7 @@ function readRow(db: AgentDatabase, serviceId: FreeServiceId): ServiceRow | unde
 }
 
 export function readFreeServiceSettings(
-  db: AgentDatabase, serviceId: FreeServiceId, includeApiKey = true,
+  db: AgentDatabase, serviceId: FreeServiceId, includeApiKey = false,
 ): PexelsSettings | KeyedMaterialSettings | KeylessMaterialSettings | NewsNowSettings | EdgeTtsSettings {
   const row = readRow(db, serviceId);
   const revision = row?.revision ?? 0;
@@ -87,11 +88,10 @@ export function readFreeServiceSettings(
     };
   }
   if (serviceId === "edge-tts") {
-    const config = row ? JSON.parse(row.config_json) as { enabled: boolean; voice?: string; pythonCommand?: string } : { enabled: false };
+    const config = row ? JSON.parse(row.config_json) as { enabled: boolean; voice?: string } : { enabled: false };
     return {
       serviceId: "edge-tts", revision, enabled: config.enabled,
       voice: config.voice || DEFAULT_EDGE_TTS_VOICE,
-      pythonCommand: config.pythonCommand || DEFAULT_EDGE_TTS_PYTHON,
     };
   }
   const config = row ? JSON.parse(row.config_json) as { enabled: boolean } : { enabled: false };
@@ -144,9 +144,20 @@ export interface CapturedEdgeTtsConfig {
 export function captureEdgeTtsConfig(db: AgentDatabase): CapturedEdgeTtsConfig | null {
   const row = readRow(db, "edge-tts");
   if (!row) return null;
-  const config = JSON.parse(row.config_json) as { enabled: boolean; voice?: string; pythonCommand?: string };
+  const config = JSON.parse(row.config_json) as { enabled: boolean; voice?: string };
   if (!config.enabled || !config.voice) return null;
-  return { enabled: true, voice: config.voice, pythonCommand: config.pythonCommand || DEFAULT_EDGE_TTS_PYTHON };
+  return { enabled: true, voice: config.voice, pythonCommand: edgeTtsPythonCommand() };
+}
+
+/**
+ * 配音解释器命令只来自服务端环境变量，不再接受客户端写入：Web 进程执行的外部命令
+ * 必须由部署者控制。容器镜像内 /opt/frame-tts 已加入 PATH，默认 python3 即虚拟环境。
+ */
+export function edgeTtsPythonCommand(environment: NodeJS.ProcessEnv = process.env): string {
+  const command = environment.AGENT_EDGE_TTS_PYTHON?.trim();
+  if (!command) return DEFAULT_EDGE_TTS_PYTHON;
+  if (/[\x00-\x1f\x7f]/.test(command)) throw new AgentError("TEMPORARILY_UNAVAILABLE", "AGENT_EDGE_TTS_PYTHON 含控制字符。");
+  return command;
 }
 
 // —— 保存 ——
@@ -182,6 +193,8 @@ function normalizeNewsNow(input: SaveNewsNowSettings): NormalizedNewsNow {
 }
 
 // 自托管实例地址由用户明确填写；但用户名、查询或锚点不属于实例地址，不接受。
+// 运维在 NEWSNOW_ALLOWED_ORIGINS 显式授权的同网 origin（如 http://vf-newsnow:4444）放行保存，
+// 与请求侧（NewsNowClient）共用同一授权目标；其余地址仍按私网字面量拦截。
 function normalizeNewsNowEndpoint(input: string): string {
   let url: URL;
   try { url = new URL(input.trim()); }
@@ -189,6 +202,7 @@ function normalizeNewsNowEndpoint(input: string): string {
   if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) {
     throw new AgentError("INVALID_INPUT", "NewsNow 服务地址必须是不带用户名、查询参数或锚点的 http(s) 地址。");
   }
+  if (!newsNowOriginAllowed(url)) assertPublicEndpointLiteral(url.hostname);
   return url.toString().replace(/\/$/, "");
 }
 
@@ -278,16 +292,12 @@ export function saveNewsNowServiceSettings(db: AgentDatabase, clock: AgentClock,
   })();
 }
 
-// 免费配音（edge-tts）：启用/语音/Python 命令三件事；voice 形状由契约 Schema 在边界校验，
-// 启用即必须有合法语音。这里只做命令的空白/控制字符清理。
+// 免费配音（edge-tts）：启用与语音两件事；voice 形状由契约 Schema 在边界校验，启用即必须有合法语音。
+// 解释器命令不再可保存：由服务端环境变量 AGENT_EDGE_TTS_PYTHON 解析（见 captureEdgeTtsConfig）。
 export function saveEdgeTtsServiceSettings(db: AgentDatabase, clock: AgentClock, ownerId: string, input: SaveEdgeTtsSettings): SaveFreeServiceSettingsReceipt {
   const verdict = validatorFor("SaveEdgeTtsSettings")(input);
   if (!verdict.ok) throw new AgentError("INVALID_INPUT", verdict.message);
-  const pythonCommand = input.pythonCommand.trim();
-  if (!pythonCommand || /[\x00-\x1f\x7f]/.test(pythonCommand)) {
-    throw new AgentError("INVALID_INPUT", "Edge 免费配音的 Python 命令不能为空或含控制字符。");
-  }
-  const normalized = { enabled: input.enabled, voice: input.voice, pythonCommand };
+  const normalized = { enabled: input.enabled, voice: input.voice };
   const key = { ownerId, operation: "saveFreeServiceSettings", targetId: "edge-tts", commandId: input.commandId };
   return db.transaction(() => {
     const replay = checkCommandReceipt<SaveFreeServiceSettingsReceipt>(db, key, { ...input, ...normalized });
@@ -296,6 +306,7 @@ export function saveEdgeTtsServiceSettings(db: AgentDatabase, clock: AgentClock,
     requireRevision(row?.revision ?? 0, input.expectedRevision);
     const now = clock();
     const configJson = canonicalJson(normalized);
+    // 旧配置可能仍含 pythonCommand 字段；与规范化结果比较不一致即重写一次，自然清理历史字段。
     const changed = !row || canonicalJson(JSON.parse(row.config_json)) !== configJson;
     if (changed) upsertConfig(db, "edge-tts", row?.revision ?? 0, configJson, null, now);
     const payload: SaveFreeServiceSettingsReceipt = { settings: readFreeServiceSettings(db, "edge-tts"), replayed: false };

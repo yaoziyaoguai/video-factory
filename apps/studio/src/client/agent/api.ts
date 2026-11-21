@@ -5,7 +5,7 @@ import type {
   Message, MessageInput, MessagePage, Proposal, RequestReceipt, Snapshot, Target, ContextStatus, RequestProgress,
   Error as ContractError, BusinessEvent, TextDelta, ArtifactPage, ProposalPage, Run, RunPage, AdmissionReceipt, AcceptProposal, CancelReceipt, CancelRun,
   LibraryVideo, LibraryVideoPage,
-  Work, MaterialBatch, ReviewApprovalHistoryPage,
+  Work, MaterialBatch, ReviewApprovalHistoryPage, WorkPage,
   UserProfile, SaveUserProfile, SaveUserProfileReceipt,
   PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings,
   SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt,
@@ -132,6 +132,7 @@ export const agentApi = {
   acceptProposal: (id: string, input: AcceptProposal) => requestJson<AdmissionReceipt>("POST", `/api/agent/v1/proposals/${encodeURIComponent(id)}/acceptances`, input),
   cancelRun: (id: string, input: CancelRun) => requestJson<CancelReceipt>("POST", `/api/agent/v1/runs/${encodeURIComponent(id)}/cancellations`, input),
   loadMoreRuns: (id: string, cursor: string) => requestJson<RunPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/runs?cursor=${encodeURIComponent(cursor)}`),
+  loadMoreWorks: (id: string, cursor: string) => requestJson<WorkPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/works?cursor=${encodeURIComponent(cursor)}`),
   loadMoreArtifacts: (id: string, cursor: string) => requestJson<ArtifactPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/artifacts?cursor=${encodeURIComponent(cursor)}`),
   loadMoreProposals: (id: string, cursor: string) => requestJson<ProposalPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/proposals?cursor=${encodeURIComponent(cursor)}`),
   loadMoreMessages: (conversationId: string, cursor: string) =>

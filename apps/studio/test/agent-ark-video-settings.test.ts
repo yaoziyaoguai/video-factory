@@ -53,7 +53,7 @@ async function setup(t: TestContext) {
     commandId: cmd(), expectedRevision: readProviderConnections(runtime.database).revision, connection: value,
   });
   const configured = (): ProviderConnection => ({
-    id: "test-ark", protocol: "ark", name: "火山方舟", baseUrl: DEFAULT_ARK_VIDEO_PROFILE.baseUrl, apiKey: "synthetic-ark-A", enabled: true,
+    id: "test-ark", protocol: "ark", name: "火山方舟", baseUrl: DEFAULT_ARK_VIDEO_PROFILE.baseUrl, apiKey: "synthetic-ark-A", credentialConfigured: true, enabled: true,
     models: [{ id: "test-seedance", name: "Seedance", modelId: DEFAULT_ARK_VIDEO_PROFILE.modelId, kind: "video",
       enabled: true, isDefault: true, contextWindowTokens: null, maxOutputTokens: null, features: [] }],
   });

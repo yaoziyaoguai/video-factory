@@ -3,6 +3,7 @@ import type { AgentService } from "./agent-service.js";
 import { AgentError } from "./errors.js";
 import { decodeEventCursor } from "./paging.js";
 import { maxEventSeq, minEventSeq } from "./event-log.js";
+import { requireConversation } from "./conversation-store.js";
 import { newAgentId } from "./util.js";
 import { createReadStream } from "node:fs";
 import { extractVideoFrames, InvalidVideoFile } from "./media-probe.js";
@@ -18,6 +19,14 @@ export interface AgentPluginOptions {
   uiOrigin: string;
   /** 显式本地单用户模式：仅允许环回地址访问。 */
   localOwnerOnly?: boolean;
+  /**
+   * 已验签会话的过期信息。SSE 握手由 requireOwner 全量验签后，逐帧只做过期时间戳
+   * 比对（时钟与会话判定共用），吊销仍由周期性全量复核收敛。本地模式无会话则缺省。
+   */
+  sessionAuthorization?: {
+    expiresAtMs: (request: FastifyRequest) => number | null;
+    nowMs: () => number;
+  } | undefined;
 }
 
 const HEARTBEAT_MS = 15_000;
@@ -192,6 +201,12 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return service.listRuns(requireOwner(request), params.conversationId, query.cursor, query.limit);
   });
 
+  app.get("/conversations/:conversationId/works", async request => {
+    const params = request.params as { conversationId: string };
+    const query = pageQuery(request);
+    return service.listWorks(requireOwner(request), params.conversationId, query.cursor, query.limit);
+  });
+
   app.post("/requests/:requestId/stop", async (request, reply) => {
     const params = request.params as { requestId: string };
     return reply.send(service.stopRequest(requireOwner(request), params.requestId, body(request)));
@@ -323,7 +338,10 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     const ownerId = requireOwner(request);
     const cursorParam = request.headers["last-event-id"] as string | undefined ?? (request.query as { cursor?: string }).cursor;
     if (!cursorParam) throw new AgentError("INVALID_INPUT", "缺少 cursor 查询参数。");
-    return streamEvents(service, ownerId, params.conversationId, cursorParam, request, reply, () => requireOwner(request) === ownerId, streams);
+    return streamEvents(service, ownerId, params.conversationId, cursorParam, request, reply,
+      () => requireOwner(request) === ownerId, streams,
+      options.sessionAuthorization ? options.sessionAuthorization.expiresAtMs(request) : null,
+      options.sessionAuthorization?.nowMs ?? (() => Date.now()));
   });
 }
 
@@ -350,11 +368,14 @@ function isLoopback(ip: string | undefined): boolean {
 async function streamEvents(
   service: AgentService, ownerId: string, conversationId: string, cursorParam: string,
   request: FastifyRequest, reply: FastifyReply, authorized: () => boolean, streams: Set<() => void>,
+  sessionExpiresAtMs: number | null, nowMs: () => number,
 ): Promise<FastifyReply> {
   // 打开连接前做归属与游标检查；保留缺口返回 410 CURSOR_EXPIRED。
+  // 归属核对走 requireConversation 轻量查询——此前这里调 snapshot() 全量组装
+  // （P1 重连事件流重复读取作品状态：客户端已取快照，握手又逐作品查 50 次定稿）。
   decodeEventCursor(cursorParam, conversationId);
   const db = service.database();
-  service.snapshot(ownerId, conversationId); // 归属检查 + 确保会话存在
+  requireConversation(db, ownerId, conversationId);
   const afterSeq = decodeEventCursor(cursorParam, conversationId);
   const minimum = minEventSeq(db, conversationId);
   if (afterSeq > 0 && minimum !== null && minimum > afterSeq + 1) {
@@ -374,17 +395,41 @@ async function streamEvents(
   let current = cursorParam;
   let closed = false;
   const hub = service.hub();
-  const write = (chunk: string): void => {
-    if (!closed) {
-      try { if (!authorized()) { raw.end(); return; } } catch { raw.end(); return; }
-      raw.write(chunk);
+
+  // 审计第二阶段：帧写路径不再每帧重做 Cookie HMAC 验签与 JSON 解析。
+  // 握手由路由层 requireOwner 全量验签后，这里取已验签负载中的过期时间戳逐帧比对
+  // （时钟与会话判定共用，过期收敛与逐帧验签等价）；会话吊销（登出）仍由
+  // 每 5 秒一次的全量复核收敛，与吊销的最迟收敛窗口同宽。
+  const sessionExpired = (): boolean => sessionExpiresAtMs !== null && nowMs() >= sessionExpiresAtMs;
+  let authorizationCheckedAt = 0;
+  let authorizationValid = true;
+  const authorizedRecently = (): boolean => {
+    if (sessionExpired()) return false;
+    const currentMs = nowMs();
+    if (currentMs - authorizationCheckedAt >= POLL_MS) {
+      authorizationCheckedAt = currentMs;
+      try { authorizationValid = authorized(); } catch { authorizationValid = false; }
     }
+    return authorizationValid;
+  };
+
+  // 背压：raw.write 返回 false 后套接字缓冲已过高位线，继续写会在内存里无界堆积。
+  // 持久事件由游标重传，遇背压立即收流，客户端按 Last-Event-ID 重连补齐；暂态帧
+  // （delta/草稿/进度）没有持久 id，丢失即无法重传——同样收流而不是静默丢帧：
+  // 客户端重连后取新快照恢复，进行中预览按序列守卫失效重建，绝不拼接缺字的文字。
+  let flowing = true;
+  raw.on("drain", () => { flowing = true; });
+  const write = (chunk: string): boolean => {
+    if (closed || !flowing) return false;
+    if (!authorizedRecently()) { closeStream(); return false; }
+    if (!raw.write(chunk)) flowing = false;
+    return true;
   };
 
   const pump = (): void => {
     if (closed) return;
     try {
-      if (!authorized()) { raw.end(); return; }
+      if (!authorizedRecently()) { closeStream(); return; }
       const minimumNow = minEventSeq(db, conversationId);
       const currentSeq = decodeEventCursor(current, conversationId);
       if (currentSeq > 0 && minimumNow !== null && minimumNow > currentSeq + 1) {
@@ -394,25 +439,29 @@ async function streamEvents(
       }
       const batch = service.eventsAfter(ownerId, conversationId, current, 200);
       for (const event of batch.events) {
-        write(`id: ${event.cursor}\nevent: business\ndata: ${JSON.stringify(event)}\n\n`);
+        if (!write(`id: ${event.cursor}\nevent: business\ndata: ${JSON.stringify(event)}\n\n`)) {
+          closeStream();
+          return;
+        }
+        current = event.cursor;
       }
-      if (batch.events.length > 0) current = batch.nextCursor;
       if (batch.events.length === 200) queueMicrotask(pump);
     } catch { raw.end(); }
   };
 
   const unsubscribeDeltas = hub.subscribeDeltas(conversationId, delta => {
-    write(`event: text.delta\ndata: ${JSON.stringify(delta)}\n\n`);
+    if (!write(`event: text.delta\ndata: ${JSON.stringify(delta)}\n\n`)) closeStream();
   });
-  // 暂态事件没有持久 id，也不推进游标；断线重连后自然消失。
+  // 暂态事件没有持久 id，也不推进游标；断线重连后自然消失。写不进（背压/收流）时
+  // 立即收流，让客户端重连取新快照，而不是留下一段拼错的实时预览。
   const unsubscribeDrafts = hub.subscribeDrafts(conversationId, draft => {
-    write(`event: artifact.draft\ndata: ${JSON.stringify(draft)}\n\n`);
+    if (!write(`event: artifact.draft\ndata: ${JSON.stringify(draft)}\n\n`)) closeStream();
   });
   const unsubscribeContext = hub.subscribeContextStatus(conversationId, status => {
-    write(`event: context.status\ndata: ${JSON.stringify(status)}\n\n`);
+    if (!write(`event: context.status\ndata: ${JSON.stringify(status)}\n\n`)) closeStream();
   });
   const unsubscribeProgress = hub.subscribeProgress(conversationId, progress => {
-    write(`event: request.progress\ndata: ${JSON.stringify(progress)}\n\n`);
+    if (!write(`event: request.progress\ndata: ${JSON.stringify(progress)}\n\n`)) closeStream();
   });
   const unsubscribe = hub.subscribe(conversationId, pump);
   const poll = setInterval(pump, POLL_MS);

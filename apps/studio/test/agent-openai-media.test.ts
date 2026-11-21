@@ -172,7 +172,7 @@ it("Seedream 从共用连接报价，用冻结的型号和规格生成单张 JPE
   initializeTextModelSettings(db, staticClock);
   initializeProviderConnections(db, []);
   const connection = { id: "test-ark", name: "方舟", protocol: "ark", baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    apiKey: "test-key", enabled: true, models: [{ id: "flash", kind: "image", name: "Seedream Flash", modelId: "doubao-seedream-5-0-flash-260915",
+    apiKey: "test-key", enabled: true, credentialConfigured: true, models: [{ id: "flash", kind: "image", name: "Seedream Flash", modelId: "doubao-seedream-5-0-flash-260915",
       features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true }] };
   saveProviderConnection(db, staticClock, "owner", { commandId: "choose", expectedRevision: 0, connection });
   const key = "image:" + connection.models[0]!.modelId;

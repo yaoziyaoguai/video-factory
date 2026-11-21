@@ -149,6 +149,7 @@ function snapshotFixture(conversation: Conversation, options: {
     activeRequestId: null,
     proposals: { items: [], nextCursor: null, watermark: "wm-1" },
     works: [],
+    worksNextCursor: null,
     materialBatches: [],
   };
 }
@@ -1512,7 +1513,8 @@ it("A-33/35 断流清掉临时字，重新快照且保留草稿，旧连接迟�
   await waitFor(() => expect(FakeEventSource.instances.filter(source => !source.closed)).toHaveLength(1));
   const source = FakeEventSource.instances[0]!;
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "保留草稿");
-  source.emit("text.delta", { requestId: "r1", sequence: 1, text: "临时流式文本" });
+  source.emit("text.delta", { requestId: "r1", sequence: 0, text: "临时流式" });
+  source.emit("text.delta", { requestId: "r1", sequence: 1, text: "文本" });
   expect(await screen.findByText("临时流式文本")).toBeInTheDocument();
   failNextSnapshot = true;
   act(() => source.onerror?.());
@@ -1526,6 +1528,24 @@ it("A-33/35 断流清掉临时字，重新快照且保留草稿，旧连接迟�
   expect(screen.queryByText("已关闭连接的迟到内容")).toBeNull();
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("保留草稿");
   expect(calls.filter(call => call.url.endsWith("/snapshot"))).toHaveLength(3);
+});
+
+// R6 慢连接拼错进行中回复的客户端守卫：未见本轮第 0 帧、也非新段开头（replace）的
+// 流中段增量不拼接；第 0 帧或 replace 帧到达后正常恢复显示。
+it("R6 流中段增量不拼接，第 0 帧或新段开头到达后恢复", async () => {
+  const a = conversationFixture("a", "慢读恢复");
+  installWorkbenchRoutes({ conversations: [a], snapshots: { a: snapshotFixture(a) } });
+  renderAt("/agent/a"); await screen.findByRole("heading", { name: "慢读恢复" });
+  await waitFor(() => expect(FakeEventSource.instances.filter(source => !source.closed)).toHaveLength(1));
+  const source = FakeEventSource.instances[0]!;
+  source.emit("text.delta", { requestId: "r9", sequence: 3, text: "流中段缺上文" });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  expect(screen.queryByText(/流中段缺上文/)).toBeNull();
+  source.emit("text.delta", { requestId: "r9", sequence: 0, text: "从第 0 帧开始" });
+  expect(await screen.findByText("从第 0 帧开始")).toBeInTheDocument();
+  source.emit("text.delta", { requestId: "r9", sequence: 4, text: "新段开头", replace: true });
+  expect(await screen.findByText("新段开头")).toBeInTheDocument();
+  expect(screen.queryByText(/从第 0 帧开始/)).toBeNull();
 });
 
 it("A-32 首屏之外的产物按事件 ID 读取；旧分页晚到不覆盖新版本", async () => {

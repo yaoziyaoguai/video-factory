@@ -331,7 +331,7 @@ test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real ent
   const { StudioAuthenticator, createPasswordHash } = await import("../src/server/auth.js");
   const { validatorFor } = await import("../src/server/agent/validate.js");
   const { MaintenanceGate } = await import("../src/server/maintenance-gate.js");
-  const { transitionMaintenanceGate } = await import("@video-factory/production-pipeline/maintenance");
+  const { transitionMaintenanceGate } = await import("../src/server/maintenance.js");
   const a = await fixture(t); let now = Date.now();
   for (const method of ["GET", "POST"] as const) {
     const remote = await a.app.inject({ method, url: method === "GET" ? "/api/agent/v1/bootstrap" : "/api/agent/v1/conversations",
@@ -438,4 +438,17 @@ test("K4 退役供应商与旧审计的配置入口不能从现行入口复活",
     const response = await a.app.inject({ method: "GET", url, headers });
     assert.equal(response.statusCode, 200, `${url} 应保持可读`);
   }
+});
+
+test("导入配置读取视图不回传明文 Key：HTTP 响应恒为 null，启动建连不受影响", async t => {
+  const a = await fixture(t, { importedSettings: [
+    { id: "legacy-pixabay", kind: "material", name: "Pixabay", endpoint: "https://pixabay.com/api/", modelId: null,
+      apiKey: "synthetic-imported-legacy-key", details: [] },
+  ] });
+  const response = await a.app.inject({ method: "GET", url: "/api/agent/v1/settings/imported", headers: { origin } });
+  assert.equal(response.statusCode, 200);
+  const entries = response.json() as { apiKey: string | null }[];
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.apiKey, null, "读取视图的 apiKey 恒为 null");
+  assert.ok(!response.body.includes("synthetic-imported-legacy-key"), "响应体不得包含明文 Key");
 });

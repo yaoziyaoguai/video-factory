@@ -867,7 +867,7 @@ it("F09：有效 A 受理后先切 B 再首次 submit，三条新通道仍按 A 
       let sequence = 0;
       const save = (modelId: string, baseUrl: string, apiKey: string) => saveProviderConnection(db, staticClock, "local-owner", {
         commandId: `frozen-${channel}-${++sequence}`, expectedRevision: readProviderConnections(db).revision,
-        connection: { id: `conn-${channel}`, name: channel, protocol, baseUrl, apiKey, enabled: true,
+        connection: { id: `conn-${channel}`, name: channel, protocol, baseUrl, apiKey, enabled: true, credentialConfigured: true,
           models: [{ id: `model-${channel}`, kind, name: modelId, modelId, features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true }] },
       });
       save(modelA, baseA, "fake-frozen-key-A");

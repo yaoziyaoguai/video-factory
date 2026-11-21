@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, linkSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import type { AgentDatabase } from "./db.js";
 import { newAgentId, type AgentClock } from "./util.js";
@@ -19,28 +20,66 @@ export class ProductionBlobs {
   // 这里只接收执行适配器已经探测过的字节；C 的网络下载/探测在适配器，不接受用户路径或 URL。
   persist(ownerId: string, conversationId: string, bytes: Buffer, mimeType: string, durationMs: number | null): BlobRow {
     const digest = createHash("sha256").update(bytes).digest("hex");
-    const existing = this.db.prepare("SELECT * FROM production_blobs WHERE owner_id=? AND conversation_id=? AND digest=?").get(ownerId, conversationId, digest) as BlobRow | undefined;
-    if (existing) {
-      this.verify(existing);
-      // 同一份字节可先按工程文件登记（octet-stream、无时长），确定性工程重跑产出相同字节后再按探测过的
-      // 媒体成品登记；字节相同就以更晚验证过的事实补齐标签，且只升级不降级，不另建行。
-      if (existing.mime_type === "application/octet-stream" && mimeType !== "application/octet-stream"
-        || durationMs !== null && existing.duration_ms === null) {
-        this.db.prepare("UPDATE production_blobs SET mime_type=?, duration_ms=COALESCE(duration_ms,?) WHERE id=?")
-          .run(existing.mime_type === "application/octet-stream" ? mimeType : existing.mime_type, durationMs, existing.id);
-        return this.get(ownerId, existing.id);
-      }
-      return existing;
-    }
+    const existing = this.dedupe(ownerId, conversationId, digest, mimeType, durationMs);
+    if (existing) return existing;
     const temporary = path.join(this.root, newAgentId("tmp"));
     const fd = openSync(temporary, "wx", 0o600);
     try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
     renameSync(temporary, this.filePath(digest));
+    this.syncDirectory();
+    return this.register(ownerId, conversationId, digest, mimeType, bytes.length, durationMs);
+  }
+  // 成片落盘：64KB 分块流式哈希 + 同盘硬链接零拷贝，避免整读数百 MB 成片造成主线程内存峰值
+  // （审计第二阶段）。file 必须与 blobs 根同卷——调用方的 work 根在 dataDir 之下。
+  // 不再 move 走源文件（P1 已渲染成片无法恢复）：摘要文件就位后源文件留在原处，调用方在
+  // 制作回执落库后用 release() 归还；崩溃窗口内恢复仍能从尝试目录读到同一份数据。
+  async persistFromFile(ownerId: string, conversationId: string, file: string, mimeType: string, durationMs: number | null): Promise<BlobRow> {
+    const hash = createHash("sha256");
+    let sizeBytes = 0;
+    for await (const chunk of createReadStream(file, { highWaterMark: 64 * 1024 })) {
+      const buffer = chunk as Buffer;
+      hash.update(buffer);
+      sizeBytes += buffer.length;
+    }
+    const digest = hash.digest("hex");
+    const existing = this.dedupe(ownerId, conversationId, digest, mimeType, durationMs);
+    if (existing) return existing;
+    try {
+      linkSync(file, this.filePath(digest));
+    } catch (error) {
+      // EEXIST：同摘要文件已在位（内容寻址保证同字节），直接复用；其余错误如实抛出。
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    this.syncDirectory();
+    return this.register(ownerId, conversationId, digest, mimeType, sizeBytes, durationMs);
+  }
+  // persistFromFile 的配对归还：删除调用方持有的源文件（尝试目录产物）。摘要文件按内容寻址
+  // 共享，可能仍被其他引用使用，这里绝不动 blobs 根。
+  release(file: string): void {
+    try { unlinkSync(file); } catch { /* 源文件已消失（重复归还或崩溃残留已清理）。 */ }
+  }
+  // 命中同内容已有行时按只升级不降级规则复用（同一字节可先按工程文件登记、再按媒体成品补齐标签）；
+  // 返回 undefined 表示需要新建行。
+  private dedupe(ownerId: string, conversationId: string, digest: string, mimeType: string, durationMs: number | null): BlobRow | undefined {
+    const existing = this.db.prepare("SELECT * FROM production_blobs WHERE owner_id=? AND conversation_id=? AND digest=?").get(ownerId, conversationId, digest) as BlobRow | undefined;
+    if (!existing) return undefined;
+    this.verify(existing);
+    if (existing.mime_type === "application/octet-stream" && mimeType !== "application/octet-stream"
+      || durationMs !== null && existing.duration_ms === null) {
+      this.db.prepare("UPDATE production_blobs SET mime_type=?, duration_ms=COALESCE(duration_ms,?) WHERE id=?")
+        .run(existing.mime_type === "application/octet-stream" ? mimeType : existing.mime_type, durationMs, existing.id);
+      return this.get(ownerId, existing.id);
+    }
+    return existing;
+  }
+  private syncDirectory(): void {
     const directory = openSync(this.root, "r");
     try { fsyncSync(directory); } finally { closeSync(directory); }
+  }
+  private register(ownerId: string, conversationId: string, digest: string, mimeType: string, sizeBytes: number, durationMs: number | null): BlobRow {
     const id = newAgentId("blob");
     this.db.prepare("INSERT INTO production_blobs(id,owner_id,conversation_id,digest,mime_type,size_bytes,duration_ms,created_at) VALUES(?,?,?,?,?,?,?,?)")
-      .run(id, ownerId, conversationId, digest, mimeType, bytes.length, durationMs, this.clock());
+      .run(id, ownerId, conversationId, digest, mimeType, sizeBytes, durationMs, this.clock());
     return this.get(ownerId, id);
   }
   get(ownerId: string, id: string): BlobRow {
@@ -50,10 +89,45 @@ export class ProductionBlobs {
   }
   verify(row: BlobRow): void {
     try {
-      const file = this.filePath(row.digest);
-      if (statSync(file).size === row.size_bytes && createHash("sha256").update(readFileSync(file)).digest("hex") === row.digest) return;
+      // 常规路径只核对长度：文件由 persist() 按内容寻址原子写入，全量重读哈希会让百兆级成片
+      // 在主线程秒级阻塞（审计第一阶段止血项）；流式哈希随第二阶段 persistFromFile 落地。
+      if (statSync(this.filePath(row.digest)).size === row.size_bytes) return;
     } catch { /* 给调用边界一个明确的输入不可用结果。 */ }
     throw new AgentError("CAPABILITY_UNAVAILABLE", "媒体文件缺失或内容校验失败。");
   }
   filePath(digest: string): string { return path.join(this.root, digest); }
+
+  /** 审计第三阶段：清扫未入库的草稿媒体——写入中途崩溃遗留的 tmp-* 临时文件，以及目录中
+   * 存在但 production_blobs 已无行引用的 digest 文件。persist/persistFromFile 的“落盘→登记”
+   * 在同一同步段完成，正常流程不会留下跨事件循环的孤儿；仅删 mtime 超过阈龄的文件，
+   * 保守处理并发窗口。非预期文件名一律不动。
+   *
+   * P1 刚登记的媒体被清理：不再依赖进入扫描时快照的引用集合——每个候选在删除前于同一同步段
+   * 内重查最新引用并重取 mtime（persist 全程同步，同步段内不会交错），扫描启动后新保存的同
+   * 摘要文件不会被按旧快照删掉。 */
+  async sweepOrphans(options: { now?: () => Date; olderThanMs?: number } = {}): Promise<{ files: number; bytes: number }> {
+    const olderThanMs = options.olderThanMs ?? 24 * 60 * 60 * 1000;
+    const cutoff = (options.now ?? (() => new Date()))().getTime() - olderThanMs;
+    let files = 0;
+    let bytes = 0;
+    for (const name of await readdir(this.root)) {
+      const temporary = name.startsWith("tmp-");
+      const digestLike = /^[a-f0-9]{64}$/.test(name);
+      if (!temporary && !digestLike) continue;
+      try {
+        // 同步段：引用复查、mtime 复取与删除原子于本事件循环，杜绝“检查后被保存”的交错。
+        if (digestLike) {
+          const referenced = this.db.prepare("SELECT 1 FROM production_blobs WHERE digest = ? LIMIT 1").get(name);
+          if (referenced) continue;
+        }
+        const file = path.join(this.root, name);
+        const info = statSync(file);
+        if (!info.isFile() || info.mtimeMs >= cutoff) continue;
+        unlinkSync(file);
+        files += 1;
+        bytes += info.size;
+      } catch { /* 并发消失或不可删的文件留待下次扫尾。 */ }
+    }
+    return { files, bytes };
+  }
 }

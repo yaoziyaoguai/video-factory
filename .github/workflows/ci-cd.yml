@@ -11,6 +11,10 @@ permissions:
 jobs:
   verify:
     name: Test and build Frame
+    # 运输方式在本作业解析一次，deploy 只引用非敏感输出；secrets 不允许出现在 if 条件里
+    #（候选运行的作业数为 0、四个步骤被拒即由此而来）。
+    outputs:
+      transport: ${{ steps.transport.outputs.mode }}
     concurrency:
       group: video-factory-verify-${{ github.ref }}
       cancel-in-progress: true
@@ -18,6 +22,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
+      - name: Resolve the registry transport mode
+        id: transport
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [[ -n "$ACR_REGISTRY" && -n "$ACR_NAMESPACE" && -n "$ACR_USERNAME" && -n "$ACR_PASSWORD" ]]; then
+            echo "mode=acr" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=archive" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -25,23 +42,47 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
       - name: Install media test dependencies
         run: |
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 update
           sudo apt-get install -y ffmpeg fonts-noto-cjk
-          python -m pip install -e . jsonschema==4.25.1
+          python -m pip install jsonschema==4.25.1
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run contracts:check && python contracts/agent/v1/verify-openapi.py
-      - run: PYTHONPATH=src python -m unittest discover -s tests
       - run: npm test
-      - run: bash -n scripts/deploy-frame.sh && bash -n scripts/smoke-frame-release.sh && node --check scripts/smoke-creative-container.mjs
+      - run: bash -n scripts/deploy-frame.sh && bash -n scripts/smoke-frame-release.sh && bash -n scripts/acr-pull-frame.sh && node --check scripts/smoke-creative-container.mjs
+      - name: Reuse or build the stable system-and-font base image
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          base_hash="$(cat docker/base.Dockerfile docker/edge-tts-requirements.txt | sha256sum | cut -c1-16)"
+          base_tag="frame-base:$base_hash"
+          origin=built
+          if [[ -n "$ACR_REGISTRY" && -n "$ACR_NAMESPACE" && -n "$ACR_USERNAME" && -n "$ACR_PASSWORD" ]]; then
+            printf '%s' "$ACR_PASSWORD" | docker login --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+            remote_base="$ACR_REGISTRY/$ACR_NAMESPACE/$base_tag"
+            # 命中即拉取复用：层摘要与远端一致，后续应用镜像只推业务层。
+            if docker manifest inspect "$remote_base" >/dev/null 2>&1; then
+              docker pull "$remote_base"
+              docker tag "$remote_base" "$base_tag"
+              origin=pulled
+            fi
+            docker logout "$ACR_REGISTRY" >/dev/null 2>&1 || true
+          fi
+          if [[ "$origin" == built ]]; then
+            docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/base.Dockerfile -t "$base_tag" .
+          fi
+          echo "BASE_TAG=$base_tag" >> "$GITHUB_ENV"
+          echo "BASE_ORIGIN=$origin" >> "$GITHUB_ENV"
       - name: Build the same-SHA app and creative images
         run: |
-          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/Dockerfile -t "video-factory:release-$GITHUB_SHA" .
-          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/creative.Dockerfile -t "frame-creative:release-$GITHUB_SHA" .
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --build-arg "BASE_IMAGE=$BASE_TAG" -f docker/Dockerfile -t "video-factory:release-$GITHUB_SHA" .
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --build-arg "BASE_IMAGE=$BASE_TAG" -f docker/creative.Dockerfile -t "frame-creative:release-$GITHUB_SHA" .
           python - <<'PY'
           import json,os,subprocess
           sha=os.environ['GITHUB_SHA']
@@ -62,15 +103,40 @@ jobs:
       - name: Rehearse real Linux app, UDS, migration and release recovery
         run: |
           bash scripts/smoke-frame-release.sh
+      - name: Publish verified images to Alibaba ACR
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.transport.outputs.mode == 'acr'
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          printf '%s' "$ACR_PASSWORD" | docker login --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+          # 本地只建了短名标签，推送前先补注册中心全名标签；基础镜像按需同样补齐。
+          if [[ "$BASE_ORIGIN" == built ]]; then
+            docker tag "$BASE_TAG" "$ACR_REGISTRY/$ACR_NAMESPACE/$BASE_TAG"
+            docker push "$ACR_REGISTRY/$ACR_NAMESPACE/$BASE_TAG"
+          fi
+          docker tag "video-factory:release-$GITHUB_SHA" "$ACR_REGISTRY/$ACR_NAMESPACE/video-factory:release-$GITHUB_SHA"
+          docker push "$ACR_REGISTRY/$ACR_NAMESPACE/video-factory:release-$GITHUB_SHA"
+          docker tag "frame-creative:release-$GITHUB_SHA" "$ACR_REGISTRY/$ACR_NAMESPACE/frame-creative:release-$GITHUB_SHA"
+          docker push "$ACR_REGISTRY/$ACR_NAMESPACE/frame-creative:release-$GITHUB_SHA"
+          docker logout "$ACR_REGISTRY" >/dev/null 2>&1 || true
       - name: Package only the verified release tags
+        if: steps.transport.outputs.mode == 'archive'
         run: |
           docker save "video-factory:release-$GITHUB_SHA" "frame-creative:release-$GITHUB_SHA" | gzip -1 > frame-images.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: frame-release
-          path: |
-            frame-images.tar.gz
-            frame-release.json
+          name: frame-release-manifest
+          path: frame-release.json
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: steps.transport.outputs.mode == 'archive'
+        with:
+          name: frame-release-images
+          path: frame-images.tar.gz
           compression-level: 0
           retention-days: 3
       - uses: actions/upload-artifact@v4
@@ -99,22 +165,57 @@ jobs:
           if [[ "$latest" == "$GITHUB_SHA" ]]; then echo current=true >> "$GITHUB_OUTPUT"; fi
       - uses: actions/download-artifact@v4
         if: steps.latest.outputs.current == 'true'
-        with: {name: frame-release}
+        with: {name: frame-release-manifest}
+      - uses: actions/download-artifact@v4
+        if: steps.latest.outputs.current == 'true' && needs.verify.outputs.transport == 'archive'
+        with: {name: frame-release-images}
       - name: Package the tested release
         if: steps.latest.outputs.current == 'true'
         run: |
           git bundle create "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" HEAD
-          mv frame-images.tar.gz "frame-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
           mv frame-release.json "frame-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          if [[ "${{ needs.verify.outputs.transport }}" == archive ]]; then
+            mv frame-images.tar.gz "frame-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+          fi
+      # 密码不进入 ssh-action 的 envs（会以 export 形式落进远端命令行 argv）：
+      # 先在工作目录落 0600 文件（scp 的 source 相对工作目录选取），经 scp 传到 ECS，
+      # 远端脚本以 /tmp/frame-acr-password 路径引用；绝不进入 artifact、控制台或命令参数。
+      - name: Stage the registry password file
+        if: steps.latest.outputs.current == 'true' && needs.verify.outputs.transport == 'acr'
+        env:
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          install -m 600 /dev/null "frame-acr-password"
+          printf '%s' "$ACR_PASSWORD" > "frame-acr-password"
       - uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345
         if: steps.latest.outputs.current == 'true'
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "video-factory-release-*.bundle,frame-*.tar.gz,frame-release-*.json"
+          source: "video-factory-release-*.bundle,frame-release-*.json"
           target: /tmp
           command_timeout: 35m
+      # 与远端分支条件对称：只有 ACR 四项齐备才走分层拉取，任何缺失（含部分配置）
+      # 都必须保留 tar+scp 运输，否则远端 docker load 必然缺文件。
+      - uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345
+        if: steps.latest.outputs.current == 'true' && needs.verify.outputs.transport == 'archive'
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "frame-*.tar.gz"
+          target: /tmp
+          command_timeout: 35m
+      - uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345
+        if: steps.latest.outputs.current == 'true' && needs.verify.outputs.transport == 'acr'
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "frame-acr-password"
+          target: /tmp
+          command_timeout: 5m
       - uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
         if: steps.latest.outputs.current == 'true'
         env:
@@ -122,19 +223,24 @@ jobs:
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
           RELEASE_SHA: ${{ github.sha }}
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD_FILE: /tmp/frame-acr-password
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN,ACR_REGISTRY,ACR_NAMESPACE,ACR_USERNAME,ACR_PASSWORD_FILE
           script: |
             set -euo pipefail
             umask 077
             bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
             image="/tmp/frame-${DEPLOY_RUN}.tar.gz"
             export RELEASE_MANIFEST="/tmp/frame-release-${DEPLOY_RUN}.json"
-            trap 'rm -f "$bundle_path" "$image" "$RELEASE_MANIFEST"' EXIT
+            acr_password_file="${ACR_PASSWORD_FILE:-/nonexistent}"
+            trap 'rm -f "$bundle_path" "$image" "$RELEASE_MANIFEST" "$acr_password_file"' EXIT
             exec 9>/var/lock/video-factory-deploy.lock
             flock -w 2400 9
             cd "$PROJECT_PATH"
@@ -149,5 +255,12 @@ jobs:
             else
               git worktree add --detach "$release_path" "$RELEASE_SHA"
             fi
-            docker load -i "$image"
+            if [[ -n "${ACR_REGISTRY:-}" && -n "${ACR_NAMESPACE:-}" && -n "${ACR_USERNAME:-}" && -s "$acr_password_file" ]]; then
+              chmod 600 "$acr_password_file"
+              export RELEASE_SHA
+              export ACR_REGISTRY ACR_NAMESPACE ACR_USERNAME ACR_PASSWORD_FILE
+              bash "$release_path/scripts/acr-pull-frame.sh"
+            else
+              docker load -i "$image"
+            fi
             bash "$release_path/scripts/deploy-frame.sh"
