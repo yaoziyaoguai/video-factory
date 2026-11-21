@@ -52,7 +52,7 @@ export interface CreativeExecutionOptions {
 }
 export interface CreativeFile { path: string; size: number }
 interface SkillFile { path: string; data: string }
-interface RunnerReply { data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; error?: string }
+interface RunnerReply { data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; needed?: boolean; error?: string }
 
 export function creativeWorkspaceId(workspace: CreativeWorkspace | CreativeToolContext): string {
   for (const value of [workspace.conversationId, workspace.executionId, ...(workspace.workId === null ? [] : [workspace.workId])]) {
@@ -237,7 +237,10 @@ export class CreativeRunner {
         if (definition.name !== "read" && context.deliveryClosed) throw new AgentError("DELIVERY_CLOSED", "本请求已交付；修改请发送新的明确请求。");
         if (definition.name !== "read" && context.readOnly) throw new AgentError("FORBIDDEN", "尚未明确作品；当前只允许读取 Skill 资源。");
         const snapshot = await this.skillSnapshot(context.skills);
-        await this.request(context, "skills", snapshot, signal ? { signal } : {});
+        // R11：先探测宿主是否已持有该修订（命中集合在宿主、随卷 GC 与重启失效），
+        // 仅未命中才传整份文件正文；探测请求只有工作区身份与修订摘要。
+        const probe = await this.request(context, "skills", { revision: snapshot.revision, probe: true }, signal ? { signal } : {});
+        if (probe.needed) await this.request(context, "skills", snapshot, signal ? { signal } : {});
         const args = { ...(input as Record<string, unknown>) };
         if (typeof args.path === "string") {
           let file = args.path;

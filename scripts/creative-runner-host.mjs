@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 export const CREATIVE_IMAGE = "frame-creative:pi-1.5-v1";
 export const CREATIVE_LIMITS = { memory: "1g", cpus: "2", pids: "128", tmpfs: "256m" };
 const actions = {
-  skills: ["revision", "files"], read: ["path", "skillsRevision"], write: ["path", "data", "skillsRevision"],
+  skills: ["revision", "files", "probe"], read: ["path", "skillsRevision"], write: ["path", "data", "skillsRevision"],
   access: ["path", "mode", "skillsRevision"], image_type: ["path", "skillsRevision"], mkdir: ["path", "skillsRevision"],
   image: [], list: ["skillsRevision"], execute: ["command", "argv", "timeout", "skillsRevision"],
 };
@@ -113,6 +113,9 @@ export async function createCreativeRunnerHost({
     const names = (await collect(["volume", "ls", "--format", "{{.Name}}", "--filter", `name=${prefix}`])).split("\n").map(name => name.trim()).filter(name => name.startsWith(prefix));
     const at = nowMs();
     for (const name of names) {
+      // TTL 回收只针对 `-s-` Skill 卷（可从修订重建）。`-p-` 工程卷承载可继续编辑的文件，
+      // 闲置时长不构成删除依据——旧实现连它一起按七天回收，超龄工程直接丢失。
+      if (!name.slice(prefix.length).startsWith("s-")) continue;
       if (pool.some(entry => entry.volumes.includes(name))) continue; // 温热容器正挂着
       if (volumeReservations.has(name)) continue; // 在途请求：从受理到响应结束都受保护
       const used = lastUsed.get(name);
@@ -139,7 +142,7 @@ export async function createCreativeRunnerHost({
   const pool = [];
   const acquireWarm = (projectVolume, skillsVolume) => {
     const existing = pool.find(entry => entry.projectVolume === projectVolume && entry.skillsVolume === skillsVolume);
-    if (existing) { touchVolumes(existing.volumes); existing.resetIdle(); return existing; }
+    if (existing) { touchVolumes(existing.volumes); return existing; }
     const name = `frame-creative-${randomUUID()}`;
     // 与一次性容器完全相同的加固参数；stdin 保持打开，容器进程按行循环服务。
     const args = runArgs(name, [`type=volume,src=${projectVolume},dst=/workspace,volume-nocopy`,
@@ -147,7 +150,7 @@ export async function createCreativeRunnerHost({
     args.push("/usr/bin/python3", "-I", "/opt/frame/creative-operations.py");
     const child = docker(args);
     const entry = { name, child, projectVolume, skillsVolume, volumes: [projectVolume, skillsVolume],
-      chain: Promise.resolve(), idleTimer: null, closed: false, buffer: "", waker: null, pending: null };
+      chain: Promise.resolve(), idleTimer: null, closed: false, buffer: "", waker: null, pending: null, inFlight: 0 };
     pool.push(entry);
     entry.shutdown = () => {
       if (entry.closed) return;
@@ -168,7 +171,6 @@ export async function createCreativeRunnerHost({
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => {
       entry.buffer += chunk;
-      entry.resetIdle(); // 大传输期间持续续期，避免空闲计时误杀进行中的请求。
       if (entry.waker) entry.waker();
     });
     child.stderr.on("data", () => { /* 请求级错误经由 stdout 的 error 帧返回；stderr 仅供诊断。 */ });
@@ -187,7 +189,11 @@ export async function createCreativeRunnerHost({
     return entry;
   };
   const callWarm = (entry, input) => {
-    const task = entry.chain.then(() => new Promise((resolve, reject) => {
+    // R10：请求入队即暂停空闲回收——静默传输（如慢卷挂载、大文件读取）期间没有 stdout
+    // 续期信号；只有全部已受理请求完成或失败后才重新起算空闲计时。
+    entry.inFlight += 1;
+    if (entry.idleTimer !== null) { clearTimeout(entry.idleTimer); entry.idleTimer = null; }
+    const run = entry.chain.then(() => new Promise((resolve, reject) => {
       if (entry.closed) { reject(new Error("温热创作容器已关闭。")); return; }
       const waitFor = () => {
         const newline = entry.buffer.indexOf("\n");
@@ -201,6 +207,10 @@ export async function createCreativeRunnerHost({
       try { entry.child.stdin.write(JSON.stringify(input) + "\n"); } catch (error) { entry.shutdown(); reject(error instanceof Error ? error : new Error(String(error))); }
       waitFor(); // 唤醒注册前已完整到达的行（如上一请求失败遗留）。
     }));
+    const task = run.finally(() => {
+      entry.inFlight -= 1;
+      if (entry.inFlight <= 0 && !entry.closed) entry.resetIdle();
+    });
     entry.chain = task.catch(() => {});
     return task;
   };
@@ -230,19 +240,26 @@ export async function createCreativeRunnerHost({
       if (input.action === "access" && !["read", "write"].includes(input.mode)) throw new Error("访问模式无效。");
       if (input.action === "write" && !validBase64(input.data)) throw new Error("文件内容必须为 base64。");
       if (input.action === "skills") {
-        if (typeof input.revision !== "string" || !hashPattern.test(input.revision) || !Array.isArray(input.files)
-          || createHash("sha256").update(JSON.stringify(input.files)).digest("hex") !== input.revision) throw new Error("Skill 副本摘要不匹配。");
-        const seen = new Set();
-        for (const file of input.files) {
-          if (!file || Object.keys(file).some(key => !["path", "data"].includes(key)) || !relative(file.path) || seen.has(file.path)
-            || !validBase64(file.data)) throw new Error("Skill 副本路径或内容无效。");
-          seen.add(file.path);
+        if (input.probe !== true) {
+          if (typeof input.revision !== "string" || !hashPattern.test(input.revision) || !Array.isArray(input.files)
+            || createHash("sha256").update(JSON.stringify(input.files)).digest("hex") !== input.revision) throw new Error("Skill 副本摘要不匹配。");
+          const seen = new Set();
+          for (const file of input.files) {
+            if (!file || Object.keys(file).some(key => !["path", "data"].includes(key)) || !relative(file.path) || seen.has(file.path)
+              || !validBase64(file.data)) throw new Error("Skill 副本路径或内容无效。");
+            seen.add(file.path);
+          }
+        } else if (typeof input.revision !== "string" || !hashPattern.test(input.revision) || typeof input.probe !== "boolean") {
+          throw new Error("Skill 副本探测身份无效。");
         }
       }
       response.setHeader("content-type", "application/x-ndjson");
       if (input.action === "image") { reply({ imageId }); return; }
       const projectVolume = `${volumeNamespace}-p-${input.workspaceId}`;
       const skillsVolume = `${volumeNamespace}-s-${input.workspaceId}-${input.action === "skills" ? input.revision : input.skillsRevision ?? "empty"}`;
+      // R11 探测：只带工作区身份与修订，宿主按现有卷身份和成功集合答复是否需要正文；
+      // 不生成正文、不挂卷、不起容器。缓存归属与失效始终以宿主状态为准。
+      if (input.action === "skills" && input.probe === true) { reply({ needed: !syncedSkills.has(skillsVolume) }); return; }
       // 从这里起两个卷都可能被本请求挂载：到响应结束（含早退路径）都禁止 GC 回收。
       response.on("close", reserveVolumes([projectVolume, skillsVolume]));
       // 同一摘要的 Skill 副本持久在命名卷里：已确认同步过就不再拉容器重传整份内容。
@@ -317,7 +334,6 @@ export async function createCreativeRunnerHost({
       // 文件动作（read/write/access/image_type/mkdir/list）：走温热池，0 次冷启动。
       const entry = acquireWarm(projectVolume, skillsVolume);
       const result = await callWarm(entry, input);
-      entry.resetIdle();
       if (result && result.error !== undefined) { reply({ error: result.error }); return; }
       reply(result ?? {});
     } catch (error) {

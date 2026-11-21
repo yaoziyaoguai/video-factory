@@ -149,6 +149,29 @@ test("同摘要 Skill 副本只在首次同步时拉起容器", async t => {
   assert.equal(host.debugState().syncedSkills.length, 1);
 });
 
+test("R11 探测答复跟随宿主成功集合：未同步 needed，确认后不再需要", async t => {
+  // 探测请求只携带工作区身份与修订摘要，不携带 files；宿主不起容器、不挂卷。
+  const { host, readLog, cleanup } = await createHost({});
+  t.after(cleanup);
+  const files = [{ path: "native-fixture/SKILL.md", data: Buffer.from("---\nname: native-fixture\n---\n正文\n").toString("base64") }];
+  const { createHash } = await import("node:crypto");
+  const revision = createHash("sha256").update(JSON.stringify(files)).digest("hex");
+  const probeInput = { workspaceId: workspaceA, action: "skills", revision, probe: true };
+
+  const beforeSync = await call(host.socketPath, probeInput);
+  assert.equal(beforeSync.body.trim(), '{"needed":true}', "未同步过的修订应答复需要正文");
+  assert.ok((await readLog()).every(argv => argv[0] === "image" && argv[1] === "inspect"), "探测不起容器、不动卷（仅宿主启动的镜像检查）");
+
+  const synced = await call(host.socketPath, { workspaceId: workspaceA, action: "skills", revision, files });
+  assert.equal(synced.body.trim(), "{}");
+  const afterSync = await call(host.socketPath, probeInput);
+  assert.equal(afterSync.body.trim(), '{"needed":false}', "宿主确认同步后探测答复不再需要");
+  assert.equal((await readLog()).filter(isSync).length, 1, "全程只有一次正文同步容器");
+
+  const badProbe = await call(host.socketPath, { workspaceId: workspaceA, action: "skills", revision: "not-a-hash", probe: true });
+  assert.equal(badProbe.status, 400);
+});
+
 test("空闲超过阈值的温热容器被销毁，随后冷重启可用", async t => {
   const { host, readLog, cleanup } = await createHost({ warmIdleMs: 120 });
   t.after(cleanup);
@@ -162,35 +185,43 @@ test("空闲超过阈值的温热容器被销毁，随后冷重启可用", async
   assert.equal((await readLog()).filter(isInit).length, 2, "重启不重复初始化卷");
 });
 
-test("命名卷 GC：使用记录超龄的卷回收，近期使用的卷保留", async t => {
-  const { host, state, readLog, cleanup } = await createHost({ gcIntervalMs: 50, volumeIdleMs: 200 }, {
+test("命名卷 GC：超龄 Skill 卷回收，近期使用的卷与工程卷保留", async t => {
+  // 近期卷的余量必须远大于整测时长：GC 无重入门闸，相邻周期的清扫会并发进行。
+  const { host, state, readLog, cleanup } = await createHost({ gcIntervalMs: 50, volumeIdleMs: 5000 }, {
     prepare: async ({ runtimeDir, workspaceRoot, state }) => {
       const namespace = await namespaceOf(workspaceRoot);
-      const oldVolume = `${namespace}-p-${hex("9")}`;
+      const oldVolume = `${namespace}-s-${hex("9")}-empty`;
       const recentVolume = `${namespace}-s-${hex("8")}-empty`;
+      const oldProjectVolume = `${namespace}-p-${hex("7")}`;
       await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
       await writeFile(path.join(runtimeDir, "creative-volume-usage.json"), JSON.stringify({
         [oldVolume]: Date.now() - 30 * 86400_000, [recentVolume]: Date.now() - 50,
+        [oldProjectVolume]: Date.now() - 30 * 86400_000,
       }));
       await writeFile(state, JSON.stringify({ volumes: {
         [oldVolume]: { createdAt: Date.now() - 30 * 86400_000 },
         [recentVolume]: { createdAt: Date.now() - 29 * 86400_000 },
+        [oldProjectVolume]: { createdAt: Date.now() - 30 * 86400_000 },
       } }));
     },
   });
   t.after(cleanup);
   const namespace = host.volumeNamespace;
-  const oldVolume = `${namespace}-p-${hex("9")}`;
+  const oldVolume = `${namespace}-s-${hex("9")}-empty`;
   const recentVolume = `${namespace}-s-${hex("8")}-empty`;
+  const oldProjectVolume = `${namespace}-p-${hex("7")}`;
   assert.ok(await waitFor(async () => {
     const volumes = (JSON.parse(await readFile(state, "utf8")) as { volumes: Record<string, unknown> }).volumes;
     return !Object.hasOwn(volumes, oldVolume);
-  }), "使用记录超龄的卷应被回收");
+  }), "使用记录超龄的 Skill 卷应被回收");
   const volumes = (JSON.parse(await readFile(state, "utf8")) as { volumes: Record<string, unknown> }).volumes;
   assert.ok(Object.hasOwn(volumes, recentVolume), "近期使用的卷应保留");
+  // 工程卷承载可继续编辑的文件：即便使用记录超龄也不得回收（R3）。
+  assert.ok(Object.hasOwn(volumes, oldProjectVolume), "超龄工程卷必须保留");
   const logs = await readLog();
   assert.ok(logs.some(argv => argv[0] === "volume" && argv[1] === "rm" && argv.at(-1) === oldVolume));
   assert.ok(!logs.some(argv => argv[0] === "volume" && argv[1] === "rm" && argv.at(-1) === recentVolume));
+  assert.ok(!logs.some(argv => argv[0] === "volume" && argv[1] === "rm" && argv.at(-1) === oldProjectVolume), "工程卷绝不进入 rm");
 });
 
 test("无使用记录的卷先领养，绝不按创建年龄立即删除", async t => {
@@ -199,12 +230,12 @@ test("无使用记录的卷先领养，绝不按创建年龄立即删除", async
     prepare: async ({ workspaceRoot, state }) => {
       const namespace = await namespaceOf(workspaceRoot);
       await writeFile(state, JSON.stringify({ volumes: {
-        [`${namespace}-p-${hex("7")}`]: { createdAt: Date.now() - 30 * 86400_000 },
+        [`${namespace}-s-${hex("7")}-empty`]: { createdAt: Date.now() - 30 * 86400_000 },
       } }));
     },
   });
   t.after(cleanup);
-  const volume = `${host.volumeNamespace}-p-${hex("7")}`;
+  const volume = `${host.volumeNamespace}-s-${hex("7")}-empty`;
   assert.ok(await waitFor(() => host.debugState().trackedVolumes.includes(volume)), "无记录的卷应被领养进跟踪表");
   await new Promise(resolve => setTimeout(resolve, 300)); // 足够多轮 GC 周期。
   const volumes = (JSON.parse(await readFile(state, "utf8")) as { volumes: Record<string, unknown> }).volumes;
@@ -216,7 +247,7 @@ test("在途请求的卷受保护：挂载前的 GC 窗口不回收，响应结�
   const { host, state, readLog, cleanup } = await createHost({ gcIntervalMs: 20, volumeIdleMs: 60, warmIdleMs: 600 }, {
     prepare: async ({ runtimeDir, workspaceRoot, state }) => {
       const namespace = await namespaceOf(workspaceRoot);
-      const volume = `${namespace}-p-${workspaceA}`;
+      const volume = `${namespace}-s-${workspaceA}-empty`;
       await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
       await writeFile(path.join(runtimeDir, "creative-volume-usage.json"), JSON.stringify({ [volume]: Date.now() - 3600_000 }));
       await writeFile(state, JSON.stringify({ volumes: { [volume]: { createdAt: Date.now() - 86400_000 } } }));
@@ -228,12 +259,33 @@ test("在途请求的卷受保护：挂载前的 GC 窗口不回收，响应结�
   assert.match(readData(first.body), /^from:frame-creative-[0-9a-f-]+:\/workspace\/a\.txt$/, "延迟窗口内请求仍应成功");
   const afterReply = (await readLog()).filter(argv => argv[0] === "volume" && argv[1] === "rm");
   assert.equal(afterReply.length, 0, "请求在途（含挂载前窗口）期间不得回收其卷");
-  const volume = `${host.volumeNamespace}-p-${workspaceA}`;
+  const volume = `${host.volumeNamespace}-s-${workspaceA}-empty`;
   assert.ok(await waitFor(async () => {
     const volumes = (JSON.parse(await readFile(state, "utf8")) as { volumes: Record<string, unknown> }).volumes;
     return !Object.hasOwn(volumes, volume);
   }), "响应结束后闲置卷照常回收");
   assert.equal(host.debugState().reservedVolumes.length, 0, "响应结束后不应残留保护记录");
+});
+
+test("静默在途读取不触发空闲回收：全部请求结束后才重新计空闲", async t => {
+  // R10 复现参数：读取 850ms 无 stdout 输出，空闲阈值 200ms——修复前计时器会关闭容器、
+  // 请求收到“温热创作容器已关闭”。修复后入队即暂停回收，读回原内容，之后才真正闲置回收。
+  const { host, readLog, cleanup } = await createHost({ warmIdleMs: 200, gcIntervalMs: 60_000 }, {
+    prepare: async ({ workspaceRoot }) => ({
+      shimDelay: { volume: `${await namespaceOf(workspaceRoot)}-p-${workspaceA}`, ms: 850 },
+    }),
+  });
+  t.after(async () => { await new Promise(resolve => setTimeout(resolve, 300)); await cleanup(); });
+  const delayed = await call(host.socketPath, { workspaceId: workspaceA, action: "read", path: "/workspace/read-fixture.txt" });
+  const frame = JSON.parse(delayed.body) as { error?: string; data?: string };
+  assert.ok(!frame.error, `延迟读取必须成功，而非 ${frame.error}`);
+  assert.match(readData(delayed.body), /^from:frame-creative-[0-9a-f-]+:\/workspace\/read-fixture\.txt$/);
+  const again = await call(host.socketPath, { workspaceId: workspaceA, action: "read", path: "/workspace/read-fixture.txt" });
+  assert.match(readData(again.body), /^from:frame-creative-[0-9a-f-]+:\/workspace\/read-fixture\.txt$/, "后续读取照常复用同一容器");
+  assert.equal((await readLog()).filter(isWarm).length, 1, "两次读取不新增容器");
+  // 真正闲置满一个窗口后，容器照常回收。
+  assert.ok(await waitFor(() => host.debugState().warmContainers.length === 0), "真正闲置后容器应回收");
+  assert.ok(await waitFor(async () => (await readLog()).some(argv => argv[0] === "rm" && argv[1] === "--force")), "回收时强制移除容器");
 });
 
 test("skills 同步失败走 stdout 错误帧时不得标记跳过，重试会重新同步", async t => {
