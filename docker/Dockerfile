@@ -11,6 +11,10 @@ COPY . .
 RUN npm run studio:build && npm prune --omit=dev --no-audit --no-fund && mkdir -p apps/studio/node_modules
 
 FROM ${BASE_IMAGE}
+# 应用专属身份与数据目录：只进应用运行时镜像。创作镜像继承基础层但不得携带 /data/factory
+# （G2-1 隔离契约），其容器以数字 uid/gid 运行，无需命名用户。
+RUN groupadd -g 1001 frame && useradd -u 1001 -g frame -d /data/factory frame \
+    && install -d -o frame -g frame /data/factory
 ENV NODE_ENV=production STUDIO_HOST=0.0.0.0 STUDIO_PORT=4317 VIDEO_FACTORY_WORKSPACE=/data/factory HOME=/data/factory
 WORKDIR /app
 COPY --from=build --chown=frame:frame /app/node_modules ./node_modules
