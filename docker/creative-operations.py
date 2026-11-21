@@ -32,13 +32,20 @@ def handle(request):
             if not file.is_relative_to(SKILLS):
                 raise ValueError("Skill 副本路径超出只读资源区。")
             file.parent.mkdir(parents=True, exist_ok=True)
+            # 完整写入同目录临时文件并原子替换：中断只可能留下临时残片，最终路径要么
+            # 没有文件、要么是完整内容；重试不会把半截文件当成已同步（R9）。
+            temporary = file.with_name(file.name + ".partial")
             try:
-                with file.open("xb") as stream:
+                with temporary.open("wb") as stream:
                     stream.write(base64.b64decode(source["data"], validate=True))
-                file.chmod(0o400)
-            except FileExistsError:
-                # 同一内容摘要的只读副本已经写入时直接复用。
-                pass
+                os.chmod(temporary, 0o400)
+                os.replace(temporary, file)
+            except BaseException:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
         return {}
     if action == "list":
         files = []
