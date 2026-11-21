@@ -5,7 +5,7 @@ import type {
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { checkCommandReceipt, storeCommandReceipt } from "./conversation-store.js";
-import { assertPublicEndpointLiteral } from "./network-policy.js";
+import { assertPublicEndpointLiteral, newsNowOriginAllowed } from "./network-policy.js";
 import { validatorFor } from "./validate.js";
 import { canonicalJson, type AgentClock } from "./util.js";
 
@@ -193,6 +193,8 @@ function normalizeNewsNow(input: SaveNewsNowSettings): NormalizedNewsNow {
 }
 
 // 自托管实例地址由用户明确填写；但用户名、查询或锚点不属于实例地址，不接受。
+// 运维在 NEWSNOW_ALLOWED_ORIGINS 显式授权的同网 origin（如 http://vf-newsnow:4444）放行保存，
+// 与请求侧（NewsNowClient）共用同一授权目标；其余地址仍按私网字面量拦截。
 function normalizeNewsNowEndpoint(input: string): string {
   let url: URL;
   try { url = new URL(input.trim()); }
@@ -200,7 +202,7 @@ function normalizeNewsNowEndpoint(input: string): string {
   if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) {
     throw new AgentError("INVALID_INPUT", "NewsNow 服务地址必须是不带用户名、查询参数或锚点的 http(s) 地址。");
   }
-  assertPublicEndpointLiteral(url.hostname);
+  if (!newsNowOriginAllowed(url)) assertPublicEndpointLiteral(url.hostname);
   return url.toString().replace(/\/$/, "");
 }
 

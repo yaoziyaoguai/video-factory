@@ -14,6 +14,8 @@ GitHub 的 `production` 环境使用既有 `SERVER_HOST`、`SERVER_USER`、`SSH_
 
 国内选题榜单按需使用 NewsNow。可复用已有实例；如需同机运行，用 `make setup-local-trends` 启动，生产容器在同一 Docker 网络时填写 `http://vf-newsnow:4444`。宿主机运行的 Frame 可填 `http://127.0.0.1:4444`，独立服务器则填它自己的可达地址。在「免费服务 → 视频选题」选择榜单并允许 Agent 使用。该命令只管理 NewsNow，不会拉起旧抓取服务；正式发布不会自动开启、替换或覆盖这个配置。
 
+NewsNow 出网默认拒绝环回、内网与云元数据地址。同网（`http://vf-newsnow:4444`）或宿主机（`http://127.0.0.1:4444`）这类私网 origin 需运维在 Web 进程环境显式授权：`.env.docker.prod` 设置 `NEWSNOW_ALLOWED_ORIGINS=http://vf-newsnow:4444`（多个用逗号分隔，条目必须是纯 http(s) origin）。保存配置与实际请求共用这份授权目标；未列出的地址维持原有私网限制。本机联调也可用 `STUDIO_DEV=1` 整体放行。
+
 ## 切换、验证与恢复
 
 [发布脚本](../../scripts/deploy-frame.sh)在既有远端 release lock 内核对清单的 SHA、架构、双 image ID 和标签，检查宿主与 Compose 配置。每次部署使用包含 `DEPLOY_RUN` 的独立 Compose 项目名；即使 SHA 相同，也不会由旧项目标签接管被保留的原容器。

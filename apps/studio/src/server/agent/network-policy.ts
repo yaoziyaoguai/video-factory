@@ -5,9 +5,35 @@ import { AgentError } from "./errors.js";
 // 保存配置时同步拦截 IP 字面量，发起请求前异步核对 DNS 解析结果，
 // 防止 Web 进程被配置成探针去访问内网服务或云元数据端点（如 169.254.169.254、100.100.100.200）。
 // 本机联调（README 的 127.0.0.1:4444 榜单服务）用 STUDIO_DEV=1 或 NEWSNOW_ALLOW_PRIVATE_NETWORK=1 显式放行。
+// 同网部署（Docker 网络内的 http://vf-newsnow:4444）按 origin 精确放行，见 newsNowOriginAllowed。
 
 export function privateNetworkAllowed(environment: NodeJS.ProcessEnv = process.env): boolean {
   return environment.STUDIO_DEV === "1" || environment.NEWSNOW_ALLOW_PRIVATE_NETWORK === "1";
+}
+
+/**
+ * C1 同网部署兼容：NEWSNOW_ALLOWED_ORIGINS 是运维显式授权的实例 origin 列表（逗号分隔），
+ * 命中时保存与请求放行同一授权目标；未列出的地址维持私网限制。
+ * 条目必须是纯 http(s) origin（不带路径、查询、锚点或凭据），配置错误直接报错而非静默忽略。
+ */
+export function newsNowOriginAllowed(endpoint: URL, environment: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = environment.NEWSNOW_ALLOWED_ORIGINS?.trim();
+  if (!raw) return false;
+  for (const item of raw.split(",")) {
+    const entry = item.trim();
+    if (!entry) continue;
+    let parsed: URL;
+    try { parsed = new URL(entry); } catch { throw invalidAllowedOrigin(entry); }
+    if ((parsed.protocol !== "https:" && parsed.protocol !== "http:") || parsed.username || parsed.password
+      || parsed.search || parsed.hash || parsed.pathname !== "/") throw invalidAllowedOrigin(entry);
+    if (parsed.origin === endpoint.origin) return true;
+  }
+  return false;
+}
+
+function invalidAllowedOrigin(entry: string): AgentError {
+  return new AgentError("TEMPORARILY_UNAVAILABLE",
+    `NEWSNOW_ALLOWED_ORIGINS 条目「${entry}」无效：只能是 http(s) origin，不带路径、查询、锚点或凭据。`);
 }
 
 function ipv4ToBytes(host: string): Uint8Array | null {

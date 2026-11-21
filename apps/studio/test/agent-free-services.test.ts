@@ -200,6 +200,31 @@ test("T3-01 设置默认、启用/停用、Key 保留与幂等重放（保存零
   assert.equal(a.pexelsCalls.length, 0);
 });
 
+test("C1 保存链路：NEWSNOW_ALLOWED_ORIGINS 命中的同网 origin 可保存，未列出的仍按原策略拒绝", async t => {
+  const previous = process.env.NEWSNOW_ALLOWED_ORIGINS;
+  process.env.NEWSNOW_ALLOWED_ORIGINS = "http://vf-newsnow:4444,http://127.0.0.1:4444";
+  t.after(() => {
+    if (previous === undefined) delete process.env.NEWSNOW_ALLOWED_ORIGINS;
+    else process.env.NEWSNOW_ALLOWED_ORIGINS = previous;
+  });
+  const a = await fixture(t, {});
+  // 127.0.0.1 字面量默认在保存时拒绝（上例覆盖）；命中运维显式授权的 origin 后可保存。
+  const first = saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+    commandId: "cmd-c1-a", expectedRevision: 0, enabled: true, endpoint: "http://127.0.0.1:4444", sourceIds: ["github"], topics: [],
+  });
+  assert.equal((first.settings as NewsNowSettings).endpoint, "http://127.0.0.1:4444");
+  const second = saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+    commandId: "cmd-c1-b", expectedRevision: 1, enabled: true, endpoint: "http://vf-newsnow:4444", sourceIds: ["github"], topics: [],
+  });
+  assert.equal((second.settings as NewsNowSettings).endpoint, "http://vf-newsnow:4444");
+  // origin 精确匹配：端口不同或别的私网字面量未列出，维持既有拒绝。
+  for (const blocked of ["http://127.0.0.1:5555", "http://10.0.0.5:4444"]) {
+    await assert.rejects(async () => saveNewsNowServiceSettings(a.db, systemClock, "local-owner", {
+      commandId: `cmd-c1-bad-${blocked}`, expectedRevision: 2, enabled: true, endpoint: blocked, sourceIds: ["github"], topics: [],
+    }), (error: any) => error.code === "INVALID_INPUT", `应拒绝未授权地址：${blocked}`);
+  }
+});
+
 test("T3-02 图片/视频两种 kind 解析真实形状；候选关联本请求，外部引用拒绝", async t => {
   const a = await fixture(t, {
     photoSearch: { photos: [{
