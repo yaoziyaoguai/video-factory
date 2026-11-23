@@ -25,15 +25,15 @@ Node.js 22 · TypeScript · Fastify · SQLite · React · Pi · FFmpeg · Docker
 ```mermaid
 flowchart TB
   CHAT["对话<br/>选题 · 脚本<br/>画面与声音方案"]
-  DRAFT["草稿区<br/>文稿 · 图片 · 视频 · 字幕"]
+  DRAFT["草稿区<br/>文稿 · 图片<br/>视频 · 字幕"]
   CONFIRMED["确认区<br/>你认可的版本"]
   MAKE["制作<br/>本地免费制作<br/>付费制作"]
-  LIBRARY["作品库<br/>成片 · 采用的素材<br/>工程文件"]
+  LIBRARY["作品库<br/>成片 · 文稿<br/>采用的素材<br/>工程文件"]
 
   CHAT -->|"每一步的产物"| DRAFT
   DRAFT -->|"提意见 · 比较版本"| CHAT
   DRAFT -->|"认可"| CONFIRMED
-  CONFIRMED -->|"明确要求的范围<br/>或确认过的预算"| MAKE
+  CONFIRMED -->|"明确的范围<br/>或确认过的预算"| MAKE
   MAKE -->|"交付新版本"| DRAFT
   DRAFT -->|"定稿并入库"| LIBRARY
   LIBRARY -.->|"引用历史素材与作品"| CHAT
@@ -76,20 +76,20 @@ flowchart TB
 
 ### 系统总览
 
-方框里是应用容器内的组件，框外是反向代理和它依赖的外部服务。
+方框里是应用容器内的组件，框外是反向代理和它依赖的外部服务；虚线表示调用容器外的服务。
 
 ```mermaid
 flowchart TB
-  USER(["创作者的浏览器"]) -->|"HTTPS"| PROXY["反向代理<br/>TLS · 安全响应头<br/>维护开关"]
+  USER(["创作者的浏览器"]) -->|"HTTPS"| PROXY["反向代理<br/>TLS<br/>安全响应头<br/>维护开关"]
 
   subgraph APP[" "]
     ROUTES["HTTP 路由<br/>鉴权 · 校验<br/>快照 · SSE"]
-    SERVICE["AgentService<br/>受理 · 排队 · 停止"]
-    RUNTIME["Pi 运行时与业务工具"]
+    SERVICE["AgentService<br/>受理 · 排队<br/>可随时停止"]
+    RUNTIME["Pi 运行时<br/>与业务工具"]
     DOMAIN["领域服务<br/>修订 · 认可<br/>提案 · 授权"]
     WORKER["制作 Worker"]
     LOCAL["本机处理"]
-    STORAGE[("SQLite 与媒体文件")]
+    STORAGE[("SQLite<br/>与媒体文件")]
   end
 
   PROXY --> ROUTES
@@ -98,10 +98,15 @@ flowchart TB
   DOMAIN --> LOCAL
   DOMAIN --> STORAGE
 
-  RUNTIME -->|"文本模型"| VENDORS["模型与媒体供应商"]
-  WORKER --> VENDORS
-  RUNTIME -->|"素材 · 选题"| FREE["免费来源"]
-  LOCAL -->|"代码执行"| SANDBOX["隔离创作容器"]
+  RUNTIME -.->|"文本模型"| VENDORS["模型与媒体<br/>供应商"]
+  WORKER -.-> VENDORS
+  RUNTIME -.->|"素材 · 选题"| FREE["免费来源"]
+  LOCAL -.->|"代码执行"| SANDBOX["隔离创作容器"]
+
+  %% PAD 是不可见的占位节点，让右下角留白：GitHub 会把缩放按钮叠放在图的右下角
+  FREE ~~~ PAD[" "]
+  style PAD fill:none,stroke:none
+  style APP fill:#818B9812,stroke:#818B98
 
   classDef cUser fill:#E8F1FB,stroke:#2F6DB5,color:#1F2328
   classDef cSvc fill:#EAF5EC,stroke:#2E7D4F,color:#1F2328
@@ -138,6 +143,8 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
+  %% 不镜像底部参与者：GitHub 会把缩放按钮叠放在图的右下角，避免压住右下角
+  %%{init: {"sequence": {"mirrorActors": false}}}%%
   autonumber
   actor ME as 创作者
   participant UI as 工作台页面
@@ -202,10 +209,10 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TB
-  RUN["受理运行，冻结输入<br/>按估价占用额度"] -->|"拆成操作"| ATTEMPT["供应商尝试<br/>每次请求记一行"]
+  RUN["受理并冻结输入<br/>按估价占用额度"] -->|"拆成操作"| ATTEMPT["供应商尝试<br/>每次请求记一行"]
   ATTEMPT -->|"只有供应商上报的用量"| UNVERIFIED["未核实事实<br/>继续占用额度"]
-  UNVERIFIED -->|"列入待对账"| RECON["Worker 定期读取账单"]
-  RECON --> FINAL["权威事实<br/>按实际金额结算"]
+  UNVERIFIED -->|"列入待对账"| RECON["Worker<br/>定期读取账单"]
+  RECON --> FINAL["权威事实<br/>实际金额结算"]
   ATTEMPT -->|"拿到逐笔账单明细"| FINAL
   ATTEMPT -->|"确定没有产生费用"| ZERO["零元结算<br/>当场释放额度"]
 
@@ -226,21 +233,24 @@ Skill 里的代码（自定义渲染、素材处理）不在应用容器里跑�
 ```mermaid
 flowchart TB
   subgraph APP["应用容器"]
-    TOOLS["Pi 的读写与执行工具"] --> CLIENT["CreativeRunner 客户端"]
+    TOOLS["Pi 运行时的<br/>读写与执行工具"] --> CLIENT["CreativeRunner<br/>客户端"]
   end
 
   CLIENT -->|"UDS · 目录只读挂载"| HOST
 
   subgraph HOSTSIDE[" "]
-    HOST["宿主机上的创作宿主<br/>systemd 服务<br/>持有 Docker socket"]
-    WARM["温热容器池<br/>读写文件 · 列目录<br/>默认最多 4 个<br/>空闲 60 秒退出"]
-    ONESHOT["一次性容器<br/>代码执行 · 文件导入导出<br/>Skill 同步，用完即删"]
+    HOST["创作宿主<br/>systemd 服务<br/>在宿主机上"]
+    WARM["温热容器池<br/>读文件 · 列目录<br/>默认最多 4 个<br/>空闲 60 秒退出"]
+    ONESHOT["一次性容器<br/>执行代码<br/>导入导出文件<br/>同步 Skill<br/>用完即删"]
     VOLUME[("命名卷<br/>工程卷可写<br/>Skill 卷只读<br/>7 天未用回收")]
     HOST --> WARM
     HOST --> ONESHOT
     WARM --- VOLUME
     ONESHOT --- VOLUME
   end
+
+  style APP fill:#818B9812,stroke:#818B98
+  style HOSTSIDE fill:#818B9812,stroke:#818B98
 
   classDef cAgent fill:#F3ECFB,stroke:#7A4FBF,color:#1F2328
   classDef cSvc fill:#EAF5EC,stroke:#2E7D4F,color:#1F2328
@@ -282,7 +292,7 @@ erDiagram
   production_runs ||--o{ production_operations : "拆成操作"
   production_operations ||--o{ production_attempts : "每次尝试"
   production_attempts ||--o{ production_attempt_outputs : "产出"
-  production_blobs ||--o{ production_attempt_outputs : "被产出引用"
+  production_attempt_outputs }o--|| production_blobs : "引用"
   production_attempts ||--o{ ledger_observations : "费用观测"
   production_attempts ||--o| pending_reconciliation : "待对账"
 ```
@@ -344,13 +354,15 @@ STUDIO_DEV=1 STUDIO_HOST=127.0.0.1 STUDIO_PORT=4478 npm run studio:start
 ```mermaid
 flowchart TB
   subgraph VERIFY["GitHub Actions · verify"]
-    PR["面向 main 的 PR"] -->|"只验证"| START["安装依赖并审计<br/>contracts:check<br/>npm test"]
+    PR["PR 面向 main"] -->|"只验证"| START["安装依赖并审计<br/>契约检查<br/>npm test"]
     PUSH["推送到 main"] -->|"验证"| START
-    START --> BASE["基础镜像 frame-base<br/>按内容哈希打标签<br/>命中即复用"]
-    BASE --> BUILD["同一提交构建两个镜像<br/>video-factory<br/>frame-creative"]
-    BUILD --> REHEARSAL["启动与预演<br/>无网络无凭据启动<br/>原生 UDS · 迁移<br/>发布与恢复"]
-    REHEARSAL --> SHIP["保存镜像与清单<br/>或推送到容器镜像仓库"]
+    START --> BASE["基础镜像<br/>frame-base<br/>内容哈希作标签<br/>命中即复用"]
+    BASE --> BUILD["同一提交构建<br/>两个应用镜像<br/>video-factory<br/>frame-creative"]
+    BUILD --> REHEARSAL["启动与预演<br/>无网络无凭据<br/>UDS · 迁移<br/>发布与恢复"]
+    REHEARSAL --> SHIP["保存镜像与清单<br/>或推送到<br/>容器镜像仓库"]
   end
+
+  style VERIFY fill:#818B9812,stroke:#818B98
 
   SHIP -->|"只有 main 继续"| DEPLOY["在服务器上部署"]
 
@@ -370,13 +382,13 @@ flowchart TB
 flowchart TB
   subgraph SERVER["服务器 · Docker"]
     direction TB
-    NGINX["Nginx<br/>公网唯一入口<br/>TLS · 安全响应头"]
-    APP["应用容器<br/>Node.js 22 · uid 1001<br/>只读根 · 禁止提权"]
+    NGINX["Nginx<br/>公网唯一入口<br/>TLS<br/>安全响应头"]
+    APP["应用容器<br/>Node.js 22<br/>uid 1001<br/>只读根文件系统<br/>禁止提权"]
     RUNNER["创作宿主<br/>systemd 服务"]
     CREATIVE["创作容器<br/>禁网 · 只读根"]
-    OUT["出网按目标分流<br/>国内模型与存储直连<br/>境外服务走 VPN 出口"]
-    NEWSNOW["NewsNow，可选<br/>选题榜单"]
-    DATA[("外部数据卷<br/>数据库与媒体文件<br/>Pi 会话记录")]
+    OUT["出网按目标分流<br/>国内模型与存储<br/>直连，境外服务<br/>走 VPN 出口"]
+    NEWSNOW["NewsNow<br/>可选的选题榜单"]
+    DATA[("外部数据卷<br/>数据库<br/>媒体文件<br/>Pi 会话记录")]
     CREATIVE_VOL[("创作命名卷<br/>7 天未用回收")]
     BACKUP[("加密备份<br/>每次发布前生成")]
 
@@ -388,7 +400,12 @@ flowchart TB
     APP ---|"读写"| DATA
     CREATIVE --- CREATIVE_VOL
     DATA -->|"发布脚本"| BACKUP
+    %% PAD 是不可见的占位节点，让右下角留白：GitHub 会把缩放按钮叠放在图的右下角
+    CREATIVE_VOL ~~~ PAD[" "]
   end
+
+  style PAD fill:none,stroke:none
+  style SERVER fill:#818B9812,stroke:#818B98
 
   classDef cUser fill:#E8F1FB,stroke:#2F6DB5,color:#1F2328
   classDef cSvc fill:#EAF5EC,stroke:#2E7D4F,color:#1F2328
@@ -408,12 +425,12 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  LOCK["取发布锁<br/>核对提交与两个镜像"] --> MAINT["进入维护<br/>业务请求 503<br/>健康检查照常"]
-  MAINT --> QUIET["确认没有排队或在途任务<br/>停旧应用，再复核队列"]
-  QUIET --> BACKUP["加密备份整个数据卷<br/>实际解密校验后继续"]
-  BACKUP --> START["启动新版本<br/>迁移数据库<br/>安装同版本创作宿主"]
-  START --> CHECK["验收<br/>真实读写 · PNG · MP4<br/>隔离 · 健康 · 匿名 401"]
-  CHECK -->|"通过"| DONE["提交成功标记，恢复入口"]
+  LOCK["取发布锁<br/>核对提交与镜像"] --> MAINT["进入维护<br/>业务请求 503<br/>健康检查照常"]
+  MAINT --> QUIET["确认没有<br/>排队或在途任务<br/>停旧应用<br/>再复核队列"]
+  QUIET --> BACKUP["加密备份<br/>整个数据卷<br/>实际解密校验<br/>通过后继续"]
+  BACKUP --> START["启动新版本<br/>迁移数据库<br/>安装同版本<br/>创作宿主"]
+  START --> CHECK["验收：真实读写<br/>PNG · MP4<br/>隔离 · 健康<br/>匿名 401"]
+  CHECK -->|"通过"| DONE["提交成功标记<br/>恢复入口"]
   CHECK -->|"失败"| RESTORE["从备份恢复<br/>重开原来的容器"]
 
   classDef cOps fill:#E6F4F5,stroke:#2A7F86,color:#1F2328
