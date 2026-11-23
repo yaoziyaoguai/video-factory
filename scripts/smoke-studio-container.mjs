@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { request as httpRequest } from "node:http";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,9 +49,18 @@ try {
   for (const route of ["/bootstrap", "/settings/model-connections"]) {
     assert.equal((await fetch(base + "/api/agent/v1" + route)).status, 401);
   }
-  const login = await fetch(base + "/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json",Origin:"https://frame.example",Host:"frame.example","x-video-factory-request":"studio"}, body:JSON.stringify({username:"container-smoke",password:"isolated-smoke-only"})});
+  // 登录入口按 Host 白名单校验，而 Node 的 fetch 会静默丢弃自定义 Host 头，所以这里用 http.request 显式携带：
+  // 与反代后的线上一致，Host 是公网主机名，连接的是回环地址。
+  const login = await new Promise((resolve, reject) => {
+    const req = httpRequest(base + "/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json",Origin:"https://frame.example",Host:"frame.example","x-video-factory-request":"studio"}}, res => {
+      res.resume();
+      res.on("end", () => resolve({status:res.statusCode, setCookie:res.headers["set-cookie"]}));
+    });
+    req.on("error", reject);
+    req.end(JSON.stringify({username:"container-smoke",password:"isolated-smoke-only"}));
+  });
   assert.equal(login.status, 200);
-  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const cookie = login.setCookie[0].split(";")[0];
   const skills = await fetch(base + "/api/agent/v1/settings/skills", { headers: {cookie} });
   assert.equal(skills.status, 200);
   assert.ok((await skills.json()).skills.some(s => s.id === "travel-prompt-kit"), "Missing built-in skill in the production image");
