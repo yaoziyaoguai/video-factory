@@ -11,7 +11,7 @@ import { it } from "node:test";
 import { probeAudioFile, probeImageFile } from "../src/server/agent/media-probe.js";
 import { sweepAttemptFiles } from "../src/server/agent/media-port-support.js";
 import { ImageGenerationPort } from "../src/server/agent/image-generation.js";
-import { OpenAISpeechPort } from "../src/server/agent/openai-speech.js";
+import { normalizeTranscript, OpenAISpeechPort, transcriptMismatch } from "../src/server/agent/openai-speech.js";
 import { ArkMediaPort, RealMediaGateway } from "../src/server/agent/ark-media.js";
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { imageBinding, openaiImageProfile, openaiSpeechBinding, openaiSpeechProfile } from "../src/server/agent/media-config.js";
@@ -119,9 +119,9 @@ function imageOperation(binding: ModelBinding): Extract<OperationSpec, { kind: "
   };
 }
 
-function speechOperation(binding: ModelBinding): OperationSpec {
+function speechOperation(binding: ModelBinding, text = SPEECH_TEXT): OperationSpec {
   return {
-    operationId: "op-speech", outputSlot: "narration", inputs: [{ kind: "text", text: SPEECH_TEXT }],
+    operationId: "op-speech", outputSlot: "narration", inputs: [{ kind: "text", text }],
     maxCreateAttempts: 1, quotePerAttempt: { currency: "CNY", amountMinor: 35 }, priceKind: "estimate",
     kind: "speech", model: binding, parameters: { voiceId: "marin", format: "mp3" },
   };
@@ -151,7 +151,7 @@ async function imageCase(t: { after: (fn: () => Promise<void> | void) => void },
 type SpeechResolve = (binding: ModelBinding) => { profile: ReturnType<typeof openaiSpeechProfile>; apiKey: string | null } | null;
 
 async function speechCase(t: { after: (fn: () => Promise<void> | void) => void }, hub: FakeRealtimeHub,
-  options: { resolve?: SpeechResolve; sessionTimeoutMs?: number; ffmpegPath?: string } = {}) {
+  options: { resolve?: SpeechResolve; sessionTimeoutMs?: number; ffmpegPath?: string; text?: string } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "openai-speech-port-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const db = openAgentDatabase(directory);
@@ -166,7 +166,7 @@ async function speechCase(t: { after: (fn: () => Promise<void> | void) => void }
     ...(options.sessionTimeoutMs !== undefined ? { sessionTimeoutMs: options.sessionTimeoutMs } : {}),
     ...(options.ffmpegPath !== undefined ? { ffmpegPath: options.ffmpegPath } : {}),
   });
-  const { input, query } = seedProviderAttempt(db, speechOperation(binding), binding);
+  const { input, query } = seedProviderAttempt(db, speechOperation(binding, options.text), binding);
   return { db, blobs, port, input, query, hub, directory, binding, profile };
 }
 
@@ -477,6 +477,67 @@ it("speech: 转写不符 → 内容未通过，不发布 blob、不落文件", a
   assert.equal(attemptOutput(db, "attempt")?.exit_kind, "failed");
   assert.equal(blobCount(db), 0);
   assert.ok(!existsSync(path.join(directory, "work", "attempt")));
+});
+
+it("speech: 转写归一把年份、百分比、万亿、小数的各种读法归到同一写法", () => {
+  const same: Array<[string, string]> = [
+    ["二零二六年十一月", "2026年11月"], ["二〇二六年", "2026年"], ["一九九八年", "1998年"],
+    ["提升了百分之五十", "提升了50%"], ["百分之十五点五", "15.5%"], ["百分之百", "100%"],
+    ["一点二万人", "1.2万人"], ["三千万用户", "3千万用户"], ["三点五亿", "350000000"], ["十亿", "10亿"],
+    ["三点一四", "3.14"], ["零点五秒", "0.5秒"], ["ＡＩ视频，GPT五", "ai视频gpt5"],
+  ];
+  for (const [spoken, written] of same) assert.equal(normalizeTranscript(spoken), normalizeTranscript(written), spoken);
+  // 小数点只在两个数字之间保留：三点一四与三百一十四是不同的数。
+  assert.equal(normalizeTranscript("三点一四"), "3.14");
+  assert.equal(normalizeTranscript("三百一十四"), "314");
+  // 词语里的“点”不是小数点，不参与数字归一。
+  assert.equal(normalizeTranscript("点击按钮，一点点放大。"), "点击按钮1点点放大");
+});
+
+it("speech: 转写核验只放过长句里的零星同音异形；数字不同、短句有出入或偏差超过一成半都不通过", () => {
+  const steady = "这是一段用于字幕对齐测试的旁白，请保持语速平稳。";
+  const growth = "到二零二六年底，我们的AI视频效率提升了百分之五十。";
+  const halved = "我们在二零二六年把制作周期缩短了一半并且保持画质不变。";
+  assert.equal(transcriptMismatch(steady, steady), null);
+  // 同音异形（断/段）与数字的另一种读法都算一致。
+  assert.equal(transcriptMismatch("这是一断用于字幕对齐测试的旁白，请保持语速平稳。", steady), null);
+  assert.equal(transcriptMismatch("到2026年底，我们的AI视频效率提升了50%。", growth), null);
+  // 规约长度 26 最多容忍 3 处差异，恰好 3 处（缩减/而且）仍算一致，再多就不通过。
+  assert.equal(transcriptMismatch("我们在二零二六年把制作周期缩减了一半而且保持画质不变。", halved), null);
+  // 差异说明只有规约长度，不回显旁白或转写原文。
+  assert.equal(transcriptMismatch("到2025年底，我们的AI视频效率提升了50%。", growth), "旁白规约长度 21，转写规约长度 21");
+  assert.equal(transcriptMismatch("我们在二零二六年把制作周期缩减了一半而且保持画面优秀。", halved), "旁白规约长度 26，转写规约长度 26");
+  // 短于 12 字只接受逐字相同。
+  assert.equal(transcriptMismatch("欢迎收看本期节目还有一句。", "欢迎收看本期节目。"), "旁白规约长度 8，转写规约长度 12");
+  assert.equal(transcriptMismatch("三点一五九。", "三百一十五点九。"), "旁白规约长度 5，转写规约长度 5");
+});
+
+it("speech: 转写里的数字换一种读法、长句只有零星同音异形 → 照常验收发布", async t => {
+  const cases: Array<[string, string]> = [
+    ["到二零二六年底，我们的AI视频效率提升了百分之五十。", "到2026年底，我们的AI视频效率提升了50%。"],
+    ["这是一段用于字幕对齐测试的旁白，请保持语速平稳。", "这是一断用于字幕对齐测试的旁白，请保持语速平稳。"],
+  ];
+  for (const [narration, transcript] of cases) {
+    const { db, port, input } = await speechCase(t, new FakeRealtimeHub({ audioSeconds: 1, transcript }), { text: narration });
+    const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
+    assert.equal(observation.state, "succeeded", narration);
+    assert.match(observation.message ?? "", /音频 1\.0 秒/, narration);
+    assert.equal(blobCount(db), 1, narration);
+  }
+});
+
+it("speech: 转写读错数字或与旁白偏差过大 → 内容未通过，不发布", async t => {
+  const cases: Array<[string, string]> = [
+    ["到二零二六年底，我们的AI视频效率提升了百分之五十。", "到2025年底，我们的AI视频效率提升了50%。"],
+    ["这是一段用于字幕对齐测试的旁白，请保持语速平稳。", "这是一段用于字幕对齐测试的旁白，语速请放慢一些再录。"],
+  ];
+  for (const [narration, transcript] of cases) {
+    const { db, port, input } = await speechCase(t, new FakeRealtimeHub({ audioSeconds: 1, transcript }), { text: narration });
+    const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
+    assert.equal(observation.state, "failed", narration);
+    assert.match(observation.message ?? "", /内容未通过：供应商转写与旁白不一致（旁白规约长度 \d+，转写规约长度 \d+），不发布该音频。/, narration);
+    assert.equal(blobCount(db), 0, narration);
+  }
 });
 
 it("speech: incomplete / 会话内 error / 握手 401 各归确定 failed", async t => {

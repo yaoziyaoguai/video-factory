@@ -22,8 +22,9 @@ import { speechText } from "../../shared/agent/markdown.js";
 // wss <baseUrl>/realtime?model=<id>（Authorization 头）→ session.created → session.update（realtime、
 // marin、audio/pcm 24k、max_output_tokens、reasoning effort）→ session.updated → conversation.item.create
 // + response.create → 收集 output_audio.delta（base64 PCM16/24k/mono）与转写 delta → response.done 必须
-// completed。PCM 经 FFmpeg 转 MP3（24kHz 单声道）后按冻结规格验收；转写与旁白只差空白/标点才算通过，
-// 不符不发布 blob。billing 恒 null；实际用量写入观测消息。该接口没有可外查的任务身份：query/cancel
+// completed。PCM 经 FFmpeg 转 MP3（24kHz 单声道）后按冻结规格验收；转写经数字读法归一后与旁白
+// 一致才算通过（长句容忍零星同音异形差异），不符不发布 blob。billing 恒 null；实际用量写入观测消息。
+// 该接口没有可外查的任务身份：query/cancel
 // 只读本地文件与收据，缺证据稳定 unknown。signal：未发出即停止 → cancelled；已生成后停止 → response.cancel。
 // 结算例外：生成指令（response.create）确定未发出的终态签发 0 元结算，见 withZeroCostBilling。
 
@@ -126,8 +127,9 @@ export class OpenAISpeechPort implements MediaExecutionPort {
       if (durationMs > profile.speech.maxDurationMs) {
         return this.nonCompliant(input.attemptId, `音频时长 ${(durationMs / 1000).toFixed(1)}s 超过本配置 120s 验收上限。`);
       }
-      if (!transcriptMatches(outcome.transcript, text)) {
-        return this.nonCompliant(input.attemptId, "内容未通过：供应商转写与旁白不一致，不发布该音频。");
+      const mismatch = transcriptMismatch(outcome.transcript, text);
+      if (mismatch) {
+        return this.nonCompliant(input.attemptId, `内容未通过：供应商转写与旁白不一致（${mismatch}），不发布该音频。`);
       }
       return withAttemptFiles(this.db, this.options.workRoot, input.attemptId, () => this.settlePcm(input.attemptId, pcmFile, outcome.usage));
     });
@@ -438,10 +440,94 @@ function readUsage(raw: unknown): { inputTokens:number;outputTokens:number }|nul
   return {inputTokens:usage.input_tokens,outputTokens:usage.output_tokens};
 }
 
-/** 转写与旁白只忽略空白与标点后逐字符比对；其余任何差异都算内容不符。 */
-export function transcriptMatches(transcript: string, narration: string): boolean {
-  const normalize = (value: string): string => value.replace(/[\s\p{P}]/gu, "");
-  return normalize(transcript) === normalize(narration);
+// —— 转写核验 ——
+
+const DIGITS = new Map([
+  ["零", "0"], ["〇", "0"], ["一", "1"], ["二", "2"], ["两", "2"], ["三", "3"], ["四", "4"],
+  ["五", "5"], ["六", "6"], ["七", "7"], ["八", "8"], ["九", "9"],
+]);
+// 十进制位数：进位读法的单位，也是数字后跟单位时的缩写位数（1.2万、3千万、一点二万）。
+const PLACES = new Map([["十", 1], ["百", 2], ["千", 3], ["万", 4], ["亿", 8]]);
+// 短于这个长度只接受逐字相同；更长时允许的编辑距离占比。
+const FUZZY_MIN_LENGTH = 12;
+const FUZZY_MAX_DISTANCE_RATIO = 0.15;
+
+const NUMERAL = "[零〇一二两三四五六七八九十百千万亿]";
+const ARABIC_SCALED = /(\d+)(?:\.(\d+))?([十百千万亿]+)/g;
+// 小数点后必须紧跟数字才算小数：词语里的“点”（点击、一点点）不参与数字归一。
+const CHINESE_DECIMAL = new RegExp(`(${NUMERAL}+)点([零〇一二两三四五六七八九]+)([十百千万亿]?)`, "g");
+const CHINESE_INTEGER = new RegExp(`${NUMERAL}+`, "g");
+
+const digitwise = (run: string): string => [...run].map(char => DIGITS.get(char)!).join("");
+
+/** 整数位与小数位拼成数字串，按单位右移小数点并补零：1.2万 / 一点二万 → 12000，三点一四 → 3.14。 */
+function scaledDigits(integer: string, fraction: string, places: number): string {
+  const digits = integer + fraction, point = integer.length + places;
+  return point >= digits.length ? digits.padEnd(point, "0") : `${digits.slice(0, point)}.${digits.slice(point)}`;
+}
+
+/** 进位读法：一万二千 → 12000，一千零一十 → 1010；没有进位字时按逐位读法（二零二六 → 2026）。 */
+function chineseInteger(run: string): string {
+  if (![...run].some(char => PLACES.has(char))) return digitwise(run);
+  let total = 0, section = 0, digit = 0;
+  for (const char of run) {
+    const value = DIGITS.get(char);
+    if (value !== undefined) { digit = Number(value); continue; }
+    const places = PLACES.get(char)!;
+    if (places < 4) section += (digit || 1) * 10 ** places;
+    else { total += ((section + digit) || 1) * 10 ** places; section = 0; }
+    digit = 0;
+  }
+  return String(total + section + digit);
+}
+
+/**
+ * 转写核验的共同形态：全半角与大小写归一，数字的各种读法（逐位、进位、小数、万亿、百分之）与阿拉伯
+ * 数字归到同一写法，其余只保留字母与数字。旁白与供应商转写各过一遍后应当逐字相同。
+ * 小数点只在两个数字之间保留：三点一四与三百一十四是不同的数，句读里的点不影响比对。
+ */
+export function normalizeTranscript(value: string): string {
+  return value.normalize("NFKC").toLowerCase()
+    .replaceAll("百分之", "%")
+    .replace(ARABIC_SCALED, (_match, integer: string, fraction: string | undefined, units: string) =>
+      scaledDigits(integer, fraction ?? "", [...units].reduce((places, unit) => places + PLACES.get(unit)!, 0)))
+    .replace(CHINESE_DECIMAL, (_match, integer: string, fraction: string, unit: string) =>
+      scaledDigits(chineseInteger(integer), digitwise(fraction), unit ? PLACES.get(unit)! : 0))
+    .replace(CHINESE_INTEGER, run => chineseInteger(run))
+    .replace(/[^\p{L}\p{N}.]+/gu, "")
+    .replace(/(?<!\d)\.|\.(?!\d)/g, "");
+}
+
+function editDistanceWithin(a: string, b: string, limit: number): boolean {
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i++) {
+    const current = new Array<number>(b.length + 1);
+    current[0] = i;
+    let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + Number(a[i - 1] !== b[j - 1]));
+      if (current[j]! < best) best = current[j]!;
+    }
+    if (best > limit) return false;
+    previous = current;
+  }
+  return previous[b.length]! <= limit;
+}
+
+/**
+ * 返回 null 表示转写与旁白一致；否则是可直接展示的差异说明（只有规约长度，不回显旁白或转写原文）。
+ * 长句里同音异形字造成的零星差异不算内容不符，但数字串必须完全一致：年份、金额读错不能被相似度放过。
+ */
+export function transcriptMismatch(transcript: string, narration: string): string | null {
+  const spoken = normalizeTranscript(transcript), written = normalizeTranscript(narration);
+  if (spoken === written) return null;
+  const difference = `旁白规约长度 ${written.length}，转写规约长度 ${spoken.length}`;
+  const longest = Math.max(spoken.length, written.length), shortest = Math.min(spoken.length, written.length);
+  const limit = Math.floor(longest * FUZZY_MAX_DISTANCE_RATIO);
+  if (shortest < FUZZY_MIN_LENGTH || longest - shortest > limit) return difference;
+  // 归一后小数点只留在数字之间，所以数字与小数点的连续串就是完整的数。
+  if (spoken.match(/[\d.]+/g)?.join(" ") !== written.match(/[\d.]+/g)?.join(" ")) return difference;
+  return editDistanceWithin(spoken, written, limit) ? null : difference;
 }
 
 function realtimeUrl(profile: OpenAISpeechProfile): string {

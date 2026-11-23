@@ -21,6 +21,7 @@ export interface FakeRealtimeOptions {
   audioSeconds?: number;
   toneHz?: number;
   usage?: { input_tokens: number; output_tokens: number };
+  transcript?: string;     // 供应商回传的转写；不指定时逐字回显旁白
 }
 
 export interface FakeRealtimeSession {
@@ -84,7 +85,7 @@ export class FakeRealtimeHub {
           case "response.create": {
             const pcm = tonePcm(this.options.audioSeconds!, this.options.toneHz);
             const chunks = Math.ceil(pcm.length / 24_000);
-            const transcript = session.itemText ?? "";
+            const transcript = this.options.transcript === undefined ? (session.itemText ?? "") : this.options.transcript;
             const mismatch = this.options.mode === "transcriptMismatch";
             if (this.options.mode === "serverError") {
               schedule(() => emit({ type: "error", error: { type: "server_error_simulation" } }));
