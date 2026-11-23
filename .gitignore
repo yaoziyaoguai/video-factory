@@ -28,13 +28,13 @@ docs/*
 docs/agent/*
 !docs/agent/architecture.md
 !docs/agent/product-design.md
+!docs/agent/audit-execution-progress.md
 !docs/guides/
 docs/guides/*
 !docs/guides/deployment.md
-!docs/过期文档/
-docs/过期文档/本机资料/
 apps/studio/test/evidence/
 contracts/agent/v1/evidence/
+.codex-attachments/
 
 # tsc 增量构建缓存，不入库。
 *.tsbuildinfo
