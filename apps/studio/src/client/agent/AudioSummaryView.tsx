@@ -7,14 +7,15 @@ type SourceDetails = Pick<MediaProvenance, "provider" | "sourceUrl" | "creatorNa
 export function MediaSourceDetails({ source }: { source: SourceDetails }) {
   return <div className="agent-source-details">
     <div className="agent-batch-source">
-      <span>{MATERIAL_PROVIDER_LABELS[source.provider] ?? "来源未注明"} · {source.creatorName || "作者未注明"}</span>
-      <a href={source.sourceUrl} target="_blank" rel="noreferrer">原素材</a>
+      <span>{MATERIAL_PROVIDER_LABELS[source.provider]}{source.creatorName ? ` · ${source.creatorName}` : source.provider !== "user_upload" ? " · 作者未注明" : ""}</span>
+      <a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.provider === "user_upload" ? "上传原件" : "原素材"}</a>
       {source.creatorUrl ? <a href={source.creatorUrl} target="_blank" rel="noreferrer">作者主页</a> : null}
-      <a href={source.licenseUrl} target="_blank" rel="noreferrer">{source.licenseName || "许可"}</a>
+      {source.licenseUrl ? <a href={source.licenseUrl} target="_blank" rel="noreferrer">{source.licenseName || "许可"}</a>
+        : source.licenseName ? <span>{source.licenseName}</span> : null}
       {source.licenseVersion ? <span>许可版本 {source.licenseVersion}</span> : null}
     </div>
     {source.usageScope ? <p className="agent-source-scope">适用范围：{source.usageScope}</p> : null}
-    {source.acquiredAt ? <small>采用于 {new Date(source.acquiredAt).toLocaleString("zh-CN")}</small> : null}
+    {source.acquiredAt ? <small>{source.provider === "user_upload" ? "上传于" : "采用于"} {new Date(source.acquiredAt).toLocaleString("zh-CN")}</small> : null}
     {source.attributionText ? <label className="agent-source-attribution">发布时请保留署名
       <textarea aria-label="发布署名" readOnly rows={3} value={source.attributionText} />
     </label> : null}
@@ -46,7 +47,7 @@ export function AudioSummaryView({ summary, title = "声音方案" }: { summary:
         <p>选用原曲 {seconds(music.sourceStartMs)}–{seconds(music.sourceStartMs + music.sourceDurationMs)} 秒；成片 {seconds(music.timelineStartMs)}–{seconds(music.timelineStartMs + music.playDurationMs)} 秒 · {music.repeat ? "循环所选区间" : "不循环"}</p>
         <p>{music.gain === 0 ? "音乐静音" : `音乐音量 ${volume(music.gain)}`} · 淡入 {seconds(music.fadeInMs)} 秒 · 淡出 {seconds(music.fadeOutMs)} 秒{music.gain > 0 && music.duckUnderNarration ? " · 配音时降低音乐" : ""}</p>
         <MediaSourceDetails source={music.source} />
-        {!music.source.attributionText ? <p className="agent-stage-muted">署名内容未记录，请核对来源许可。</p> : null}
+        {!music.source.attributionText && music.source.provider !== "user_upload" ? <p className="agent-stage-muted">署名内容未记录，请核对来源许可。</p> : null}
       </> : <p>未使用音乐。</p>}
     </div>
     <div className="agent-audio-role">

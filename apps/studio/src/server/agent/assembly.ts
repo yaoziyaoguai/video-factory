@@ -1,7 +1,9 @@
+import { MediaRetention, mediaRetentionDays } from "./media-retention.js";
 import { initializeProviderConnections } from "./provider-connections.js";
 import { initializeTextModelSettings } from "./text-model-settings.js";
 import { SkillPackages } from "./skill-packages.js";
 import path from "node:path";
+import { BillingStatements } from "./billing-statements.js";
 import { openAgentDatabase, type AgentDatabase } from "./db.js";
 import { EventHub } from "./event-log.js";
 import { PiRuntimeHost, type PiHostOptions } from "./pi-runtime.js";
@@ -78,6 +80,7 @@ export interface AgentRuntime {
   service: AgentService;
   host: PiRuntimeHost;
   database: AgentDatabase;
+  retention: MediaRetention;
   registry: ConversationRunnerRegistry;
   production?: ProductionService;
   worker?: ProductionWorker;
@@ -99,6 +102,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
   }
   const port = channel?.port;
   const catalog = channel?.catalog ?? options.catalog ?? (() => ({}));
+  const retention = new MediaRetention(db, blobs, clock, mediaRetentionDays(process.env.FRAME_MEDIA_RETENTION_DAYS));
   const production = new ProductionService(db, clock, hub, catalog, blobs, options.media?.crash, Boolean(port));
   const worker = port ? new ProductionWorker(db, clock, hub, blobs, port, {
     ...(options.media?.pollMs !== undefined ? { pollMs: options.media.pollMs } : {}),
@@ -106,7 +110,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
     ...(options.media?.crash ? { crash: options.media.crash } : {}),
   }) : undefined;
   const skillsRoot = options.skillsRoot;
-  const skillPackages = new SkillPackages(options.dataDir, skillsRoot);
+  const skillPackages = new SkillPackages(options.dataDir, skillsRoot, options.creative?.runner);
   await skillPackages.initialize();
   const host = new PiRuntimeHost({ dataDir: options.dataDir, skillsRoot, skillPackages, ...options.host,
     ...(options.creative ? { creativeRunner: options.creative.runner } : {}),
@@ -126,9 +130,12 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
     ? (ownerId: string, conversationId: string, workId: string) =>
         ensureLibraryInputs(db, blobs, clock, { runner: options.creative!.runner, workspace: editingWorkspace }, ownerId, conversationId, workId)
     : undefined;
+  // 媒体型号只在保存供应商配置时变化。生产端口仍按请求的冻结绑定解析。
+  let modelView = channel?.models() ?? [];
+  const refreshMediaModels = () => { modelView = channel?.models() ?? []; };
   const registry = new ConversationRunnerRegistry({
-    db, clock, hub, host,
-    ...(channel ? { mediaModels: channel.models } : {}),
+    db, clock, hub, host, blobs,
+    ...(channel ? { mediaModels: () => modelView } : {}),
     productionAvailable: Boolean(port),
     // 离线装配保留 Skill 间接读取；隔离创作环境用原生 read，不注入 read_skill_file。
     toolFactory: holder => buildAgentTools(holder, businessTools, { blobs },
@@ -141,26 +148,32 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
   });
 
   const service = new AgentService({
+    ...(options.materials?.stockFetch ? { stockFetch: options.materials.stockFetch } : {}),
+    ...(options.creative ? { runnerReachable: () => options.creative!.runner.reachable() } : {}),
     providerConnections: options.providerConnections ?? false,
-    importedSettings: options.importedSettings ?? [],
-    db, clock, hub, host, registry,
+    importedSettings: options.importedSettings ?? [], retention,
+    db, clock, hub, host, blobs, registry,
     catalog,
     models: options.models,
     defaultTextBinding: textChannel?.defaultBinding
       ?? (() => options.models.find(model => model.kind === "text" && model.availability === "configured" && model.binding.modelId === options.defaultModelId)?.binding ?? null),
     ...(textChannel ? { textModels: textChannel.models } : {}),
-    ...(channel ? { mediaModels: channel.models } : {}),
+    ...(channel ? { mediaModels: () => modelView, refreshMediaModels } : {}),
     skills: () => skillPackages.summaries(),
     skillPackages,
     displayName: options.displayName ?? "本地创作者",
     crashPoint: options.crashPoint,
     ...(production ? { production } : {}),
   });
+  const bills=new BillingStatements(db,clock,hub,process.env.FRAME_BILLING_STATEMENT_SOURCE ?? path.join(options.dataDir,"billing-statements.ndjson"));
   service.recover();
   service.startBackground();
-  if (options.media?.autoStart !== false) worker?.start();
+  if (worker && options.media?.autoStart !== false) {
+    production.on("work", () => worker.poke());
+    worker.start();bills.start();
+  }
 
-  return { service, host, database: db, registry, ...(production ? { production } : {}), ...(worker ? { worker } : {}),
-    close: async () => { await worker?.close(); await service.close(); await port?.close?.(); if (db.open) db.close(); },
+  return { service, host, database: db, retention, registry, ...(production ? { production } : {}), ...(worker ? { worker } : {}),
+    close: async () => { await bills.close();await worker?.close(); await service.close(); await port?.close?.(); if (db.open) db.close(); },
   };
 }

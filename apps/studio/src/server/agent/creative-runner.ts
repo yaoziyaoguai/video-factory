@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { createConnection } from "node:net";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import {
@@ -13,11 +14,12 @@ export const CREATIVE_IMAGE = "frame-creative:pi-1.5-v1";
 export const CREATIVE_TOOL_NAMES = ["read", "write", "edit", "bash"] as const;
 export const CREATIVE_CWD = "/workspace";
 const WRITE_REQUEST_MAX_BYTES = 128 * 1024 * 1024;
+const TRANSFER_MAX_BYTES = 512 * 1024 * 1024;
 
 // code_project 媒体输入在执行工作区的落位规则：inputs/<slot>.<扩展名>。
 // 受理边界用同一映射核对输出路径与输入落位分离，执行处用它真实落文件；作品库选材输入复用同一扩展映射。
 export const MEDIA_INPUT_EXTENSION: Record<MediaContent["mimeType"], string> = {
-  "image/png": ".png", "image/jpeg": ".jpg", "video/mp4": ".mp4", "video/webm": ".webm", "audio/mpeg": ".mp3", "audio/wav": ".wav",
+  "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm", "audio/mpeg": ".mp3", "audio/wav": ".wav",
 };
 export const CODE_PROJECT_INPUT_EXTENSIONS: readonly string[] = [...new Set(Object.values(MEDIA_INPUT_EXTENSION))];
 export function codeProjectInputPath(slot: number, mimeType: MediaContent["mimeType"]): string {
@@ -34,6 +36,7 @@ export interface CreativeWorkspace {
   workId: string;
   /** 可编辑工程用固定身份，后台执行使用冻结 run 身份。 */
   executionId: string;
+  scope?: "execution";
 }
 export interface CreativeSkill { id: string; directory: string }
 export interface CreativeToolContext extends Omit<CreativeWorkspace, "workId"> {
@@ -52,7 +55,7 @@ export interface CreativeExecutionOptions {
 }
 export interface CreativeFile { path: string; size: number }
 interface SkillFile { path: string; data: string }
-interface RunnerReply { data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; needed?: boolean; error?: string }
+interface RunnerReply { missing?: string[]; data?: string; files?: CreativeFile[]; mimeType?: string | null; exitCode?: number | null; imageId?: string; needed?: boolean; error?: string }
 
 export function creativeWorkspaceId(workspace: CreativeWorkspace | CreativeToolContext): string {
   for (const value of [workspace.conversationId, workspace.executionId, ...(workspace.workId === null ? [] : [workspace.workId])]) {
@@ -81,6 +84,12 @@ export function assertCreativeWriteFits(file: string, rawBytes: number, subject:
   return normalizedPath;
 }
 
+export function assertCreativeFileFits(file: string, rawBytes: number, subject: string): string {
+  const target = projectPath(file);
+  if (rawBytes > TRANSFER_MAX_BYTES) throw new AgentError("INVALID_INPUT", `${subject}原文件 ${rawBytes} B，超过 512 MiB（${TRANSFER_MAX_BYTES} B）上限，请换用更小的文件。`);
+  return target;
+}
+
 /** 编辑工作区：同一 conversation+work 的原生创作工具与 publish_project 共用固定身份。 */
 export function editingWorkspace(conversationId: string, workId: string): CreativeWorkspace {
   return { conversationId, workId, executionId: "project" };
@@ -89,6 +98,16 @@ export function editingWorkspace(conversationId: string, workId: string): Creati
 /** App 仅连接窄 socket；Docker 权限和宿主目录映射只存在于宿主入口。 */
 export class CreativeRunner {
   constructor(private readonly options: { socketPath: string }) {}
+
+  reachable(): Promise<boolean> {
+    return new Promise(resolve => {
+      const socket = createConnection(this.options.socketPath);
+      const finish = (ready: boolean) => { socket.destroy(); resolve(ready); };
+      socket.setTimeout(1000, () => finish(false));
+      socket.once("connect", () => finish(true));
+      socket.once("error", () => finish(false));
+    });
+  }
 
   private async request(workspace: CreativeWorkspace | CreativeToolContext, action: string, input: Record<string, unknown>, options: CreativeExecutionOptions = {}): Promise<RunnerReply> {
     options.signal?.throwIfAborted();
@@ -124,12 +143,54 @@ export class CreativeRunner {
         options.signal?.removeEventListener("abort", abort);
         reject(error);
       });
-      request.end(JSON.stringify({ workspaceId: creativeWorkspaceId(workspace), action, ...input }));
+      request.end(JSON.stringify({ workspaceId: creativeWorkspaceId(workspace), ...(workspace.scope ? { scope: workspace.scope } : {}), action, ...input }));
     });
   }
 
+  async missingDependencies(dependencies: string[]): Promise<string[] | null> {
+    const workspace = editingWorkspace("runtime-check", "skill-packages");
+    try {
+      const result = await this.request(workspace, "dependencies", { dependencies });
+      if (!Array.isArray(result.missing) || !result.missing.every(dep => dependencies.includes(dep))) throw new Error("创作沙箱未返回有效的依赖检查结果。");
+      return result.missing;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ECONNREFUSED")) return null;
+      throw error;
+    }
+  }
   async imageId(workspace: CreativeWorkspace): Promise<string> {
     return (await this.request(workspace, "image", {})).imageId!;
+  }
+  /** 只有本次传递的单个文件出现在容器挂载中。请求只传工作区身份和随机票号。 */
+  async transferFile(workspace: CreativeWorkspace, action: "import_file" | "export_file", file: string, localFile: string, transferRoot: string): Promise<void> {
+    const relativePath = projectPath(file);
+    const ticket = randomUUID();
+    const directory = path.join(transferRoot, `${creativeWorkspaceId(workspace)}-${ticket}`);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const payload = path.join(directory, "payload");
+    try {
+      if (action === "import_file") {
+        assertCreativeFileFits(file, (await stat(localFile)).size, `文件「${file}」`);
+        await link(localFile, payload);
+      }
+      await this.request(workspace, action, { path: relativePath, ticket });
+      if (action === "export_file") await rename(payload, localFile);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+
+  async prepareInputs(workspace: CreativeWorkspace, inputs: { alias: string; file: string }[], transferRoot: string): Promise<void> {
+    const directory = path.join(transferRoot, creativeWorkspaceId(workspace) + "-inputs");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    // 只接受 codeProjectInputPath 的槽位文件名，容器不能据此访问内容寻址库的其他文件。
+    if (inputs.some(input => !/^\d+\.(?:png|jpe?g|webp|mp4|webm|mp3|wav)$/.test(input.alias))) throw new AgentError("INVALID_INPUT", "工程输入槽位无效。");
+    const links = await Promise.allSettled(inputs.map(input => link(input.file, path.join(directory, input.alias))));
+    for (const result of links) if (result.status === "rejected") throw result.reason;
+  }
+
+  async destroyWorkspace(workspace: CreativeWorkspace, transferRoot: string): Promise<void> {
+    if (workspace.scope !== "execution") throw new AgentError("FORBIDDEN", "只有一次性执行工作区可以销毁。");
+    try { await this.request(workspace, "destroy", {}); }
+    finally { await rm(path.join(transferRoot, creativeWorkspaceId(workspace) + "-inputs"), { recursive: true, force: true }); }
   }
   async readFile(workspace: CreativeWorkspace, relativePath: string): Promise<Buffer> {
     const result = await this.request(workspace, "read", { path: projectPath(relativePath) });
@@ -149,8 +210,8 @@ export class CreativeRunner {
     return { exitCode: result.exitCode! };
   }
   // 冻结工程的正式执行入口：argv 逐项直传进程，不经 shell 重新解释（含空格参数保持原样）。
-  async executeArgv(workspace: CreativeWorkspace, argv: readonly string[], options: CreativeExecutionOptions = {}): Promise<{ exitCode: number | null }> {
-    const result = await this.request(workspace, "execute", { argv: [...argv], ...(options.timeout === undefined ? {} : { timeout: options.timeout }) }, options);
+  async executeArgv(workspace: CreativeWorkspace, argv: readonly string[], options: CreativeExecutionOptions & { inputAliases?: string[] } = {}): Promise<{ exitCode: number | null }> {
+    const result = await this.request(workspace, "execute", { argv: [...argv], ...(options.inputAliases?.length ? { inputAliases: options.inputAliases } : {}), ...(options.timeout === undefined ? {} : { timeout: options.timeout }) }, options);
     return { exitCode: result.exitCode! };
   }
 

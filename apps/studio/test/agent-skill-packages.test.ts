@@ -340,7 +340,7 @@ test("S7 本地包数据目录边界：等于/祖先/数据区拒绝加载，兄
 test("S6 native 持久化错误回读实际配置；无效源和缺源不冒充安装成功", async t => {
   const { root, source, runtime, request, conversation } = await fixture(t);
   const missing = await request("POST", "/settings/skills/install", { source: path.join(root, "missing") });
-  assert.equal(missing.statusCode, 503); assert.equal(missing.json().retryAction, "reload");
+  assert.equal(missing.statusCode, 400); assert.equal(missing.json().code, "INVALID_INPUT"); assert.equal(missing.json().retryAction, "none");
   const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
   const originalErrors = SettingsManager.prototype.drainErrors;
   let injected = false;
@@ -354,4 +354,77 @@ test("S6 native 持久化错误回读实际配置；无效源和缺源不冒充�
   assert.equal(current.statusCode, 200); assert.equal(current.json().mutation, null);
   assert.ok(current.json().skills.some((skill: { id: string }) => skill.id === "local-alpha"), "已写入原生配置的事实仍回读，错误不声称回滚");
   runtime.host.faux!.setResponses([fauxAssistantMessage("目录可用")]); await chat(runtime, conversation, "按当前事实运行", "local-alpha");
+});
+
+test("ISS-07 安装边界在 Pi 持久化之前，拒绝后原设置逐字节相同", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "frame-preinstall-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const data = path.join(root, "data");
+  const packages = new SkillPackages(data, defaultSkillsRoot);
+  await packages.initialize();
+  const settings = path.join(packages.directory, "settings.json");
+  const before = await readFile(settings);
+  const install = t.mock.method(packages.manager, "installAndPersist");
+  for (const source of [path.parse(root).root, data, root, path.join(root, "missing"), "http://127.0.0.1:8080/repo.git",
+    "http://169.254.169.254/latest", "git:https://127.0.0.1/example/repo"]) {
+    await assert.rejects(packages.install(source), (error: Error & { statusCode?: number }) => error.statusCode === 400 || error.statusCode === 403);
+    assert.deepEqual(await readFile(settings), before);
+  }
+  assert.equal(install.mock.callCount(), 0);
+});
+
+test("ISS-07 Pi 本机包按声明展示已测依赖、缺失模块及未连接的沙箱", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "frame-runtime-deps-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "sound-kit");
+  await mkdir(source);
+  await writeFile(path.join(source, "SKILL.md"), "---\nname: sound-kit\ndescription: audio tools\nmetadata:\n  frame:\n    requires:\n      bins: [ffmpeg]\n      pythonModules: [wave]\n---\nAudio");
+  let missing: string[] | null = [];
+  const packages = new SkillPackages(path.join(root, "data"), defaultSkillsRoot, {
+    async missingDependencies(dependencies) { assert.deepEqual(dependencies, ["bin:ffmpeg", "python:wave"]); return missing; },
+  });
+  await packages.initialize();
+  await packages.install(source);
+  for (const [state, expected, items] of [
+    [[], "ready", []], [["python:wave"], "unavailable", ["python:wave"]], [null, "unavailable", ["创作沙箱未连接"]],
+  ] as const) {
+    missing = state === null ? null : [...state];
+    const item = (await packages.refresh()).packages.find(pkg => pkg.skillIds.includes("sound-kit"))!;
+    assert.equal(item.runtimeStatus, expected);
+    assert.deepEqual(item.runtimeMissing, items);
+    assert.equal(item.status, "ready");
+  }
+  const invalid = path.join(root, "malformed-kit");
+  await mkdir(invalid);
+  await writeFile(path.join(invalid, "SKILL.md"), "---\nname: malformed-kit\ndescription: bad dependency declaration\nmetadata:\n  frame:\n    requires:\n      bins: ffmpeg\n---\nAudio");
+  await packages.install(invalid);
+  const reopened = new SkillPackages(path.join(root, "data"), defaultSkillsRoot);
+  await reopened.initialize();
+  const list = reopened.read().packages;
+  assert.ok(list.some(item => item.skillIds.includes("sound-kit")));
+  const bad = list.find(item => item.name === "malformed-kit")!;
+  assert.equal(bad.status, "invalid");
+  assert.match(bad.diagnostics.join(" "), /运行依赖/);
+
+});
+
+test("ISS-07 公共 HTTPS 安装沿用 Pi 的 git 进程，文件协议与重定向均关闭", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "frame-git-policy-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const log = path.join(root, "arguments.json");
+  const probe = path.join(root, "git");
+  await writeFile(probe, '#!/usr/bin/env node\n' +
+    'require("node:fs").writeFileSync(' + JSON.stringify(log) + ',JSON.stringify({args:process.argv.slice(2),proto:process.env.GIT_ALLOW_PROTOCOL,settings:[process.env.GIT_CONFIG_KEY_0,process.env.GIT_CONFIG_VALUE_0,process.env.GIT_CONFIG_KEY_1,process.env.GIT_CONFIG_VALUE_1]}));process.exit(1);\n', { mode: 0o755 });
+  const previous = process.env.PATH;
+  process.env.PATH = root + path.delimiter + previous;
+  t.after(() => { process.env.PATH = previous; });
+  const packages = new SkillPackages(path.join(root, "data"), defaultSkillsRoot);
+  await packages.initialize();
+  const before = await readFile(path.join(packages.directory, "settings.json"));
+  await assert.rejects(packages.install("https://192.0.2.1/example/kit.git"));
+  const boundary = JSON.parse(await readFile(log, "utf8"));
+  assert.ok(boundary.args.includes("clone"));
+  assert.equal(boundary.proto, "https");
+  assert.deepEqual(boundary.settings, ["protocol.file.allow", "never", "http.followRedirects", "false"]);
+  assert.deepEqual(await readFile(path.join(packages.directory, "settings.json")), before);
 });

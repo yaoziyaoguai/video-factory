@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { agentApi, feedbackInput } from "./api.js";
-import { loadStageFeedbackDrafts, saveStageFeedbackDrafts } from "./workspace-state.js";
+import { agentStorageKey, loadStageFeedbackDrafts, saveStageFeedbackDrafts } from "./workspace-state.js";
 import type { FeedbackInput, Target } from "../../shared/agent/generated/contracts.js";
 
 // 工作台唯一的意见草稿所有者；查看入口只提供准确对象，不各自处理提交回执。
-export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: string) => Promise<void>, onError: (text: string) => void) {
+export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: string) => Promise<void>, onError: (text: string) => void, storageOwner?: string) {
   const [commands, setCommands] = useState<Record<string, FeedbackInput>>({});
   const [receipts, setReceipts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -21,24 +21,24 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
     const restored: Record<string, FeedbackInput> = {};
     try {
       // 兼容已经实际写入的两种旧意见存储；统一成按准确目标保存的命令。
-      for (const entry of Object.values(loadStageFeedbackDrafts(conversationId))) {
+      for (const entry of Object.values(loadStageFeedbackDrafts(conversationId, storageOwner))) {
         const key = keyFor(entry.command.target);
-        localStorage.setItem(`vf:agent-feedback:${key}`, JSON.stringify(entry.command));
+        localStorage.setItem(agentStorageKey("feedback", key, storageOwner), JSON.stringify(entry.command));
       }
-      saveStageFeedbackDrafts(conversationId, {});
-      const prefix = `vf:agent-feedback:${conversationId}:`;
+      saveStageFeedbackDrafts(conversationId, {}, storageOwner);
+      const prefix = agentStorageKey("feedback", conversationId, storageOwner) + ":";
       for (const storageKey of Object.keys(localStorage).filter(key => key.startsWith(prefix))) {
         const command = JSON.parse(localStorage.getItem(storageKey)!) as FeedbackInput;
         if (typeof command.commandId !== "string" || typeof command.text !== "string"
           || typeof command.target?.artifactId !== "string" || typeof command.target.revisionId !== "string") continue;
         const key = keyFor(command.target);
         restored[key] = command;
-        localStorage.setItem(`vf:agent-feedback:${key}`, JSON.stringify(command));
-        if (storageKey !== `vf:agent-feedback:${key}`) localStorage.removeItem(storageKey);
+        localStorage.setItem(agentStorageKey("feedback", key, storageOwner), JSON.stringify(command));
+        if (storageKey !== agentStorageKey("feedback", key, storageOwner)) localStorage.removeItem(storageKey);
       }
     } catch { /* 存储不可用时仍可在本页讨论，业务记录不受影响。 */ }
     setCommands(current => ({ ...current, ...restored }));
-  }, [conversationId]);
+  }, [conversationId, storageOwner]);
 
   return {
     forTarget(target: Target | null) {
@@ -51,7 +51,7 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
       const command = stored?.text === text && sameTarget(stored.target, target) ? stored : feedbackInput(target, text);
       setCommands(current => ({ ...current, [key]: command }));
       setReceipts(current => ({ ...current, [key]: "" }));
-      try { localStorage.setItem(`vf:agent-feedback:${key}`, JSON.stringify(command)); }
+      try { localStorage.setItem(agentStorageKey("feedback", key, storageOwner), JSON.stringify(command)); }
       catch { /* 本页草稿仍保留。 */ }
     },
     // 同一事项、同一片段的意见在方案草稿前进时（E1）：旧键里未发送的文字带到新方案键，
@@ -64,7 +64,7 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
       if (!source?.text.trim() || commands[toKey]) return;
       const command = feedbackInput(to, source.text);
       setCommands(current => current[toKey] ? current : ({ ...current, [toKey]: command }));
-      try { localStorage.setItem(`vf:agent-feedback:${toKey}`, JSON.stringify(command)); }
+      try { localStorage.setItem(agentStorageKey("feedback", toKey, storageOwner), JSON.stringify(command)); }
       catch { /* 本页草稿仍保留。 */ }
     },
     async submit(target: Target) {
@@ -74,7 +74,7 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
       const command = sameTarget(stored.target, target) ? stored : feedbackInput(target, stored.text);
       // 请求可能已受理但响应丢失：重试必须使用这次真正发送的命令身份和目标。
       setCommands(current => ({ ...current, [key]: command }));
-      try { localStorage.setItem(`vf:agent-feedback:${key}`, JSON.stringify(command)); }
+      try { localStorage.setItem(agentStorageKey("feedback", key, storageOwner), JSON.stringify(command)); }
       catch { /* 本页仍沿用同一条命令重试。 */ }
       setBusy(current => ({ ...current, [key]: true }));
       try {
@@ -86,8 +86,8 @@ export function useFeedbackDrafts(conversationId: string | null, onSaved: (id: s
           return next;
         });
         try {
-          const persisted = localStorage.getItem(`vf:agent-feedback:${key}`);
-          if (persisted === JSON.stringify(command)) localStorage.removeItem(`vf:agent-feedback:${key}`);
+          const persisted = localStorage.getItem(agentStorageKey("feedback", key, storageOwner));
+          if (persisted === JSON.stringify(command)) localStorage.removeItem(agentStorageKey("feedback", key, storageOwner));
         } catch { /* 服务端回执不因浏览器存储不可用而变成失败。 */ }
         setReceipts(current => ({ ...current, [key]: receipt.disposition === "next_version"
           ? "已留作下一版意见，本次制作不变。" : "意见已记录。" }));

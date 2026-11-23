@@ -1,9 +1,9 @@
 import { createWriteStream } from "node:fs";
-import { mkdirSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
+import { finished, pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { downloadStockMedia } from "./stock-providers.js";
 import type {
   MaterialBatch, MaterialBatchIndexItem, MaterialCandidate, MaterialImportResult, MaterialProvider, MaterialQuery, MediaContent, MediaProvenance, ToolImportMaterial,
 } from "../../shared/agent/generated/contracts.js";
@@ -113,7 +113,7 @@ export function persistSearchBatch(
 }
 
 /** 早期批次查询没有 provider 字段；当时只有 Pexels，读取时补默认来源。 */
-function parseStoredQuery(raw: string): MaterialQuery {
+export function parseStoredQuery(raw: string): MaterialQuery {
   const query = JSON.parse(raw) as MaterialQuery;
   return { ...query, provider: query.provider ?? "pexels" };
 }
@@ -161,6 +161,35 @@ function getCandidate(db: AgentDatabase, scope: Pick<MaterialScope, "ownerId" | 
     .get(candidateId, scope.ownerId, scope.conversationId) as CandidateRow | undefined;
 }
 
+/** 预览使用已登记的视频变体；播放与采用分开，没有任何制作写入。 */
+export function openCandidateVideo(db: AgentDatabase, ownerId: string, batchId: string, candidateId: string, signal: AbortSignal, fetchImpl?: typeof fetch) {
+  const row = db.prepare("SELECT metadata_json, download_url FROM material_candidates WHERE owner_id=? AND batch_id=? AND id=? AND kind='video'")
+    .get(ownerId, batchId, candidateId) as Pick<CandidateRow, "metadata_json" | "download_url"> | undefined;
+  if (!row) throw new AgentError("NOT_FOUND", "没有找到这段候选视频。");
+  const metadata = JSON.parse(row.metadata_json) as CandidateMetadata;
+  return new Promise<{ stream: Readable; mimeType: "video/mp4" | "video/webm" }>((resolve, reject) => {
+    void downloadStockMedia(metadata.provider ?? "pexels", row.download_url, MAX_VIDEO_BYTES, async chunks => {
+      const iterator = chunks[Symbol.asyncIterator]();
+      const head: Uint8Array[] = [];
+      let length = 0;
+      while (length < 12) {
+        const chunk = await iterator.next();
+        if (chunk.done) throw new StockUnavailableError("候选视频文件不完整。");
+        head.push(chunk.value); length += chunk.value.byteLength;
+      }
+      const signature = Buffer.concat(head, 12);
+      const mimeType = signature.toString("ascii", 4, 8) === "ftyp" ? "video/mp4" : signature.readUInt32BE(0) === 0x1a45dfa3 ? "video/webm" : null;
+      if (!mimeType) throw new StockUnavailableError("这个候选没有可播放的 MP4 或 WebM 内容。");
+      const stream = Readable.from((async function* () {
+        yield* head;
+        for (let chunk = await iterator.next(); !chunk.done; chunk = await iterator.next()) yield chunk.value;
+      })(), { objectMode: false, signal });
+      resolve({ stream, mimeType });
+      await finished(stream, { cleanup: true });
+    }, fetchImpl, signal).catch((error: unknown) => reject(error instanceof StockUnavailableError ? new AgentError("TEMPORARILY_UNAVAILABLE", error.message) : error));
+  });
+}
+
 function provenanceOf(metadata: CandidateMetadata, acquiredAt: string): MediaProvenance {
   return {
     provider: metadata.provider ?? "pexels", assetId: metadata.providerAssetId, sourceUrl: metadata.sourceUrl,
@@ -186,6 +215,14 @@ export async function importMaterial(
   db: AgentDatabase, clock: AgentClock, blobs: ProductionBlobs, workRoot: string,
   client: StockClient, scope: MaterialScope, active: RequestStillActive, candidateId: string, signal?: AbortSignal, usage?: ToolImportMaterial["usage"],
 ): Promise<MaterialImportResult> {
+  const requireActive = () => {
+    if (!db.prepare(`SELECT 1 FROM requests WHERE id=? AND owner_id=? AND conversation_id=?
+      AND state='running' AND execution_epoch=? AND stop_requested=0 AND delivery_closed=0`)
+      .get(scope.requestId, scope.ownerId, scope.conversationId, active.executionEpoch)) {
+      throw new AgentError("REQUEST_NOT_RUNNING", "请求已结束或被停止，本次采用不再登记。");
+    }
+  };
+  requireActive();
   const row = getCandidate(db, scope, candidateId);
   if (!row) throw new AgentError("NOT_FOUND", "没有找到这个会话里的素材候选。");
   const metadata = JSON.parse(row.metadata_json) as CandidateMetadata;
@@ -211,9 +248,9 @@ export async function importMaterial(
   }
 
   const maxBytes = row.kind === "image" ? MAX_IMAGE_BYTES : row.kind === "audio" ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES;
-  const attemptDir = path.join(workRoot, candidateId);
+  await mkdir(workRoot, { recursive: true, mode: 0o700 });
+  const attemptDir = await mkdtemp(path.join(workRoot, candidateId + "-"));
   const temporary = path.join(attemptDir, "download.part");
-  mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
   try {
     const detail = await client.prepareImport(provider, { providerAssetId: row.provider_asset_id, trackingUrl: metadata.trackingUrl }, signal);
     if (detail) {
@@ -226,26 +263,20 @@ export async function importMaterial(
       });
     }
     await client.download(provider, detail?.downloadUrl ?? row.download_url, maxBytes, async stream => {
-      await pipeline(Readable.fromWeb(stream as import("node:stream/web").ReadableStream), createWriteStream(temporary, { mode: 0o600 }), { signal });
+      await pipeline(stream, createWriteStream(temporary, { mode: 0o600 }), { signal });
     }, signal);
     const facts = row.kind === "image" ? await probeImageFile(temporary, signal)
       : row.kind === "audio" ? await probeAudioFile(temporary, signal) : await probeVideoFile(temporary, "ffprobe", signal);
-    const bytes = await readFile(temporary, { signal });
+    const prepared = await blobs.prepareFile(temporary);
     signal?.throwIfAborted();
-    const blob = blobs.persist(scope.ownerId, scope.conversationId, bytes, facts.mimeType, "durationMs" in facts ? facts.durationMs : null);
-    const write = db.transaction((): MaterialImportResult => {
-      // 异步下载后的事实复核：请求仍在运行、同 epoch、未交付关闭，才登记采用关系。
-      const request = db.prepare("SELECT state, execution_epoch, delivery_closed, stop_requested FROM requests WHERE id=?")
-        .get(scope.requestId) as { state: string; execution_epoch: number; delivery_closed: number; stop_requested: number };
-      if (!request || request.state !== "running" || request.execution_epoch !== active.executionEpoch
-        || request.delivery_closed === 1 || request.stop_requested === 1) {
-        throw new AgentError("REQUEST_NOT_RUNNING", "请求已结束或被停止，本次采用不再登记。");
-      }
+    return blobs.withRegistration(scope.ownerId, scope.conversationId, (register): MaterialImportResult => {
+      requireActive();
       const current = getCandidate(db, scope, candidateId);
       if (current?.imported_blob_id) {
         const adoptedMetadata = JSON.parse(current.metadata_json) as CandidateMetadata;
         return importResultOf(db, current.imported_blob_id, adoptedSource(current.imported_blob_id, adoptedMetadata), adoptedMetadata.dimensions);
       }
+      const blob = register(prepared, facts.mimeType, "durationMs" in facts ? facts.durationMs : null);
       const acquiredAt = clock();
       const dimensions = "width" in facts ? { width: facts.width, height: facts.height } : undefined;
       const provenance = provenanceOf(metadata, acquiredAt);
@@ -254,12 +285,11 @@ export async function importMaterial(
         .run(blob.id, JSON.stringify({ ...metadata, ...(dimensions ? { dimensions } : {}), adoptedSource: provenance }), detail?.downloadUrl ?? row.download_url, candidateId);
       return importResultOf(db, blob.id, provenance, dimensions);
     });
-    return write();
   } catch (error) {
     if (error instanceof StockUnavailableError) throw new AgentError("TEMPORARILY_UNAVAILABLE", error.message);
     throw error;
   } finally {
-    rmSync(attemptDir, { recursive: true, force: true });
+    await rm(attemptDir, { recursive: true, force: true });
   }
 }
 

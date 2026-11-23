@@ -1,18 +1,19 @@
+import { videoWireBody } from "./video-image-inputs.js";
+import { AgentError } from "./errors.js";
+import { InvalidImageFile } from "./media-probe.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
-import type { ExecutionInput, ExecutionObservation, InputRef, MarkdownContent, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
+import type { ExecutionInput, ExecutionObservation, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
 import { digestOf, type AgentClock } from "./util.js";
 import type { MiniMaxVideoProfile } from "./media-config.js";
-import { getRevisionRow } from "./artifact-store.js";
 import {
   aspectRatioMismatch, audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
 } from "./media-port-support.js";
-import { markdownFullText } from "../../shared/agent/markdown.js";
 
 // MiniMax H3/H3-Max 薄适配（wire 序列按 2026-11-01 官方 v2 页面核实）：
 // POST /v2/video_generation {model, content:[{type:"text"}], resolution("768P"), ratio, duration} → {task_id}；
@@ -58,18 +59,22 @@ export class MiniMaxVideoPort implements MediaExecutionPort {
     const resolved = this.options.resolve(input.operation.model);
     if (!resolved) return this.preRefusal(input.attemptId, "账号配置已变化，未使用当前账号提交请求。");
     if (!resolved.apiKey) return this.preRefusal(input.attemptId, "媒体凭据未启用；未提交任何请求，不会自动重试。");
-    const ref = input.operation.inputs[0] as Extract<InputRef, { kind: "text" | "artifact_revision" }>;
-    const prompt = ref.kind === "text" ? ref.text : markdownFullText(JSON.parse(getRevisionRow(this.db, ref.artifactId, ref.revisionId)!.content_json) as MarkdownContent);
     const parameters = input.operation.parameters;
+    let body;
+    try {
+      body = await videoWireBody(this.db, this.blobs, input, resolved.profile.modelId, (prompt, images) => ({
+        model: resolved.profile.modelId,
+        content: [{ type: "text", text: prompt }, ...images.map(({ role, url }) => ({ type: "image_url", role, image_url: { url } }))],
+        resolution: parameters.resolution, duration: parameters.durationSeconds,
+        ratio: images.some(image => image.role !== "reference_image") ? "adaptive" : parameters.aspectRatio,
+      }));
+    } catch (error) {
+      if (error instanceof AgentError || error instanceof InvalidImageFile) return this.preRefusal(input.attemptId, error.message);
+      throw error;
+    }
     let taskId: string;
     try {
-      const response = await providerRequestJson("POST", new URL(`${resolved.profile.baseUrl}/v2/video_generation`), resolved.apiKey, {
-        model: resolved.profile.modelId,
-        content: [{ type: "text", text: prompt }],
-        resolution: parameters.resolution,
-        ratio: parameters.aspectRatio,
-        duration: parameters.durationSeconds,
-      }, { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs });
+      const response = await providerRequestJson("POST", new URL(`${resolved.profile.baseUrl}/v2/video_generation`), resolved.apiKey, body, { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs });
       const id = typeof response.task_id === "string" ? response.task_id.trim() : "";
       if (!id) return this.observations.unstableUnknown(input.attemptId, null, "创建响应缺少任务 ID，结果未核实；不会重新提交。");
       taskId = id;

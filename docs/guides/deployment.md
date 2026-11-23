@@ -20,9 +20,11 @@ NewsNow 出网默认拒绝环回、内网与云元数据地址。同网（`http:
 
 [发布脚本](../../scripts/deploy-frame.sh)在既有远端 release lock 内核对清单的 SHA、架构、双 image ID 和标签，检查宿主与 Compose 配置。每次部署使用包含 `DEPLOY_RUN` 的独立 Compose 项目名；即使 SHA 相同，也不会由旧项目标签接管被保留的原容器。
 
-切换前只在本应用 Nginx `location /` 中临时加载[维护 include](../../docker/frame-maintenance.nginx.conf)，拒绝外部修改请求，保留真实健康和只读访问。脚本核实 POST 被隔离、没有 queued/running 请求与制作，再正常停止旧应用，并用只读挂载原卷的短进程复核：将停机后的 `agent.db` 与现存 WAL 复制到该容器的私有 tmpfs，再读取队列。SQLite 可以在副本旁重建 WAL 辅助文件，原卷始终只读，尚在 WAL 中的排队记录仍参与检查。活动任务不会被部署脚本取消。无写入后才备份持久卷、保存原 runner 配置、实际运行 image ID、固定别名和成功标记；创作卷记录完整清单，本轮仅新探针工程会写入，不复制无关历史工程。
+首次安装或升级站点配置时，将维护片段与安全响应头片段分别安装为 `/etc/nginx/snippets/frame-release-maintenance.conf` 和 `/etc/nginx/snippets/frame-security-headers.conf`，权限均为 0644。站点模板已连接两个片段与 Certbot 证书路径。按实际域名和证书路径配置，运行 `nginx -t` 并重载一次。常态 HTTP 跳转 HTTPS；HTTPS 上传路由保留 513 MiB 请求上限与流式转发。[站点模板](../../deploy/nginx/video.wangjinkun333.me.conf) · [维护配置](../../docker/frame-maintenance.nginx.conf) · [安全响应头](../../deploy/nginx/snippets/frame-security-headers.conf)
 
-随后安装同 SHA host runner/服务、受控切换创作别名、加载生产 Compose 与 creative overlay，启动候选并按现有迁移升级数据。恢复 trap 仍生效时，从**正在运行的正式 app**调用编译后的 `CreativeRunner` 和 Pi Operations，核实真实写读、PNG、两秒 MP4 解码及隔离；不启动第二个 main，不调用模型或媒体供应商，也不写正式对话库。只有正式 app 的镜像、UID、真实 socket 配置与只读挂载、runner image ID、数据库版本与候选镜像迁移定义一致（本版为24）、本地/公开 health、匿名设置401和工作台静态入口全部通过，才提交成功标记并恢复外部写入。探针新卷按本次准确清单清理。登录后 UI、模型配置与实际供应商效果分别验证，不能用健康200代替。
+每次发布只切换 `/run/video-factory/frame.maintenance`。标记存在时两个入口的业务请求返回 503，`/api/health` 继续转发到真实应用。脚本核实 POST 被隔离、没有 queued/running 请求与制作，再正常停止旧应用，并用只读挂载原卷的短进程复核：将停机后的 `agent.db` 与现存 WAL 复制到该容器的私有 tmpfs，再读取队列。SQLite 可以在副本旁重建 WAL 辅助文件，原卷始终只读，尚在 WAL 中的排队记录仍参与检查。活动任务不会被部署脚本取消。无写入后才备份持久卷、保存原 runner 配置、实际运行 image ID、固定别名和成功标记；创作卷记录完整清单，本轮仅新探针工程会写入，不复制无关历史工程。
+
+随后安装同 SHA host runner/服务、受控切换创作别名、加载生产 Compose 与 creative overlay，启动候选并按现有迁移升级数据。恢复 trap 仍生效时，从**正在运行的正式 app**调用编译后的 `CreativeRunner` 和 Pi Operations，核实真实写读、PNG、两秒 MP4 解码及隔离；不启动第二个 main，不调用模型或媒体供应商，也不写正式对话库。只有正式 app 的镜像、UID、真实 socket 配置与只读挂载、runner image ID、数据库版本与候选镜像迁移定义一致（迁移定义见 `apps/studio/src/server/agent/db.ts` 的 MIGRATIONS）、本地/公开 health、通过回环入口读取的匿名设置 401 和工作台静态入口全部通过，才提交成功标记并恢复外部写入。探针新卷按本次准确清单清理。登录后 UI、模型配置与实际供应商效果分别验证，不能用健康200代替。
 
 ```sh
 curl -fsS https://video.example.com/api/health
@@ -36,6 +38,8 @@ CI 在独占可销毁 Linux VM 中调用同一个发布脚本，经真实 HTTPS 
 若在运行一段时间后决定手动回退，先停新写入并另作一次备份，再选择要恢复的版本与数据时间点；直接恢复旧数据库会丢掉上线后的新创作。仅重新启动旧代码不能撤销数据迁移。
 
 ## 创作宿主服务与稳定工作卷
+
+宿主默认最多保留四个温热文件操作容器。可在 frame-creative 的 systemd 单元环境中设置正整数 `FRAME_CREATIVE_MAX_POOL`，更改后重启该服务。
 
 主应用始终以 uid/gid1001 运行，仅通过 `/run/frame-creative/runner.sock` 访问窄创作接口，没有 Docker socket。宿主的 [frame-creative.service](../../docker/frame-creative.service) 只管理既有 [creative-runner-host.mjs](../../scripts/creative-runner-host.mjs)，采用已核实的1001服务身份和 Docker socket 组，使用 Node22、Docker CLI 的实际绝对路径。生产缺少 Node22 时先独立安装受支持版本，不替换无关系统运行时；1001被无关账号占用时停止切换，不改账号、不放宽权限。
 
@@ -57,7 +61,7 @@ python3 -m venv .local/edge-tts
 .local/edge-tts/bin/python3 -I -c 'import edge_tts; import importlib.metadata; print(importlib.metadata.version("edge-tts"))'
 ```
 
-在「免费服务 → 配音 → 配置 → 运行设置」填写该解释器的绝对路径，或由管理员将其 venv 的 `bin` 加入应用 PATH 后保留 `python3`。这里是可执行文件名/路径，不是带参数的 shell 命令；实际启动为 `pythonCommand -I -c <内嵌驱动>`，不能依赖用户 site-packages。不要迁移开发机绝对路径。保存与启用只登记配置，不会联网合成；缺依赖或调用失败会明确报错，不转用付费配音。
+管理员在应用环境文件（生产为 `.env.docker.prod`）设置 `FRAME_EDGE_TTS_PYTHON` 为容器内解释器的绝对路径。Compose 将它注入应用的 `AGENT_EDGE_TTS_PYTHON`；直接启动应用时使用后一个变量。也可将该 venv 的 `bin` 加入应用 PATH 以使用默认的 `python3`。这里是可执行文件名/路径，不是带参数的 shell 命令；实际启动为 `pythonCommand -I -c <内嵌驱动>`，不能依赖用户 site-packages。不要迁移开发机绝对路径。保存与启用只登记配置，不会联网合成；缺依赖或调用失败会明确报错，不转用付费配音。
 
 驱动通过客户端公开 `proxy` 参数沿 `HTTPS_PROXY → https_proxy → HTTP_PROXY → http_proxy` 选路，`NO_PROXY` 优先于 `no_proxy`，命中客户端实际目标主机时直连。只设 `HTTPS_PROXY` 也适用于语音 WebSocket；不能仅凭客户端的 `trust_env` 推断这一点。未配置代理变量时走宿主默认路由，此状态不证明服务器 VPN 出口可用。客户端依赖与隔离启动、代理参数消费、真实外部合成和试听效果应分别验证；免费在线服务没有官方 SLA。
 
@@ -75,3 +79,34 @@ python3 -m venv .local/edge-tts
 | 抖音与 TikTok 榜单 | 按实际榜源路由：Frame 访问 DataXAPI 和 Kabo；中文榜单不表示请求一定发往国内平台服务器。 |
 
 接口和媒体下载可能使用不同 CDN。现有国内域名清单在 [domestic-service-hosts.txt](../../scripts/domestic-service-hosts.txt)，宿主定时用 [刷新脚本](../../scripts/refresh-domestic-routes.py)补充解析结果。对新下载域名，先从容器确认域名、由宿主按容器来源核实出口，再决定是否加入清单；不要将所有阿里云 OSS、国际 CDN 或整个供应商品牌硬编码成一条线路。VPN 配置、节点、凭据不进入仓库。未带 Key 的探测能证实连通性，不能证实模型额度或一次真实生成。
+
+### 凭据、备份与媒体留存
+
+生产环境在宿主的 `.env.docker.prod` 设置 `FRAME_CREDENTIAL_SECRET`，可用 `openssl rand -hex 32` 生成。首次启动会事务化迁移五类已有设置，擦除旧数据库页并截短 WAL。请在密码管理器中保管主密钥。轮换时先停止所有访问该库的服务，向同一版本构建的 `node scripts/rotate-frame-credentials.mjs` 提供 `AGENT_DATA_DIR`、旧主密钥和 `FRAME_NEXT_CREDENTIAL_SECRET`，成功后更新服务环境再启动。历史备份使用备份当时的数据库主密钥。
+
+发布脚本直接将数据卷的压缩流写入加密归档，目录权限 0700，归档和应用环境文件 0600。默认用 OpenSSL CMS AES-256-GCM，首次发布在应用宿主目录的 `.frame-backup-keys/` 创建独立恢复身份。请离线保管该目录，移机恢复需要它与目标版本的数据库主密钥。已有恢复身份可通过部署环境的 `FRAME_BACKUP_OPENSSL_CERT` 和 `FRAME_BACKUP_OPENSSL_KEY` 指定。也可提供 `FRAME_BACKUP_AGE_RECIPIENT` 与 `FRAME_BACKUP_AGE_IDENTITY` 使用 age。脚本以相应身份实际解密并校验 tar 后才切换应用，回滚读取同一归档。
+
+`GET /api/health` 返回进程活性、SQLite 是否可取写锁和已配置创作 socket 的连接状态。数据库忙或 socket 中断时返回 503。可通过 `FRAME_MEDIA_RETENTION_DAYS` 调整历史草稿保留天数，默认 30 天。个人设置中可查看定稿、草稿与可清理字节。
+### 团队账号、预算与账单
+
+首次启动时，用 `VIDEO_FACTORY_AUTH_USERNAME` 和环境密码摘要创建初始管理员。升级已有实例时使用原管理员名称，原会话和作品按原有身份读取。后续成员密码与角色以持久化账号为准，管理员在「我的 → 成员与预算」管理成员和额度。停用、改角色或重置密码会使该成员已有的登录 Cookie 失效。工作空间始终保留至少一名启用的管理员。
+
+额度以人民币分保存，0 表示禁止新的付费授权，留空表示该项无上限。每次受理同时核对会话、自然日与自然月上限。工作空间默认用 `Asia/Shanghai` 划分自然日和月，可通过 `FRAME_BUDGET_TZ` 指定 IANA 时区。未结算款项跨期占用额度。创作者可从「我的」和待确认的付费提案读取可用额度。
+
+生产 worker 定期读取供应商逐笔结算明细。Compose 默认读取数据卷中的 `/data/factory/agent/billing-statements.ndjson`。也可通过 `FRAME_BILLING_STATEMENT_SOURCE` 指定容器可读文件或可直连的公共 HTTPS 账单源。远端直连使用核验过的 DNS 地址、原域名证书及禁止重定向的请求。需要经内部服务转运账单的实例应使用本地文件入口。文件由账单数据提供方完整写入后原子替换，每行是一条 UTF-8 JSON 记录。HTTP 端返回相同的 NDJSON。可以重复提供同一笔明细。
+
+```json
+{"providerId":"ark","connectionId":"team-video","providerTaskId":"实际供应商任务号","fact":{"kind":"authoritative","billingFactId":"实际账单行号","sourceRevision":"1","netAmount":{"currency":"CNY","amountMinor":51},"final":true,"evidenceId":"可追查的原始明细编号"}}
+```
+
+连接 ID 必须等于受理时冻结的连接。来源提供请求身份时可填写 `requestIdentity`；同时提供两种身份时，二者必须指向同一次尝试。更正保留原 `billingFactId`，递增数字形式的 `sourceRevision`，填写新的累计净额。账单只提供模型、API Key 或时间段汇总时，界面继续显示「待对账」。这类汇总无法给出某个创作任务实际支付的金额。[方舟任务用量](https://docs.volcengine.com/docs/ark/get-video-generation-task-api?lang=zh) · [阿里云百炼账单粒度](https://www.alibabacloud.com/help/en/model-studio/bill-query-and-cost-management)
+
+### 字幕转录与工程导出
+
+应用镜像从稳定基础镜像继承本地 CPU 转录环境。构建基础镜像时安装固定版本的 faster-whisper 与 Systran base 权重，运行时以 int8 解码。普通业务镜像构建复用该层。构建基础镜像可传入 `HF_ENDPOINT`；自定义远程权重同时设置 `FRAME_ASR_MODEL_ID`、`FRAME_ASR_MODEL_REVISION` 和 `FRAME_ASR_MODEL_SHA256`。
+
+裸机运行 `sh scripts/install-frame-asr.sh /opt/frame-asr`；使用已有的权重文件时设置 `FRAME_ASR_MODEL_DIR` 指向包含四个模型文件的目录。指定其他安装位置后通过 `FRAME_ASR_HOME` 指向该位置。留空 `FRAME_ASR_LANGUAGE` 时按首个有语音的分片锁定语种；主要创作中文视频的实例可设为 `zh`。转录读取本机模型与音轨。[Systran 模型说明](https://huggingface.co/Systran/faster-whisper-base)
+
+工程 ZIP 的 `README-RUN.md` 给出该修订的冻结镜像和启动命令。把该镜像保存在原宿主或载入目标 Docker，再解压运行。FCPXML 解压后打开 `Frame.fcpxmld`，OTIO 打开 `Frame.otio`，剪映草稿保留 `draft_content.json` 及同目录 `media/`。包内的 `Frame-timeline.json` 保存原切点、音量、淡入淡出及旁白压低音乐的开关，便于核对各剪辑软件的混音。
+
+本地合成使用冻结的镜头、旁白和音乐生成独立剪辑轨道。供应商直接生成的视频和自定义代码渲染只有成片级时间线，因此导出为一段完整素材；自定义代码的内部编辑可以从对应工程 ZIP 开始。

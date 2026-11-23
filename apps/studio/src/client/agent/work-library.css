@@ -1,0 +1,80 @@
+/* —— 作品库专属样式（DECISION-04 迁出同步入口） ——
+   本文件只被 WorkLibrary.tsx 引用：WorkLibrary 位于懒加载分块（设置页经 FrameSettings 同步挂载、
+   聊天输入框经 LibraryPickerDialog 动态挂载），两条路径加载分块时 Vite 先注入本 CSS 再执行模块。
+   输入框同步所需的 .agent-library-chips / .agent-library-chip / .agent-library-picker-trigger
+   仍留在 agent.css，不在此处。规则顺序维持原 agent.css 基础 → review-workspace.css 覆写的级联。 */
+
+/* —— 作品库（§6） —— 只收定稿视频：列表缩略图/标题/定稿时间，详情播放与采用稿。 */
+.agent-library { display:flex; flex-direction:column; gap:12px; }
+.agent-root .agent-library-item { display:flex; align-items:center; gap:16px; text-align:left; background:white; border:1px solid var(--frame-line); border-radius:9px; padding:12px 16px; min-height:72px; }
+.agent-root .agent-library-item:hover { background:var(--frame-soft); }
+.agent-library-thumb { width:96px; height:54px; flex-shrink:0; border-radius:6px; overflow:hidden; background:var(--frame-soft); display:grid; place-items:center; }
+.agent-library-thumb video { width:100%; height:100%; object-fit:cover; display:block; }
+.agent-library-meta { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.agent-library-meta strong { font-size:14px; font-weight:500; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.agent-library-meta small { font-size:11px; color:var(--frame-muted); }
+.agent-library-finalized { font-size:11px; color:var(--frame-muted); margin-bottom:14px; }
+.agent-library-source { border:1px solid var(--frame-line); border-radius:8px; background:#fbfaf6; margin-top:16px; }
+.agent-library-source summary { cursor:pointer; padding:11px 14px; font-size:13px; color:var(--frame-ink); }
+.agent-library-text { padding:2px 16px 14px; font-size:13px; max-height:340px; overflow:auto; }
+.agent-library-review-sources { list-style:none; margin:0; padding:6px 14px 12px; display:grid; gap:10px; }
+.agent-library-review-sources > li > .agent-stage-muted { font-size:11px; margin:0 0 2px; }
+.agent-library-review-sources > li > .agent-library-text { padding:2px 0 0; max-height:220px; }
+.agent-root .agent-library-back { background:var(--frame-green); color:white; padding:8px 18px; font-size:13px; }
+.agent-root .agent-library-back:hover { background:#2b503e; }
+.agent-root .agent-library-back:disabled { background:#b5b3a6; cursor:default; }
+
+/* G4-2 详情勾选区（弹层与详情共用）：勾选只随下一条消息带入，不是采用清单。 */
+.agent-library-select { border:1px solid var(--frame-line); border-radius:8px; background:#fbfaf6; margin-top:16px; padding:11px 14px 13px; }
+.agent-library-select h4 { font-size:13px; font-weight:500; color:var(--frame-ink); }
+.agent-library-select p { font-size:11px; margin:2px 0 6px; }
+.agent-library-select ul { list-style:none; margin:0; padding:0; display:grid; gap:2px; }
+.agent-library-select li.agent-library-project-group { font-size:11px; color:var(--frame-muted); padding-top:4px; }
+.agent-library-select label { display:flex; align-items:center; gap:8px; font-size:13px; padding:4px 0; cursor:pointer; }
+.agent-library-select small { font-size:11px; color:var(--frame-muted); }
+.agent-library-material-preview { margin:0 0 8px 24px; font-size:12px; }
+.agent-library-material-preview summary { cursor:pointer; color:var(--frame-green); font-size:11px; }
+.agent-library-material-preview .agent-preview-media { margin-top:8px; }
+.agent-library-material-preview :is(video,img) { max-height:220px; object-fit:contain; }
+.agent-library-material-preview audio { max-width:100%; }
+.agent-library-select .agent-project-file { margin-inline-start:24px; }
+.agent-library-select .agent-project-file>summary { padding:0 0 5px; font-size:11px; color:var(--frame-green); }
+
+/* §11.7 来源5/8：作品库选择弹层的列表体。 */
+.agent-library-picker-body h4 { margin:10px 0 2px; font-size:13px; font-weight:500; color:var(--frame-ink); }
+.agent-library-picker-list { list-style:none; margin:0; padding:0; display:grid; gap:6px; }
+.agent-library-picker-list button { display:grid; gap:2px; width:100%; text-align:left; border:1px solid var(--frame-line); border-radius:7px; background:#fbfaf6; padding:9px 12px; }
+.agent-library-picker-list button:hover { background:var(--frame-soft); }
+.agent-library-picker-list strong { font-size:13px; color:var(--frame-ink); font-weight:500; }
+.agent-library-picker-list small { font-size:11px; color:var(--frame-muted); }
+
+/* —— 设置页作品库视图覆写（原 review-workspace.css）—— */
+.agent-library-shelf { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:clamp(14px,2.2vw,38px); }
+.agent-root .agent-library-item { display:block; min-width:0; min-height:0; min-inline-size:0; padding:0 0 6px; border:0; background:none; border-radius:4px; }
+.agent-root .agent-library-item:hover { background:#efede6; }
+.agent-library-thumb { display:block; width:100%; height:auto; aspect-ratio:1.62; border-radius:4px; }
+.agent-library-thumb .agent-revision-cover { height:100%; background:#e6e4da; }
+.agent-library-meta { position:relative; margin-top:9px; padding-right:22px; }
+.agent-library-meta strong { font:600 clamp(18px,1.7vw,25px)/1.45 var(--frame-serif); }
+.agent-library-meta small,.agent-library-finalized { font-size:13px; color:var(--frame-muted); }
+.agent-library-meta>svg { position:absolute; right:2px; top:5px; color:var(--frame-accent); }
+@media (max-width:760px) {
+  .agent-library-shelf { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+/* —— 共享弹窗/按钮基元：WorkLibrary 与 FrameSettings（含模型配置、Skill、成员面板）两个懒入口都渲染，
+   FrameSettings 静态 import 本模块，故放在这个共享块里可保证先于两处 DOM 就位。 —— */
+.agent-modal-backdrop { position:fixed; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(24,38,28,.29); backdrop-filter:blur(3px); }
+.agent-modal { width:100%; max-width:440px; max-height:calc(100dvh - 48px); overflow-y:auto; padding:22px 24px; background:#fff; border:1px solid var(--frame-line); border-radius:12px; box-shadow:0 18px 50px rgba(20,35,28,.18); }
+.agent-modal-header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin-bottom:16px; }
+.agent-modal-header h3 { color:var(--frame-ink); font-size:16px; font-weight:600; line-height:1.6; }
+.agent-modal-header p { margin-top:4px; color:var(--frame-muted); font-size:11px; line-height:1.8; }
+.agent-modal-actions { display:flex; justify-content:flex-end; gap:9px; margin-top:16px; padding-top:14px; border-top:1px solid var(--frame-line); }
+.agent-root .agent-secondary-button { background:var(--frame-soft); border:1px solid var(--frame-line); }
+.agent-root .agent-primary-button { background:var(--frame-green); color:#fff; }
+.agent-root .agent-primary-button:hover { background:#2b503e; }
+@media (max-width:760px) {
+  .agent-modal-backdrop { align-items:flex-end; padding:0; }
+  .agent-modal { max-width:100%; border-radius:16px 16px 0 0; }
+  .agent-modal-actions .agent-primary-button { flex:1; min-height:42px; }
+}

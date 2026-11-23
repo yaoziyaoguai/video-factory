@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, open, rm, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { once } from "node:events";
+import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
+import { monitorEventLoopDelay } from "node:perf_hooks";
+import { sizedMp4 } from "./helpers/sized-mp4.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +18,10 @@ import { FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot } from "../src/server
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { realRenderValidator } from "../src/server/agent/media-config.js";
 import { saveKeyedServiceSettings, saveKeylessServiceSettings, saveNewsNowServiceSettings, savePexelsServiceSettings } from "../src/server/agent/free-service-settings.js";
+import { StockClient } from "../src/server/agent/stock-providers.js";
+import { importMaterial } from "../src/server/agent/material-store.js";
+import { ProductionBlobs } from "../src/server/agent/production-blobs.js";
+import { AgentError } from "../src/server/agent/errors.js";
 import { canonicalJson, systemClock } from "../src/server/agent/util.js";
 import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { localRenderIntentOf } from "./helpers/tool-args.js";
@@ -276,6 +284,24 @@ test("T3-06 Pi 链：prompt+采用图片正式交付，PC 来源与刷新一致�
   assert.deepEqual(pcBatch.json().results, search.results, "PC 与 Pi 取得相同候选语义");
   assert.deepEqual(refreshedBatch.json(), pcBatch.json(), "PC 刷新不混入采用尺寸");
 
+  a.faux!.setResponses([
+    fauxAssistantMessage([fauxToolCall("search_materials", { query: "mountain", kind: "video", limit: 3 })]),
+    context => { search = lastToolJson<MaterialSearchResult>(context); return fauxAssistantMessage("片段已可预览。"); },
+  ]);
+  await a.service.sendMessage("local-owner", conversationId, input("先只看候选视频"));
+  await done(a, conversationId);
+  const candidateId = search.results[0]!.candidateId;
+  const previewPath = `/api/agent/v1/material-batches/${search.batchId}/candidates/${candidateId}/preview`;
+  const count = () => a.database.prepare("SELECT COUNT(*) AS n FROM production_blobs").get();
+  const priorBlobs = count();
+  const preview = await a.app.inject({ method: "GET", url: previewPath, headers: httpHeaders });
+  assert.equal(preview.statusCode, 200); assert.equal(preview.headers["content-type"], "video/mp4");
+  assert.equal(preview.headers["x-content-type-options"], "nosniff");
+  assert.deepEqual(preview.rawPayload, clip);
+  assert.deepEqual(count(), priorBlobs, "预览不登记采用");
+  assert.equal((a.database.prepare("SELECT imported_blob_id FROM material_candidates WHERE id=?").get(candidateId) as { imported_blob_id: string | null }).imported_blob_id, null);
+  assert.equal((await a.app.inject({ method: "GET", url: previewPath.replace(search.batchId, "batch-other"), headers: httpHeaders })).statusCode, 404);
+  await assert.rejects(async () => a.service.previewMaterialVideo("other-owner", search.batchId, candidateId, new AbortController().signal), { code: "NOT_FOUND" });
   // 视频路径同样保留：搜索→采用→交付 video 修订可读、来源仍在。
   a.faux!.setResponses([
     fauxAssistantMessage([fauxToolCall("search_materials", { query: "mountain", kind: "video", limit: 3 })]),
@@ -445,6 +471,16 @@ test("T3-13a Pi 链：默认超过两分钟不中断下载，用户 stop 仍生�
   assert.equal(count(a.database, "artifacts"), 0, "无迟到交付");
   assert.equal(count(a.database, "request_deliveries"), 0);
   assert.equal(count(a.database, "tool_invocations", "tool_name='deliver_artifacts'"), 0, "交付调用从未发生");
+
+  const stopped = a.database.prepare("SELECT id,execution_epoch FROM requests WHERE id=?").get(sent.receipt.requestId) as { id: string; execution_epoch: number };
+  const candidateId = a.database.prepare("SELECT id FROM material_candidates").pluck().get() as string;
+  const stage = path.join(directory, "should-not-start");
+  const fetchAgain = t.mock.fn(pexelsFetch);
+  await assert.rejects(importMaterial(a.database, systemClock, new ProductionBlobs(a.database, directory, systemClock),
+    stage, new StockClient({}, fetchAgain), { ownerId: "local-owner", conversationId, requestId: stopped.id },
+    { executionEpoch: stopped.execution_epoch }, candidateId), (error: unknown) => error instanceof AgentError && error.code === "REQUEST_NOT_RUNNING");
+  assert.equal(fetchAgain.mock.callCount(), 0);
+  await assert.rejects(stat(stage), { code: "ENOENT" });
 
   a.faux!.setResponses([fauxAssistantMessage("我们继续聊。")]);
   const next = await a.service.sendMessage("local-owner", conversationId, input("继续聊"));
@@ -701,4 +737,75 @@ test("T3-15 Pi 链+真实 FFmpeg：正式交付后免费受理 ordered_concat A/
   assert.deepEqual(assetIds, ["101", "202"], "来源只 A/B，按首次出现顺序去重");
   assert.ok(!JSON.stringify(outputRevision.content.sources).includes("303"), "未采用候选不混入");
   assert.deepEqual(readOutput().content, outputRevision.content, "再次读取（刷新）来源保持");
+});
+
+test("ISS-04 导入和落库存储 512 MiB 真实可解码视频时保持流式内存与事件循环上限", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-stock-large-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const clip = path.join(directory, "clip.mp4");
+  const source = path.join(directory, "source.mp4");
+  const bytes = 512 * 1024 ** 2;
+  await makeClip(clip, "blue", 4, 1);
+  await sizedMp4(clip, source, bytes, 1);
+  // 供应商端在独立进程发送文件，本进程的 RSS 只测真实 fetch 接收、探测与落库。
+  const provider = spawn(process.execPath, ["-e", `
+    const fs = require("node:fs"), http = require("node:http");
+    http.createServer((req, res) => {
+      if (req.url.startsWith("/v1/videos/search")) { res.setHeader("content-type","application/json"); res.end(process.argv[2]); return; }
+      res.writeHead(200, { "content-length": fs.statSync(process.argv[1]).size, "content-type": "video/mp4" });
+      fs.createReadStream(process.argv[1]).pipe(res);
+    }).listen(0, "127.0.0.1", function() { console.log(this.address().port); });
+  `, source, JSON.stringify({ videos: [videoEntry(71, "Large", "video.mp4")] })], { stdio: ["ignore", "pipe", "inherit"] });
+  const closed = once(provider, "exit");
+  t.after(async () => { provider.kill(); await closed; });
+  const port = Number(String((await once(provider.stdout, "data"))[0]).trim());
+  assert.ok(port > 0);
+
+  const previous = getGlobalDispatcher();
+  const local = new Agent();
+  const mapped = local.compose(dispatch => (opts, handler) => {
+    assert.ok(["api.pexels.com", "videos.pexels.com"].includes(new URL(String(opts.origin)).host));
+    return dispatch({ ...opts, origin: `http://127.0.0.1:${port}` }, handler);
+  });
+  setGlobalDispatcher(mapped);
+  t.after(async () => { setGlobalDispatcher(previous); await local.close(); });
+  const a = await assembleOfflineAgent({ dataDir: directory, uiOrigin: origin, media: { autoStart: false } });
+  t.after(() => a.close());
+  assert.ok(a.production);
+  savePexelsServiceSettings(a.database, systemClock, "local-owner", { commandId: cmd(), expectedRevision: 0, enabled: true, apiKey: "fixture" });
+  const owner = "local-owner";
+  const conversationId = a.service.createConversation(owner, { commandId: cmd(), title: "大文件实测" }).conversation.id;
+  let candidateId = "";
+  a.faux!.setResponses([fauxAssistantMessage([fauxToolCall("search_materials", { kind: "video", query: "large", limit: 1, provider: "pexels" })]),
+    context => { candidateId = lastToolJson<MaterialSearchResult>(context).results[0]!.candidateId; return fauxAssistantMessage("已找到视频。"); }]);
+  await a.service.sendMessage(owner, conversationId, input("搜索视频"));
+  await done(a, conversationId);
+  assert.ok(candidateId);
+  let result: MaterialImportResult | undefined;
+  a.faux!.setResponses([fauxAssistantMessage([fauxToolCall("import_material", { candidateId })]),
+    context => { result = lastToolJson<MaterialImportResult>(context); return fauxAssistantMessage("已采用。"); }]);
+  const initial = process.memoryUsage.rss();
+  let peak = initial;
+  const monitor = monitorEventLoopDelay({ resolution: 4 });
+  const sampler = setInterval(() => { peak = Math.max(peak, process.memoryUsage.rss()); }, 5);
+  monitor.enable();
+  try {
+    await a.service.sendMessage(owner, conversationId, input("采用这段视频"));
+    await waitFor(() => activeRequests(a, conversationId) === 0, 60_000);
+    assert.ok(result, "应收到真实下载、探测、登记后的素材");
+    const imported = a.production.blobs.get(owner, result.blobId);
+    assert.equal(imported.size_bytes, bytes);
+    // 模拟编码器写完一个独立成片，此处只改变合法 free box 的内容。
+    const handle = await open(source, "r+");
+    try { await handle.write(Buffer.from([2]), 0, 1, bytes - 1); } finally { await handle.close(); }
+    const output = await a.production.blobs.persistFromFileAsync(owner, conversationId, source, "video/mp4", result.durationMs);
+    assert.notEqual(output.digest, imported.digest);
+    assert.equal((await stat(a.production.blobs.filePath(output.digest))).size, bytes);
+    const rssMiB = (Math.max(peak, process.memoryUsage.rss()) - initial) / 1024 ** 2;
+    const lagP99Ms = monitor.percentile(99) / 1e6;
+    console.log("ISS-04 512 MiB", JSON.stringify({ importBytes: imported.size_bytes, outputBytes: output.size_bytes, rssMiB, lagP99Ms, samples: monitor.count }));
+    assert.ok(monitor.count > 0);
+    assert.ok(rssMiB < 64, String(rssMiB));
+    assert.ok(lagP99Ms < 20, String(lagP99Ms));
+  } finally { clearInterval(sampler); monitor.disable(); }
 });

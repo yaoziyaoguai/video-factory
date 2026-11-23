@@ -33,8 +33,10 @@ export FRAME_CREATIVE_GROUP="$(getent group 1001 | cut -d: -f1 || true)"
 FRAME_CREATIVE_USER="${FRAME_CREATIVE_USER:-frame-creative}"
 FRAME_CREATIVE_GROUP="${FRAME_CREATIVE_GROUP:-frame-creative}"
 # Compose 的 shell 环境优先于 env-file；本驱动只允许自己生成的无敏感 fixture。
+unset FRAME_CREDENTIAL_SECRET FRAME_BACKUP_AGE_RECIPIENT FRAME_BACKUP_AGE_IDENTITY FRAME_BACKUP_OPENSSL_CERT FRAME_BACKUP_OPENSSL_KEY
 unset VIDEO_FACTORY_AUTH_USERNAME VIDEO_FACTORY_AUTH_PASSWORD_HASH VIDEO_FACTORY_AUTH_SESSION_SECRET VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+unset NEWSNOW_ALLOWED_ORIGINS NEWSNOW_ALLOW_PRIVATE_NETWORK
 export FRAME_HTTP_PROXY= FRAME_HTTPS_PROXY= FRAME_NO_PROXY=localhost,127.0.0.1,vf-newsnow
 old_sha=c1b54c68f3fb7336496d8748d33171c67c062660
 container=video_factory_prod
@@ -42,7 +44,7 @@ volume=video-factory_video_factory_workspace
 alias=frame-creative:pi-1.5-v1
 unit=/etc/systemd/system/frame-creative.service
 host_script=/opt/frame-creative/creative-runner-host.mjs
-maintenance=/etc/nginx/snippets/frame-release-maintenance.conf
+maintenance=/run/video-factory/frame.maintenance
 health=http://127.0.0.1:4317/api/health
 evidence="$RUNNER_TEMP/frame-release-evidence"
 [[ ! -e "$evidence" ]]
@@ -140,7 +142,7 @@ const fs=require('node:fs'),crypto=require('node:crypto');
 const salt=crypto.randomBytes(16);
 const hash=`scrypt:v1:${salt.toString('base64url')}:${crypto.scryptSync('synthetic-ci-password',salt,32).toString('base64url')}`;
 fs.writeFileSync(process.argv[2],[
-  'AGENT_UI_ORIGIN=https://frame-ci.example', 'VIDEO_FACTORY_AUTH_USERNAME=frame-ci',
+  'AGENT_UI_ORIGIN=https://frame-ci.example', `FRAME_CREDENTIAL_SECRET=${crypto.randomBytes(32).toString('hex')}`, 'VIDEO_FACTORY_AUTH_USERNAME=frame-ci',
   `VIDEO_FACTORY_AUTH_PASSWORD_HASH=${hash}`, `VIDEO_FACTORY_AUTH_SESSION_SECRET=${crypto.randomBytes(32).toString('hex')}`,
   'FRAME_HTTP_PROXY=', 'FRAME_HTTPS_PROXY=', 'FRAME_NO_PROXY=localhost,127.0.0.1,vf-newsnow', '',
 ].join('\n'),{mode:0o600});
@@ -242,21 +244,13 @@ for ((i=0;i<30;i++)); do [[ ! -s "$work/proxy-port" ]] || break; kill -0 "$proxy
 [[ -s "$work/proxy-port" ]]
 proxy_port="$(<"$work/proxy-port")"
 [[ "$proxy_port" =~ ^[0-9]+$ ]]
-cat > "$FRAME_NGINX_SITE" <<NGINX
-server {
-    listen 443 ssl;
-    server_name frame-ci.example;
-    ssl_certificate $cert_dir/server.crt;
-    ssl_certificate_key $cert_dir/server.key;
-    location / {
-        proxy_pass http://127.0.0.1:$proxy_port;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-    }
-}
-NGINX
+install -D -m 644 "$repo/deploy/nginx/snippets/frame-security-headers.conf" /etc/nginx/snippets/frame-security-headers.conf
+install -D -m 644 "$repo/docker/frame-maintenance.nginx.conf" /etc/nginx/snippets/frame-release-maintenance.conf
+sed -e "s|/etc/letsencrypt/live/video.wangjinkun333.me/fullchain.pem|$cert_dir/server.crt|" \
+    -e "s|/etc/letsencrypt/live/video.wangjinkun333.me/privkey.pem|$cert_dir/server.key|" \
+    -e 's|video\.wangjinkun333\.me|frame-ci.example|g' \
+    -e "s|127.0.0.1:4317|127.0.0.1:$proxy_port|g" \
+    "$repo/deploy/nginx/video.wangjinkun333.me.conf" > "$FRAME_NGINX_SITE"
 chmod 644 "$FRAME_NGINX_SITE"
 ln -s "$FRAME_NGINX_SITE" /etc/nginx/sites-enabled/frame-release-ci
 cp "$FRAME_NGINX_SITE" "$evidence/original-nginx-site"
@@ -277,6 +271,7 @@ start_fixture() {
   for ((i=0;i<60;i++)); do if check_health "$health" "$sha" >/dev/null 2>&1; then break; fi; sleep 2; done
   check_health "$health" "$sha"
   check_health "$PUBLIC_HEALTH_URL" "$sha"
+  NODE_EXTRA_CA_CERTS="$work/ca.crt" "$node" "$repo/scripts/smoke-frame-maintenance.mjs" http://frame-ci.example https://frame-ci.example
   [[ "$(schema)" == "$expected" ]]
   docker exec "$container" node -e 'require("node:fs").writeFileSync("/data/factory/agent/frame-release-ci-sentinel.txt",process.argv[1]+"\n")' "$sentinel"
   docker inspect --format '{{json .Mounts}}' "$container" | python3 -I -c 'import json,sys; assert not any(m["Destination"]=="/run/frame-creative" for m in json.load(sys.stdin))'
@@ -315,7 +310,7 @@ PY
 entry_restored() {
   cmp "$evidence/original-nginx-site" "$FRAME_NGINX_SITE"
   [[ ! -e "$maintenance" ]]
-  [[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{}' "$AGENT_UI_ORIGIN/api/auth/login")" == 400 ]]
+  [[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $AGENT_UI_ORIGIN" -H 'x-video-factory-request: studio' -d '{}' "$AGENT_UI_ORIGIN/api/auth/login")" == 400 ]]
   [[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' "$AGENT_UI_ORIGIN/api/agent/v1/settings/model-connections")" == 401 ]]
 }
 assert_failed_release() {

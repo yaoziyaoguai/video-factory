@@ -193,7 +193,7 @@ test("A-24 普通装配工具白名单随合同同步；Skill 读取不再有间
   const definitions = buildAgentTools({ current: null }, new BusinessTools(a.database, () => new Date().toISOString(), () => ({})));
   // Skill 参考文件读取已收敛到隔离创作环境的原生 read（/skills）；普通装配只保留业务工具白名单。
   assert.deepEqual(definitions.map(tool => tool.name).sort(), [
-    "confirm_review", "deliver_artifacts", "dub_free", "import_material", "list_production", "prepare_production",
+    "confirm_review", "create_subtitles", "deliver_artifacts", "dub_free", "import_material", "list_production", "prepare_production",
     "publish_project", "read_artifact", "read_material_batch", "read_proposal", "read_run",
     "read_trends", "read_work", "record_work_feedback", "render_project", "search_materials", "start_work",
   ]);
@@ -326,12 +326,10 @@ test("A-09/22/37 proposals validate graph/full model binding; expiry can be prep
   assert.match(received, new RegExp(renewed.id)); assert.match(received, /referencedProposals/);
 });
 
-test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real entry guards", async t => {
+test("A-23/38 Studio cookie and live SSE auth loss use the real entry guards", async t => {
   const { buildFrameApp } = await import("../src/server/agent/app.js");
   const { StudioAuthenticator, createPasswordHash } = await import("../src/server/auth.js");
   const { validatorFor } = await import("../src/server/agent/validate.js");
-  const { MaintenanceGate } = await import("../src/server/maintenance-gate.js");
-  const { transitionMaintenanceGate } = await import("../src/server/maintenance.js");
   const a = await fixture(t); let now = Date.now();
   for (const method of ["GET", "POST"] as const) {
     const remote = await a.app.inject({ method, url: method === "GET" ? "/api/agent/v1/bootstrap" : "/api/agent/v1/conversations",
@@ -340,12 +338,9 @@ test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real ent
     assert.equal(remote.statusCode, 403, "无认证本地模式拒绝非环回来源");
     assert.equal(validatorFor("Error")(remote.json()).ok, true);
   }
-  const gateDir = await mkdtemp(path.join(tmpdir(), "frame-gate-")); t.after(() => rm(gateDir, { recursive: true, force: true }));
-  await transitionMaintenanceGate(gateDir, "open", "test");
-  const gate = new MaintenanceGate({ directory: gateDir }); await gate.announceStartup();
   const auth = { username: "cookie-owner", passwordHash: createPasswordHash("test-only", Buffer.from("frame-audit-test-salt")), sessionSecret: "frame-audit-test-session-secret-32-characters", secureCookie: false, sessionTtlSeconds: 1, now: () => now };
   const cookie = new StudioAuthenticator(auth).createSessionCookie();
-  const app = buildFrameApp({ auth, maintenanceGate: gate,
+  const app = buildFrameApp({ auth,
     agent: { service: a.service, resolveOwner: () => "must-not-bypass-cookie", uiOrigin: origin } });
   t.after(() => app.close());
   const headers = { cookie, origin, "content-type": "application/json", "x-video-factory-request": "studio" };
@@ -359,9 +354,6 @@ test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real ent
   assert.equal((await app.inject({ method: "GET", url: "/api/health" })).json().runtime, "pi");
   const created = await app.inject({ method: "POST", url: "/api/agent/v1/conversations", headers, payload: { commandId: "cmd-cookie", title: "cookie" } });
   assert.equal(created.statusCode, 201);
-  await transitionMaintenanceGate(gateDir, "draining", "test");
-  const denied = await app.inject({ method: "POST", url: "/api/agent/v1/conversations", headers, payload: { commandId: "cmd-maintenance", title: "denied" } });
-  assert.equal(denied.statusCode, 503); assert.equal(validatorFor("Error")(denied.json()).ok, true);
   const id = created.json().id;
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address() as { port: number };
@@ -374,7 +366,7 @@ test("A-23/38 Studio cookie, maintenance and live SSE auth loss use the real ent
   const expired = await app.inject({ method: "GET", url: "/api/agent/v1/bootstrap", headers }); assert.equal(expired.statusCode, 401);
 });
 
-test("A-14 steer losing its streaming window is persisted as failed and cannot enter the next turn", async t => {
+test("A-14 steer losing its streaming window returns 409 without a message, receipt or next-turn input", async t => {
   const a = await fixture(t, { fauxTokensPerSecond: 100 }), id = create(a, "steer race");
   const open = a.host.openConversationSession.bind(a.host);
   let session: Awaited<ReturnType<typeof open>>["session"] | undefined;
@@ -386,10 +378,20 @@ test("A-14 steer losing its streaming window is persisted as failed and cannot e
   await waitFor(() => Boolean(session?.isStreaming));
   const originalSteer = session!.steer.bind(session!);
   t.mock.method(session!, "steer", async (text: string) => { await session!.abort(); return originalSteer(text); });
-  await assert.rejects(async () => a.service.sendMessage("local-owner", id, input("must-not-leak", { mode: "steer", steerRequestId: receipt.requestId })), (error: any) => error.code === "REQUEST_NOT_RUNNING");
+  const steer = input("must-not-leak", { mode: "steer", steerRequestId: receipt.requestId });
+  const sendSteer = () => a.app.inject({ method: "POST", url: `/api/agent/v1/conversations/${id}/messages`,
+    headers: { origin, "x-video-factory-request": "studio" }, payload: steer });
+  const rejected = await sendSteer();
+  assert.equal(rejected.statusCode, 409);
+  assert.equal(rejected.json().code, "REQUEST_NOT_RUNNING");
   await done(a, id);
-  const rejected = snap(a, id).messages.items.find(message => message.text === "must-not-leak");
-  assert.equal(rejected?.state, "failed");
+  const messages = snap(a, id).messages.items;
+  assert.equal(messages.some(message => message.text === "must-not-leak"), false);
+  assert.equal(a.database.prepare("SELECT COUNT(*) FROM command_receipts WHERE command_id=?").pluck().get(steer.commandId), 0);
+  const cursor = snap(a, id).eventCursor;
+  assert.equal((await sendSteer()).statusCode, 409);
+  assert.deepEqual(snap(a, id).messages.items, messages);
+  assert.equal(snap(a, id).eventCursor, cursor);
   let nextContext = "";
   a.faux!.setResponses([ctx => { nextContext = JSON.stringify(ctx.messages); return fauxAssistantMessage("next"); }]);
   await a.service.sendMessage("local-owner", id, input("new topic")); await done(a, id);

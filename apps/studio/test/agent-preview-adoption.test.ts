@@ -5,7 +5,7 @@ import path from "node:path";
 import { it } from "node:test";
 import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG } from "../src/server/agent/offline.js";
 import { createWork } from "../src/server/agent/creative-work.js";
-import { deliverReviewDrafts } from "./helpers/creative-work-fixture.js";
+import { deliverReviewDrafts, trimPastDelivery } from "./helpers/creative-work-fixture.js";
 import type { ContentSource, ProductionIntent } from "../src/shared/agent/generated/contracts.js";
 
 // 事务/角色/来源机制用例；媒体端口替身不充当V02/V08真实制作验收。
@@ -53,6 +53,8 @@ it("DGR-06 候选不入库，预览一步同字节定稿原子化并保留原预
     const makeMessage = () => ({ commandId: commandId(), text: "以这版定稿并入库", target: null, skillId: null, proposalRef: null, mode: "new" as const, steerRequestId: null,
       reviewConfirmation: { kind: "adopt_preview" as const, workId: work.id, groupId: clipGroup.id, itemId: clip.id,
         source: originalRef, action: "finalize_video" as const } });
+    trimPastDelivery(app.database, scope, new Date().toISOString(), originalRef.artifactId);
+    assert.equal(app.database.prepare("SELECT 1 FROM events WHERE entity_id=? AND kind='artifact.delivered'").get(basis.artifactId), undefined);
     const beforeRejected = counts();
     // R5：缺失认可提示定位到组·事项·准确版本，不只报事项名（A10）。
     assert.throws(() => app.service.sendMessage(owner, conversationId, makeMessage()), /「内容·内容依据·v1」这一版还未获得认可/);

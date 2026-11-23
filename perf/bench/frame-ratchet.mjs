@@ -28,7 +28,7 @@ const ROUTES = ["open", "send"];
 const WIDTHS = [1440, 960];
 // 门槛指标：open 三项都要求 B<=A 配对；ceiling 检查仅在对应键存在时执行（inputReadyMs 首次接受时建立）。
 // settingsNavMs 只验样本完整性，不设门槛（无改善证据，观察单列）。
-const GATE_METRICS = { open: ["ready", "fontReady", "inputReadyMs"], send: ["firstFeedbackMs", "turnDoneMs"] };
+const GATE_METRICS = { open: ["ready", "fontReady", "inputReadyMs", "cssBytes"], send: ["firstFeedbackMs", "turnDoneMs"] };
 const OBSERVED_METRICS = { open: ["settingsNavMs"], send: [] };
 // 配对容差（2026-11-18 修订，依据 R6 四轮完整配对实测）：send 旅程发生在页面加载完成之后，
 // A/B 唯一差异（压缩字节）不在其关键路径，四轮 firstFeedbackMs/turnDoneMs 的 A/B 差在
@@ -87,16 +87,20 @@ function validate(doc, ceiling) {
       if (!Array.isArray(version?.runs) || version.runs.length === 0) { errors.push(`route ${route} ${side}: runs 缺失或为空`); continue; }
       const summary = version.summary ?? {};
       const good = version.runs.filter(r => r?.ok === true);
+      const sharedServer = doc.transferComparison === "shared-server";
+      const minimum = sharedServer && route === "send" ? 40 : 10;
+      if (sharedServer && good.some(run => run.entryCssEncoding !== (side === "A" ? "identity" : "br")))
+        errors.push(`route ${route} ${side}: 初始样式的响应编码与采样侧不符`);
       if (summary.n !== version.runs.length) errors.push(`route ${route} ${side}: summary.n=${summary.n} 与 runs 实测 ${version.runs.length} 不一致`);
       if (summary.n_ok !== good.length) errors.push(`route ${route} ${side}: summary.n_ok=${summary.n_ok} 与有效样本 ${good.length} 不一致`);
-      if (good.length < 10) errors.push(`route ${route} ${side}: 有效样本 ${good.length} < 10`);
+      if (good.length < minimum) errors.push(`route ${route} ${side}: 有效样本 ${good.length} < ${minimum}`);
       recomputed[`${route}.${side}`] = {};
       for (const metric of [...GATE_METRICS[route], ...OBSERVED_METRICS[route]]) {
         const raw = good.map(r => r?.[metric]);
         const valid = raw.filter(isSample);
         const invalid = raw.length - valid.length;
         if (invalid) errors.push(`route ${route} ${side} 指标 ${metric}: ${invalid} 个样本为 null/非有限/负值，有效样本 ${valid.length}`);
-        if (valid.length < 10) { errors.push(`route ${route} ${side} 指标 ${metric}: 有效样本 ${valid.length} < 10，p75 不可信`); continue; }
+        if (valid.length < minimum) { errors.push(`route ${route} ${side} 指标 ${metric}: 有效样本 ${valid.length} < ${minimum}，p75 不可信`); continue; }
         const p75 = pct(valid, 0.75);
         recomputed[`${route}.${side}`][metric] = { p75, values: valid, n: valid.length };
         const claimed = summary[metric]?.p75;
@@ -112,6 +116,7 @@ function validate(doc, ceiling) {
         const tol = PAIR_TOLERANCE[route] ?? 0;
         if (b.p75 > a.p75 * (1 + tol)) errors.push(`route ${route} 指标 ${metric}: 配对 p75 变慢 B=${b.p75} > A=${a.p75}×${(1 + tol).toFixed(2)}`);
         const cap = ceilingGate(ceiling, `${route}::${metric}_p75`);
+        if (metric === "cssBytes" && cap !== undefined && a.p75 > cap) errors.push(`route ${route} 原始 CSS p75=${a.p75} 超过上限 ${cap}`);
         if (cap !== undefined && b.p75 > cap) errors.push(`route ${route} 指标 ${metric}: B p75=${b.p75} 超过棘轮上限 ${cap}`);
       }
     }
@@ -172,10 +177,12 @@ function validateGuards(doc, errors) {
       if (route === "open" && Array.isArray(a.images)) for (const left of a.images) {
         const right = Array.isArray(b.images) ? b.images.find(i => i.name === left.name) : null;
         if (!right) { errors.push(`route open 护栏 ${width}: B 侧缺 ${String(left.name)} 截图`); continue; }
+        if (typeof left.file === "string" && typeof right.file === "string" && path.resolve(left.file) === path.resolve(right.file)) errors.push(`route open 护栏 ${width}/${left.name}: 两侧共用截图文件`);
         if (left.overflow || right.overflow) errors.push(`route open 护栏 ${width}/${String(left.name)}: 溢出`);
         if (left.golden !== right.golden) errors.push(`route open 护栏 ${width}/${String(left.name)}: 可见文字改变`);
       }
       if (route === "send") {
+        if (typeof a.screenshotFile === "string" && typeof b.screenshotFile === "string" && path.resolve(a.screenshotFile) === path.resolve(b.screenshotFile)) errors.push(`route send 护栏 ${width}: 两侧共用截图文件`);
         const difference = compareSendGuards(a, b);
         if (difference) errors.push(`route send 护栏 ${width}: ${difference}`);
       }
@@ -238,8 +245,21 @@ async function selftest() {
     console.log(`${pass ? "PASS" : "FAIL"} selftest send ${name}${difference ? ` — ${difference}` : ""}`);
     if (!pass) failed++;
   }
+  const runs = Array.from({ length: 10 }, () => ({ ok: true, entryCssEncoding: "br", firstFeedbackMs: 3, turnDoneMs: 200 }));
+  const side = { runs, summary: { n: 10, n_ok: 10, firstFeedbackMs: { p75: 3 }, turnDoneMs: { p75: 200 } } };
+  const probe = { profile: ceiling.profile, builds: { A: { label: "identity" }, B: { label: "br" } }, transferComparison: "shared-server",
+    results: { send: { A: side, B: side } }, guards: ["A", "B"].map(version => ({ version, route: "send", width: 1440, ok: true,
+      ...withDigest(left), screenshotFile: "same.png", screenshot: "x" })) };
+  const evidenceErrors = validate(probe, ceiling).errors;
+  validateGuards(probe, evidenceErrors);
+  const missingProof = ["有效样本 10 < 40", "初始样式的响应编码", "两侧共用截图文件"];
+  for (const expected of missingProof) {
+    const pass = evidenceErrors.some(error => error.includes(expected));
+    console.log(`${pass ? "PASS" : "FAIL"} selftest 拒绝 ${expected}`);
+    if (!pass) failed++;
+  }
   if (failed) { console.error(JSON.stringify({ status: "FAIL", stage: "selftest", failed }, null, 2)); return 1; }
-  console.log(JSON.stringify({ status: "PASS", stage: "selftest", cases: cases.length + sendCases.length }, null, 2));
+  console.log(JSON.stringify({ status: "PASS", stage: "selftest", cases: cases.length + sendCases.length + missingProof.length }, null, 2));
   return 0;
 }
 

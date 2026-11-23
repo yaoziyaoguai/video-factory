@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, truncate, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -48,7 +49,7 @@ test("persistFromFile：流式哈希等价于 Buffer 路径，硬链接保留源
   const source = path.join(directory, "work", "final.mp4");
   await mkdir(path.join(directory, "work"), { recursive: true });
   await writeFile(source, bytes);
-  const streamed = await blobs.persistFromFile("local-owner", "conv-2", source, "video/mp4", 12_345);
+  const streamed = await blobs.persistFromFileAsync("local-owner", "conv-2", source, "video/mp4", 12_345);
   assert.ok(existsSync(source), "回执边界前源文件保留在尝试目录，恢复仍可从原位读取");
   assert.equal(existsSync(blobs.filePath(streamed.digest)), true);
   assert.equal(streamed.size_bytes, bytes.length);
@@ -57,11 +58,11 @@ test("persistFromFile：流式哈希等价于 Buffer 路径，硬链接保留源
   blobs.verify(streamed);
 
   // 回执落库后归还源文件：仅删尝试目录的链接，blobs 根的内容寻址副本不受影响。
-  blobs.release(source);
+  await rm(source, { force: true });
   assert.ok(!existsSync(source), "release 后源文件归还");
   assert.equal(existsSync(blobs.filePath(streamed.digest)), true, "blobs 根文件仍在");
   blobs.verify(streamed);
-  blobs.release(source); // 重复归还静默幂等。
+  await rm(source, { force: true }); // 重复归还静默幂等。
 
   // 与 Buffer 路径互为去重：同内容不另建行，只按只升级规则补齐标签。
   const buffered = blobs.persist("local-owner", "conv-2", bytes, "application/octet-stream", null);
@@ -70,9 +71,9 @@ test("persistFromFile：流式哈希等价于 Buffer 路径，硬链接保留源
 
   // 同摘要二次落盘（EEXIST 容错）不报错且不产生第二行。
   await writeFile(source, bytes);
-  const again = await blobs.persistFromFile("local-owner", "conv-2", source, "video/mp4", 12_345);
+  const again = await blobs.persistFromFileAsync("local-owner", "conv-2", source, "video/mp4", 12_345);
   assert.equal(again.id, streamed.id);
-  blobs.release(source);
+  await rm(source, { force: true });
 });
 
 // 审计第三阶段：未入库草稿媒体（崩溃遗留 tmp-* 与无行引用的 digest 文件）按天龄清扫；
@@ -149,4 +150,50 @@ test("sweepOrphans：扫描期间不存在可注入的异步间隙，扫描后�
   assert.equal((await blobs.sweepOrphans({ olderThanMs: 86400_000 })).files, 0, "登记文件不被清扫");
   assert.equal(existsSync(blobs.filePath(saved.digest)), true);
   blobs.verify(saved);
+});
+
+test("OPT-01 同摘要并行流共用不可变文件，流中断移除暂存且没有登记", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-stream-"));
+  const db = openAgentDatabase(directory);
+  t.after(async () => { db.close(); await rm(directory, { recursive: true, force: true }); });
+  const blobs = new ProductionBlobs(db, directory, staticClock);
+  const save = (stream: Readable) => blobs.persistFromStream("owner", "conv", stream, "video/mp4", 1000);
+  const payload = Buffer.from("stream fixture");
+  const results = await Promise.all([save(Readable.from([payload])), save(Readable.from([payload]))]);
+  assert.equal(results[0]!.id, results[1]!.id);
+  assert.equal(results[0]!.digest, createHash("sha256").update(payload).digest("hex"));
+  await assert.rejects(save(Readable.from((async function* () { yield Buffer.from("partial"); throw new Error("source stopped"); })())), /source stopped/);
+  assert.deepEqual(await readdir(blobs.stagingRoot), []);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM production_blobs").pluck().get(), 1);
+  blobs.verify(results[0]!);
+
+  const stale = path.join(blobs.stagingRoot, "tmp-old");
+  const keep = path.join(blobs.stagingRoot, "tmp-current");
+  await Promise.all([mkdir(stale), mkdir(keep)]);
+  await utimes(stale, new Date(0), new Date(0));
+  await blobs.sweepStaging();
+  assert.deepEqual(await readdir(blobs.stagingRoot), ["tmp-current"]);
+});
+
+test("ISS-12 登记中途回滚只撤销新建硬链接，跨会话同摘要仍可读取", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-links-rollback-"));
+  const db = openAgentDatabase(directory);
+  t.after(async () => { db.close(); await rm(directory, { recursive: true, force: true }); });
+  const blobs = new ProductionBlobs(db, directory, staticClock);
+  const retained = blobs.persist("owner-a", "conv-a", Buffer.from("共享"), "text/plain", null);
+  await blobs.withStagingDirectory(async stage => {
+    const fresh = path.join(stage, "fresh");
+    await writeFile(fresh, "第一次登记");
+    const prepared = await blobs.prepareFile(fresh);
+    const shared = await blobs.prepareFile(blobs.filePath(retained.digest));
+    db.exec("CREATE TRIGGER reject_test BEFORE INSERT ON production_blobs WHEN NEW.mime_type='text/test' BEGIN SELECT RAISE(ABORT,'controlled rollback'); END");
+    assert.throws(() => blobs.withRegistration("owner-b","conv-b", register => {
+      register(shared, "text/plain", null);
+      register(prepared, "text/test", null);
+    }), /controlled rollback/);
+    assert.equal(existsSync(blobs.filePath(prepared.digest)), false);
+    blobs.verify(retained);
+  });
+  assert.deepEqual(await readdir(blobs.stagingRoot), []);
+  assert.equal(db.prepare("SELECT COUNT(*) FROM production_blobs").pluck().get(), 1);
 });

@@ -1,19 +1,20 @@
+import { videoWireBody } from "./video-image-inputs.js";
+import { AgentError } from "./errors.js";
+import { InvalidImageFile } from "./media-probe.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
-import type { ExecutionInput, ExecutionObservation, ModelBinding, OperationSpec, RecoveryQuery, InputRef, MarkdownContent } from "../../shared/agent/generated/contracts.js";
+import type { ExecutionInput, ExecutionObservation, ModelBinding, OperationSpec, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
 import { digestOf, type AgentClock } from "./util.js";
 import type { ArkVideoProfile } from "./media-config.js";
-import { getRevisionRow } from "./artifact-store.js";
 import { LocalRenderPort } from "./local-render.js";
 import {
   audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
 } from "./media-port-support.js";
-import { markdownFullText } from "../../shared/agent/markdown.js";
 
 // Ark Seedance 薄适配：submit 只等创建回执并立即保存 task ID；query 只 GET 原任务；
 // 不调用 DELETE（取消/删除复合语义）；终态账务不进入周期供应商查询；无 task ID 的 unknown 稳定返回。
@@ -64,21 +65,23 @@ export class ArkMediaPort implements MediaExecutionPort {
     }
     if (!resolved.apiKey) return this.preRefusal(input.attemptId, "媒体凭据未启用；未提交任何请求，不会自动重试。");
     // 输入已经过能力校验，worker 已核对冻结修订；这里直接读取正文，不重新核对整份执行对象。
-    const ref = input.operation.inputs[0] as Extract<InputRef, { kind: "text" | "artifact_revision" }>;
-    const prompt = ref.kind === "text" ? ref.text : markdownFullText(JSON.parse(getRevisionRow(this.db, ref.artifactId, ref.revisionId)!.content_json) as MarkdownContent);
     const parameters = input.operation.parameters;
+    let body;
+    try {
+      body = await videoWireBody(this.db, this.blobs, input, resolved.profile.modelId, (prompt, images) => ({
+        model: resolved.profile.modelId,
+        content: [{ type: "text", text: prompt }, ...images.map(({ role, url }) => ({ type: "image_url", role, image_url: { url } }))],
+        ratio: images.some(image => image.role === "first_frame") ? "adaptive" : parameters.aspectRatio, duration: parameters.durationSeconds, resolution: parameters.resolution,
+        generate_audio: parameters.audioMode !== "none", watermark: false,
+      }));
+    } catch (error) {
+      if (error instanceof AgentError || error instanceof InvalidImageFile) return this.preRefusal(input.attemptId, error.message);
+      throw error;
+    }
     let observation: ExecutionObservation;
     try {
       const response = await providerRequestJson("POST", new URL(`${resolved.profile.baseUrl}/contents/generations/tasks`),
-        resolved.apiKey, {
-          model: resolved.profile.modelId,
-          content: [{ type: "text", text: prompt }],
-          ratio: parameters.aspectRatio,
-          duration: parameters.durationSeconds,
-          resolution: parameters.resolution,
-          generate_audio: parameters.audioMode !== "none",
-          watermark: false,
-        }, { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs }) as ArkTask;
+        resolved.apiKey, body, { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs }) as ArkTask;
       const taskId = typeof response.id === "string" && response.id.trim() ? response.id.trim() : null;
       if (!taskId) return this.observations.unstableUnknown(input.attemptId, null, "创建响应缺少任务 ID，结果未核实；不会重新提交。");
       // 先持久任务身份，再返回 running；两者之间中断可凭收据恢复查询。
@@ -179,13 +182,15 @@ export class ArkMediaPort implements MediaExecutionPort {
       db: this.db, blobs: this.blobs, observations: this.observations,
       attemptId: query.attemptId, runId: query.runId, operationId: query.operationId, providerTaskId: query.providerTaskId,
       attemptDir, finalFile: path.join(attemptDir, "download.mp4"),
+      ...(typeof (task?.usage as {completion_tokens?:unknown})?.completion_tokens==="number" ? {usage:{outputTokens:(task!.usage as {completion_tokens:number}).completion_tokens}} : {}),
       ...(task ? { download: { url: validateHttpUrl(content?.video_url), fetchImpl: this.fetchImpl,
         downloadTimeoutMs: this.options.downloadTimeoutMs, maxDownloadBytes: this.options.maxDownloadBytes } } : {}),
-      // Seedance 冻结 720p/16:9：按像素与时长验收；音轨按冻结 audioMode（native 必须有声、none 必须无声）。
-      validate: (facts, op) => (facts.width !== 1280 || facts.height !== 720
-        ? `输出画幅 ${facts.width}x${facts.height} 与冻结参数 1280x720 不符。` : null)
-        ?? durationMismatch(facts, op.parameters.durationSeconds)
-        ?? audioModeMismatch(facts, op.parameters.audioMode),
+      validate: (facts, op) => {
+        const sizes = { "16:9": [1280,720], "9:16": [720,1280], "1:1": [960,960] } as const;
+        const [width,height] = sizes[op.parameters.aspectRatio];
+        if (facts.width !== width || facts.height !== height) return `输出画幅 ${facts.width}x${facts.height} 与冻结参数 ${width}x${height} 不符。`;
+        return durationMismatch(facts, op.parameters.durationSeconds) ?? audioModeMismatch(facts, op.parameters.audioMode);
+      },
       retryMessage: "任务已完成，视频文件暂未完成取得或校验；保留已有文件和任务身份继续核对，不重新生成。",
     });
   }

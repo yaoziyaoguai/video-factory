@@ -73,7 +73,7 @@ export function readAdditionalMediaCurrent(db: AgentDatabase, channelId: Additio
   const row = db.prepare("SELECT revision, display_name, current_configuration_revision_id FROM additional_media_settings WHERE channel_id=?")
     .get(channelId) as { revision: number; display_name: string; current_configuration_revision_id: string } | undefined;
   if (!row) return null;
-  const version = db.prepare("SELECT * FROM additional_media_versions WHERE configuration_revision_id=?")
+  const version = db.prepare("SELECT configuration_revision_id,channel_id,binding_json,profile_json,frame_open(api_key) AS api_key,created_at FROM additional_media_versions WHERE configuration_revision_id=?")
     .get(row.current_configuration_revision_id) as AdditionalMediaVersionRow | undefined;
   if (!version) throw new Error(`additional_media_settings(${channelId}) 引用的配置版本缺失。`);
   return { revision: row.revision, displayName: row.display_name, version };
@@ -89,7 +89,7 @@ export function insertAdditionalMediaVersion(db: AgentDatabase, now: string,
     api_key: apiKey,
     created_at: now,
   };
-  db.prepare("INSERT INTO additional_media_versions(configuration_revision_id,channel_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,?,?,?)")
+  db.prepare("INSERT INTO additional_media_versions(configuration_revision_id,channel_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,?,frame_seal(?),?)")
     .run(version.configuration_revision_id, version.channel_id, version.binding_json, version.profile_json, version.api_key, now);
   return version;
 }
@@ -97,7 +97,7 @@ export function insertAdditionalMediaVersion(db: AgentDatabase, now: string,
 /** 冻结绑定解析：完整 binding 匹配才认；返回值可能是退役 channel 的历史行（调用方按身份明确分发）。 */
 export function resolveAdditionalMediaBinding(db: AgentDatabase, binding: ModelBinding):
   { channelId: AdditionalMediaChannel; profileJson: string; apiKey: string | null } | null {
-  const row = db.prepare("SELECT channel_id, binding_json, profile_json, api_key FROM additional_media_versions WHERE configuration_revision_id=?")
+  const row = db.prepare("SELECT channel_id, binding_json, profile_json, frame_open(api_key) AS api_key FROM additional_media_versions WHERE configuration_revision_id=?")
     .get(binding.configurationRevisionId) as { channel_id: AdditionalMediaChannel; binding_json: string; profile_json: string; api_key: string | null } | undefined;
   if (!row || row.binding_json !== canonicalJson(binding)) return null;
   return { channelId: row.channel_id, profileJson: row.profile_json, apiKey: row.api_key };

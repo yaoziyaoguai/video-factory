@@ -2,7 +2,8 @@ import type { MaterialCandidate, MaterialProvider } from "../../shared/agent/gen
 import { FREE_SERVICE_LABELS, type CapturedStockConfig } from "./free-service-settings.js";
 import { MAX_IMAGE_BYTES, MAX_VIDEO_BYTES } from "./material-store.js";
 import { PexelsClient, PEXELS_MEDIA_HOSTS } from "./pexels-client.js";
-import { cachedPixabayResponse } from "./stock-cache.js";
+import { orderedResults } from "./ordered-results.js";
+import { cachedPixabayResponse, incompetechCatalog } from "./stock-cache.js";
 import {
   downloadWithinBounds, fetchApiJson, StockKindUnsupportedError, StockUnavailableError, stockValueHelpers, type HttpFetch,
 } from "./stock-http.js";
@@ -522,20 +523,19 @@ async function searchNasa(req: { query: string; kind: StockKind; limit: number; 
   const collection = (payload as Record<string, unknown>).collection;
   const items = typeof collection === "object" && collection !== null ? (collection as Record<string, unknown>).items : undefined;
   if (!Array.isArray(items)) throw new StockUnavailableError("NASA 响应格式不可识别。");
-  const out: StockCandidateInput[] = [];
   const seen = new Set<string>();
-  for (const item of items) {
-    if (!item || typeof item !== "object") continue;
+  const found = await orderedResults(items, req.limit, signal, async (item, active) => {
+    if (!item || typeof item !== "object") return null;
     const entry = item as Record<string, unknown>;
     const dataList = entry.data;
     const data = Array.isArray(dataList) && dataList[0] && typeof dataList[0] === "object" ? dataList[0] as Record<string, unknown> : null;
-    if (!data) continue;
+    if (!data) return null;
     const assetId = asText(data.nasa_id, 200);
-    if (!assetId || seen.has(assetId) || data.media_type !== req.kind) continue;
+    if (!assetId || seen.has(assetId) || data.media_type !== req.kind) return null;
     seen.add(assetId);
     // 明示第三方版权的内容不按机构的一般媒体使用规则自动采用。
-    if (data.copyright != null && data.copyright !== "" || !asText(data.center, 100)) continue;
-    const manifest = await getJson(`https://images-api.nasa.gov/asset/${encodeURIComponent(assetId)}`, "NASA", ctx, { accept: "application/json" }, signal);
+    if (data.copyright != null && data.copyright !== "" || !asText(data.center, 100)) return null;
+    const manifest = await getJson(`https://images-api.nasa.gov/asset/${encodeURIComponent(assetId)}`, "NASA", ctx, { accept: "application/json" }, active);
     const manifestCollection = (manifest as Record<string, unknown>).collection;
     const files = typeof manifestCollection === "object" && manifestCollection !== null
       ? (manifestCollection as Record<string, unknown>).items : undefined;
@@ -554,7 +554,7 @@ async function searchNasa(req: { query: string; kind: StockKind; limit: number; 
         variants.push([1, url]);
       }
     }
-    if (variants.length === 0) continue;
+    if (variants.length === 0) return null;
     const downloadUrl = variants.reduce((acc, item2) => item2[0] > acc[0] ? item2 : acc)[1];
     let previewUrl: string | null = null;
     if (Array.isArray(entry.links)) {
@@ -565,23 +565,24 @@ async function searchNasa(req: { query: string; kind: StockKind; limit: number; 
       }
     }
     const center = asText(data.center, 100)!;
-    const candidateId = req.newCandidateId();
-    out.push({
-      candidateId,
-      candidate: {
-        candidateId, provider: "nasa", providerAssetId: assetId, kind: req.kind,
-        title: asText(data.title, 300) ?? `NASA ${req.kind === "image" ? "图片" : "视频"} ${assetId}`,
-        sourceUrl: `https://images.nasa.gov/details/${encodeURIComponent(assetId)}`,
-        creatorName: asText(data.secondary_creator, 200) ?? `NASA / ${center}`,
-        creatorUrl: `https://images.nasa.gov/details/${encodeURIComponent(assetId)}`,
-        previewUrl, width: null, height: null, durationMs: null,
-        licenseUrl: "https://www.nasa.gov/nasa-brand-center/images-and-media/",
-      },
-      downloadUrl,
-    });
-    if (out.length >= req.limit) break;
-  }
-  return out;
+    return (): StockCandidateInput => {
+      const candidateId = req.newCandidateId();
+      return {
+        candidateId,
+        candidate: {
+          candidateId, provider: "nasa", providerAssetId: assetId, kind: req.kind,
+          title: asText(data.title, 300) ?? `NASA ${req.kind === "image" ? "图片" : "视频"} ${assetId}`,
+          sourceUrl: `https://images.nasa.gov/details/${encodeURIComponent(assetId)}`,
+          creatorName: asText(data.secondary_creator, 200) ?? `NASA / ${center}`,
+          creatorUrl: `https://images.nasa.gov/details/${encodeURIComponent(assetId)}`,
+          previewUrl, width: null, height: null, durationMs: null,
+          licenseUrl: "https://www.nasa.gov/nasa-brand-center/images-and-media/",
+        },
+        downloadUrl,
+      };
+    };
+  });
+  return found.map(construct => construct());
 }
 
 // —— The Met（免 Key；仅公有领域图片；实际尺寸采用时核验） ——
@@ -605,31 +606,34 @@ async function searchMet(req: { query: string; kind: StockKind; limit: number; n
     const ids = body.objectIDs;
     if (ids === undefined && body.total === 0) break;
     if (!Array.isArray(ids)) throw new StockUnavailableError("The Met 响应格式不可识别。");
-    for (const rawId of ids) {
+    const found = await orderedResults(ids, req.limit - out.length, signal, async (rawId, active) => {
       const objectId = asPositiveInt(rawId, 2_147_483_647);
-      if (!objectId || seen.has(objectId)) continue;
+      if (!objectId || seen.has(objectId)) return null;
       seen.add(objectId);
-      const item = await getJson(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${objectId}`, "The Met", ctx, { accept: "application/json" }, signal) as Record<string, unknown>;
-      if (item.isPublicDomain !== true || item.objectID !== objectId) continue;
+      const item = await getJson(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${objectId}`, "The Met", ctx, { accept: "application/json" }, active) as Record<string, unknown>;
+      if (item.isPublicDomain !== true || item.objectID !== objectId) return null;
       const downloadUrl = hostAllowedUrl(item.primaryImage, MET_MEDIA_HOSTS);
       const sourceUrl = hostAllowedUrl(item.objectURL, new Set(["www.metmuseum.org", "metmuseum.org"]));
-      if (!downloadUrl || !sourceUrl) continue;
-      const candidateId = req.newCandidateId();
-      out.push({
-        candidateId,
-        candidate: {
-          candidateId, provider: "met", providerAssetId: String(objectId), kind: "image",
-          title: asText(item.title, 300) ?? `Met 藏品 ${objectId}`,
-          sourceUrl,
-          creatorName: asText(item.artistDisplayName, 200) ?? "The Metropolitan Museum of Art（作者未注明）",
-          creatorUrl: sourceUrl,
-          previewUrl: hostAllowedUrl(item.primaryImageSmall, MET_MEDIA_HOSTS),
-          width: null, height: null, durationMs: null, licenseUrl: CC0_URL,
-        },
-        downloadUrl,
-      });
-      if (out.length >= req.limit) return out;
-    }
+      if (!downloadUrl || !sourceUrl) return null;
+      return (): StockCandidateInput => {
+        const candidateId = req.newCandidateId();
+        return {
+          candidateId,
+          candidate: {
+            candidateId, provider: "met", providerAssetId: String(objectId), kind: "image",
+            title: asText(item.title, 300) ?? `Met 藏品 ${objectId}`,
+            sourceUrl,
+            creatorName: asText(item.artistDisplayName, 200) ?? "The Metropolitan Museum of Art（作者未注明）",
+            creatorUrl: sourceUrl,
+            previewUrl: hostAllowedUrl(item.primaryImageSmall, MET_MEDIA_HOSTS),
+            width: null, height: null, durationMs: null, licenseUrl: CC0_URL,
+          },
+          downloadUrl,
+        };
+      };
+    });
+    out.push(...found.map(construct => construct()));
+    if (out.length >= req.limit) return out;
     if (ids.length < pageSize) break;
   }
   return out;
@@ -728,26 +732,25 @@ async function searchArchive(req: { query: string; kind: StockKind; limit: numbe
   const response = (payload as Record<string, unknown>).response;
   const docs = typeof response === "object" && response !== null ? (response as Record<string, unknown>).docs : undefined;
   if (!Array.isArray(docs)) throw new StockUnavailableError("Internet Archive 响应格式不可识别。");
-  const out: StockCandidateInput[] = [];
   const seen = new Set<string>();
-  for (const item of docs) {
-    if (!item || typeof item !== "object") continue;
+  const found = await orderedResults(docs, req.limit, signal, async (item, active) => {
+    if (!item || typeof item !== "object") return null;
     const identifier = asText((item as Record<string, unknown>).identifier, 200);
-    if (!identifier || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(identifier) || seen.has(identifier)) continue;
+    if (!identifier || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(identifier) || seen.has(identifier)) return null;
     seen.add(identifier);
-    const detail = await getJson(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, "Internet Archive", ctx, { accept: "application/json" }, signal) as Record<string, unknown>;
+    const detail = await getJson(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, "Internet Archive", ctx, { accept: "application/json" }, active) as Record<string, unknown>;
     const metadata = detail.metadata as Record<string, unknown> | undefined;
     const files = detail.files;
     if (!metadata || !Array.isArray(files)) throw new StockUnavailableError("Internet Archive 响应格式不可识别。");
     const rawCollections = metadata.collection;
     const collections = Array.isArray(rawCollections) ? rawCollections : typeof rawCollections === "string" ? [rawCollections] : [];
-    if (metadata.identifier !== identifier || metadata.mediatype !== "movies" || !collections.includes("stock_footage")) continue;
-    if (archiveRestricted(detail) || archiveRestricted(metadata)) continue;
+    if (metadata.identifier !== identifier || metadata.mediatype !== "movies" || !collections.includes("stock_footage")) return null;
+    if (archiveRestricted(detail) || archiveRestricted(metadata)) return null;
     const licenseUrl = archiveLicenseUrl(metadata.licenseurl);
     const rawCreator = metadata.creator;
     const creatorList = Array.isArray(rawCreator) ? rawCreator : [rawCreator];
     const creatorName = creatorList.map(entry => asHtmlText(entry, 200)).filter((name): name is string => name !== null).join("; ");
-    if (!licenseUrl || !creatorName) continue;
+    if (!licenseUrl || !creatorName) return null;
     interface ArchiveVariant { url: string; width: number; height: number; durationMs: number; pixels: number; size: number }
     const variants: ArchiveVariant[] = [];
     let previewUrl: string | null = null;
@@ -772,42 +775,34 @@ async function searchArchive(req: { query: string; kind: StockKind; limit: numbe
       if (Math.min(width, height) < 720) continue;
       variants.push({ url, width, height, durationMs: Math.round(lengthSeconds * 1000), pixels: width * height, size });
     }
-    if (variants.length === 0) continue;
+    if (variants.length === 0) return null;
     const best = variants.reduce((acc, item2) => item2.pixels > acc.pixels || (item2.pixels === acc.pixels && item2.size < acc.size) ? item2 : acc);
     const sourceUrl = `https://archive.org/details/${encodeURIComponent(identifier)}`;
-    const candidateId = req.newCandidateId();
-    out.push({
-      candidateId,
-      candidate: {
-        candidateId, provider: "archive", providerAssetId: identifier, kind: "video",
-        title: asText(metadata.title, 300) ?? identifier,
-        sourceUrl, creatorName, creatorUrl: sourceUrl, previewUrl,
-        width: best.width, height: best.height, dimensionsKind: "download", durationMs: best.durationMs, licenseUrl,
-      },
-      downloadUrl: best.url,
-    });
-    if (out.length >= req.limit) break;
-  }
-  return out;
+    return (): StockCandidateInput => {
+      const candidateId = req.newCandidateId();
+      return {
+        candidateId,
+        candidate: {
+          candidateId, provider: "archive", providerAssetId: identifier, kind: "video",
+          title: asText(metadata.title, 300) ?? identifier,
+          sourceUrl, creatorName, creatorUrl: sourceUrl, previewUrl,
+          width: best.width, height: best.height, dimensionsKind: "download", durationMs: best.durationMs, licenseUrl,
+        },
+        downloadUrl: best.url,
+      };
+    };
+  });
+  return found.map(construct => construct());
 }
 
 // 官方网站按 ISRC 展示单曲，检索使用同一份公开曲目目录；不镜像音频。
 const INCOMPETECH_MUSIC = "https://incompetech.com/music/royalty-free/";
 async function searchIncompetech(req: { query: string; limit: number; newCandidateId: () => string }, ctx: StockAdapterContext, signal?: AbortSignal): Promise<StockCandidateInput[]> {
-  const tracks = await getJson(`${INCOMPETECH_MUSIC}pieces.json`, "Incompetech", ctx, { accept: "application/json" }, signal);
-  if (!Array.isArray(tracks)) throw new StockUnavailableError("Incompetech 曲目目录格式不可识别。");
+  const tracks = await incompetechCatalog(`${INCOMPETECH_MUSIC}pieces.json`, ctx.fetchImpl, ctx.cacheRoot, signal);
   const words = req.query.trim().toLowerCase().split(/\s+/);
   const out: StockCandidateInput[] = [];
-  for (const track of tracks) {
-    if (!track || typeof track !== "object") continue;
-    const title = asText(track.title, 300);
-    const id = asText(track.isrc, 100);
-    const file = asText(track.filename, 300);
-    if (!title || !id || !file || !file.toLowerCase().endsWith(".mp3") || file.includes("/")) continue;
-    const searchable = [title, track.instruments, track.feel, track.description].join(" ").toLowerCase();
+  for (const { title, id, file, searchable, durationMs } of tracks) {
     if (!words.every(word => searchable.includes(word))) continue;
-    const time = /^(\d{2}):([0-5]\d):([0-5]\d)$/.exec(track.length);
-    const durationMs = time ? (Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3])) * 1000 : null;
     const downloadUrl = `${INCOMPETECH_MUSIC}mp3-royaltyfree/${encodeURIComponent(file)}`;
     const sourceUrl = `${INCOMPETECH_MUSIC}index.html?isrc=${encodeURIComponent(id)}`;
     const licenseUrl = "https://creativecommons.org/licenses/by/4.0/";
@@ -927,6 +922,14 @@ export const STOCK_PROVIDERS: Readonly<Record<MaterialProvider, StockProviderAda
   freetouse: { id: "freetouse", label: FREE_SERVICE_LABELS.freetouse, kinds: ["audio"], keyed: false, mediaHosts: FREETOUSE_MEDIA_HOSTS, search: searchFreeToUse, prepareImport: prepareFreeToUseImport },
 };
 
+export function enabledStockServices(settings: { id: string; enabled: boolean; configured: boolean }[]) {
+  return (Object.keys(STOCK_PROVIDERS) as MaterialProvider[]).flatMap(id => {
+    const row = settings.find(entry => entry.id === id);
+    const adapter = STOCK_PROVIDERS[id];
+    return row?.enabled && (!adapter.keyed || row.configured) ? [{ serviceId: id, kinds: [...adapter.kinds] }] : [];
+  });
+}
+
 /** 工具调用期间的免费素材客户端：构造时捕获全部配置，本请求内不受后续设置修改影响。 */
 export class StockClient {
   constructor(
@@ -956,9 +959,7 @@ export class StockClient {
 
   /** 能力上下文：只列实际启用且类型已适配的服务。 */
   enabledServices(): { serviceId: MaterialProvider; kinds: StockKind[] }[] {
-    return (Object.keys(STOCK_PROVIDERS) as MaterialProvider[])
-      .filter(provider => this.ready(provider))
-      .map(provider => ({ serviceId: provider, kinds: [...this.adapterOf(provider).kinds] }));
+    return enabledStockServices(Object.entries(this.configs).map(([id, config]) => ({ id, enabled: config.enabled, configured: config.apiKey != null })));
   }
 
   async search(provider: MaterialProvider, req: { query: string; kind: StockKind; limit: number; newCandidateId: () => string }, signal?: AbortSignal): Promise<StockCandidateInput[]> {
@@ -971,11 +972,8 @@ export class StockClient {
     return adapter.search(req, { apiKey: config.apiKey, fetchImpl: this.fetchImpl, cacheRoot: this.cacheRoot }, signal);
   }
 
-  async download(provider: MaterialProvider, url: string, maxBytes: number, sink: (stream: ReadableStream<Uint8Array>, response: Response) => Promise<void>, signal?: AbortSignal): Promise<void> {
-    const adapter = this.adapterOf(provider);
-    return downloadWithinBounds({
-      url, rules: { mediaHosts: adapter.mediaHosts, isAllowedHost: adapter.isAllowedHost }, maxBytes, fetchImpl: this.fetchImpl, signal,
-    }, sink);
+  download(provider: MaterialProvider, url: string, maxBytes: number, sink: import("./stock-http.js").StockDownloadSink, signal?: AbortSignal): Promise<void> {
+    return downloadStockMedia(provider, url, maxBytes, sink, this.fetchImpl, signal);
   }
 
   async prepareImport(provider: MaterialProvider, input: { providerAssetId: string; trackingUrl: string | undefined }, signal?: AbortSignal): Promise<StockImportDetails | void> {
@@ -986,4 +984,10 @@ export class StockClient {
     const config = this.configs[provider]!;
     return adapter.prepareImport?.(input, { apiKey: config.apiKey, fetchImpl: this.fetchImpl, cacheRoot: this.cacheRoot }, signal);
   }
+}
+
+export function downloadStockMedia(provider: MaterialProvider, url: string, maxBytes: number, sink: import("./stock-http.js").StockDownloadSink,
+  fetchImpl: HttpFetch = fetch, signal?: AbortSignal): Promise<void> {
+  const adapter = STOCK_PROVIDERS[provider];
+  return downloadWithinBounds({ url, rules: { mediaHosts: adapter.mediaHosts, isAllowedHost: adapter.isAllowedHost }, maxBytes, fetchImpl, signal }, sink);
 }

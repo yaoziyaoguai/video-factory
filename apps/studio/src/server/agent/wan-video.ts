@@ -1,18 +1,19 @@
+import { videoWireBody } from "./video-image-inputs.js";
+import { AgentError } from "./errors.js";
+import { InvalidImageFile } from "./media-probe.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
-import type { ExecutionInput, ExecutionObservation, InputRef, MarkdownContent, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
+import type { ExecutionInput, ExecutionObservation, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
 import { digestOf, type AgentClock } from "./util.js";
 import type { WanVideoProfile } from "./media-config.js";
-import { getRevisionRow } from "./artifact-store.js";
 import {
   aspectRatioMismatch, audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
 } from "./media-port-support.js";
-import { markdownFullText } from "../../shared/agent/markdown.js";
 
 // 阿里万相 wan3.0-video/-prime 薄适配（wire 序列按 2026-11-01 百炼官方页核实）：
 // POST {workspace 媒体 baseUrl}/api/v1/services/aigc/video-generation/video-synthesis（X-DashScope-Async: enable）
@@ -53,26 +54,24 @@ export class WanVideoPort implements MediaExecutionPort {
     const resolved = this.options.resolve(input.operation.model);
     if (!resolved) return this.preRefusal(input.attemptId, "账号配置已变化，未使用当前账号提交请求。");
     if (!resolved.apiKey) return this.preRefusal(input.attemptId, "媒体凭据未启用；未提交任何请求，不会自动重试。");
-    const ref = input.operation.inputs[0] as Extract<InputRef, { kind: "text" | "artifact_revision" }>;
-    const prompt = ref.kind === "text" ? ref.text : markdownFullText(JSON.parse(getRevisionRow(this.db, ref.artifactId, ref.revisionId)!.content_json) as MarkdownContent);
     const parameters = input.operation.parameters;
+    let body;
+    try {
+      body = await videoWireBody(this.db, this.blobs, input, resolved.profile.modelId, (prompt, images) => ({
+        model: resolved.profile.modelId,
+        input: { prompt, ...(images.length ? { media: images.map(({ role, url }) => ({ type: role, url })) } : {}) },
+        parameters: { audio: parameters.audioMode !== "none", prompt_extend: false, duration: parameters.durationSeconds,
+          resolution: parameters.resolution, ratio: parameters.aspectRatio },
+      }));
+    } catch (error) {
+      if (error instanceof AgentError || error instanceof InvalidImageFile) return this.preRefusal(input.attemptId, error.message);
+      throw error;
+    }
     let taskId: string;
     try {
       const response = await providerRequestJson("POST",
         new URL(`${resolved.profile.baseUrl}/api/v1/services/aigc/video-generation/video-synthesis`),
-        resolved.apiKey,
-        {
-          model: resolved.profile.modelId,
-          input: { prompt },
-          parameters: {
-            audio: parameters.audioMode !== "none",
-            prompt_extend: false,
-            duration: parameters.durationSeconds,
-            resolution: parameters.resolution,
-            ratio: parameters.aspectRatio,
-          },
-        },
-        { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs, headers: { "X-DashScope-Async": "enable" } });
+        resolved.apiKey, body, { fetchImpl: this.fetchImpl, requestTimeoutMs: this.options.requestTimeoutMs, headers: { "X-DashScope-Async": "enable" } });
       const output = typeof response.output === "object" && response.output !== null ? response.output as { task_id?: unknown } : {};
       const id = typeof output.task_id === "string" ? output.task_id.trim() : "";
       if (!id) return this.observations.unstableUnknown(input.attemptId, null, "创建响应缺少任务 ID，结果未核实；不会重新提交。");

@@ -1,33 +1,39 @@
+import "./frame-settings.css";
+import { formatBytes } from "./format-bytes.js";
 import { MUSIC_CHART_URLS } from "../../shared/agent/music-charts.js";
 import { VIDEO_TOPIC_CHARTS, TIKTOK_CREATIVE_CENTER, GOOGLE_TRENDS } from "../../shared/agent/video-topics.js";
 import { ModelConnectionsPanel } from "./ModelConnectionsPanel.js";
 import { SkillPackagesPanel } from "./SkillPackagesPanel.js";
+import { TeamSettings } from "./TeamSettings.js";
 import { WorkLibrary } from "./WorkLibrary.js";
 import { framePageTitle, type FramePage } from "./frame-pages.js";
-import type { SkillPackageMutation } from "../../shared/agent/generated/contracts.js";
+import type { SkillPackageMutation, CleanupStorage, StorageUsage, BudgetSummary } from "../../shared/agent/generated/contracts.js";
 import type { LibraryPick } from "./workspace-state.js";
 import { SavedConfigurationDetails } from "./SavedConfigurationDetails.js";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronRight, Cpu, Film, FolderOpen, Image, Mic, Music2, Search, Sparkles, TrendingUp, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Cpu, Film, PlugZap, Image, Mic, Music2, Search, Sparkles, TrendingUp, Users, X } from "lucide-react";
 import { agentApi, AgentApiError, type UserProfile, type PexelsSettings, type NewsNowSettings, type KeyedMaterialSettings, type EdgeTtsSettings, type SavePexelsSettings, type SaveNewsNowSettings, type SaveEdgeTtsSettings, type FreeServiceSettings, type SaveFreeServiceSettingsInput } from "./api.js";
 import type { Bootstrap, Conversation, SaveUserProfile } from "./api.js";
 
 export type { FramePage } from "./frame-pages.js";
 export { framePageTitle } from "./frame-pages.js";
-export function FrameSettings({ page, bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onSkillMutationChange, onLibraryBringIn, libraryBringTarget }: {
+export function FrameSettings({ page, bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onSkillMutationChange, onLibraryBringIn, libraryBringTarget, onStorageCleaned, budget = null, budgetIssue = "", onBudgetRetry }: {
   page: FramePage; bootstrap: Bootstrap | null; conversations: Conversation[];
   onConversation: (id: string) => void; onPage: (page: FramePage) => void; onLogout?: (() => Promise<void>) | undefined;
   onCatalogRefresh: () => Promise<void>; onSkillMutationChange?: ((mutation: SkillPackageMutation | null) => void) | undefined;
+  onStorageCleaned?: (() => void) | undefined;
+  budget?: BudgetSummary | null; budgetIssue?: string; onBudgetRetry?: (() => void) | undefined;
   /** §11.7 来源9：库详情“带入对话”回调——有目标会话并入该会话草稿，无则并入新对话草稿；不猜最近会话。 */
   onLibraryBringIn?: ((picks: LibraryPick[]) => void) | undefined; libraryBringTarget?: "current" | "new" | undefined;
 }) {
+  const canManage = bootstrap?.accountRole !== "creator";
   const [skillsVisited, setSkillsVisited] = useState(page === "skills");
   useEffect(() => { if (page === "skills") setSkillsVisited(true); }, [page]);
   return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"} data-page={page}><div className="agent-settings-content">
-    <header className="agent-settings-heading"><h1>{framePageTitle[page]}</h1><button type="button" className="agent-text-link" onClick={() => onPage("chat")}>返回对话</button></header>
-    {page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : page === "services" ? <ServicesDirectory />
-      : page === "library" && onLibraryBringIn ? <WorkLibrary onBringIn={onLibraryBringIn} bringTarget={libraryBringTarget ?? "new"} /> : page === "profile" ? <ProfileEditor bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} /> : null}
-    {skillsVisited || page === "skills" ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}
+    <header className="agent-settings-heading"><h1>{framePageTitle[page]}</h1><button type="button" className="agent-settings-back" onClick={() => onPage("chat")}><ArrowLeft aria-hidden="true" />返回对话</button></header>
+    {canManage && page === "team" ? <TeamSettings /> : canManage && page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : canManage && page === "services" ? <ServicesDirectory />
+      : page === "library" && onLibraryBringIn ? <WorkLibrary onBringIn={onLibraryBringIn} bringTarget={libraryBringTarget ?? "new"} /> : page === "profile" ? <ProfileEditor onStorageCleaned={onStorageCleaned} bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} budgetPanel={onBudgetRetry ? <ProfileBudget value={budget} issue={budgetIssue} onRetry={onBudgetRetry} /> : null} /> : null}
+    {canManage && (skillsVisited || page === "skills") ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}
   </div></section>;
 }
 
@@ -69,9 +75,11 @@ function ServicesDirectory() {
   const [group, setGroup] = useState<ServiceGroup>("image");
   const [query, setQuery] = useState("");
   const [loads, setLoads] = useState<Partial<Record<ServiceId, ServiceLoad>>>({});
+  const [directoryError, setDirectoryError] = useState("");
   const [configTarget, setConfigTarget] = useState<ServiceRow | null>(null);
   const [notice, setNotice] = useState("");
   const configTrigger = useRef<HTMLButtonElement | null>(null);
+  const mounted = useRef(true);
   const [toggleSaving, setToggleSaving] = useState(false);
   const [togglePending, setTogglePending] = useState<{ row: ServiceRow; body: SaveFreeServiceSettingsInput } | null>(null);
 
@@ -86,7 +94,32 @@ function ServicesDirectory() {
       return false;
     }
   }, []);
-  useEffect(() => { for (const row of SERVICE_CATALOG) void loadService(row.id); }, [loadService]);
+  // 挂载只发一次目录快照请求：15 项服务一条响应，替代逐服务 GET；响应缺项即整体视为失败，不逐项兜底。
+  // 失败原因原样上报到顶部横幅，可整目录重试，不静默吞错。
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const loadDirectory = useCallback(async () => {
+    setDirectoryError("");
+    const freshLoads = (phase: ServiceLoad["phase"]): Partial<Record<ServiceId, ServiceLoad>> => {
+      const fresh: Partial<Record<ServiceId, ServiceLoad>> = {};
+      for (const row of SERVICE_CATALOG) fresh[row.id] = { phase, settings: null };
+      return fresh;
+    };
+    setLoads(freshLoads("loading"));
+    try {
+      const directory = await agentApi.readFreeServiceSettingsDirectory();
+      const byId = new Map(directory.services.map(settings => [settings.serviceId as ServiceId, settings]));
+      for (const row of SERVICE_CATALOG) {
+        if (!byId.has(row.id)) throw new Error(`目录快照缺少 ${row.id}`);
+      }
+      if (!mounted.current) return;
+      setLoads(Object.fromEntries(SERVICE_CATALOG.map(row => [row.id, { phase: "ready", settings: byId.get(row.id)! } satisfies ServiceLoad])));
+    } catch (error) {
+      if (!mounted.current) return;
+      setDirectoryError(error instanceof Error && error.message ? error.message : "目录读取失败");
+      setLoads(freshLoads("loadFailed"));
+    }
+  }, []);
+  useEffect(() => { void loadDirectory(); }, [loadDirectory]);
 
   const loadOf = (id: ServiceId): ServiceLoad => loads[id] ?? { phase: "loading", settings: null };
 
@@ -168,14 +201,19 @@ function ServicesDirectory() {
   const savedDetails = (row: ServiceRow) => {
     const settings = loadOf(row.id).settings;
     if (!settings) return null;
-    if (settings.serviceId === "pexels") return <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} credentialConfigured={settings.credentialConfigured} />;
+    // 未保存过凭据的行不渲染"已保存配置"卡片：空卡片会伪装成已配置状态。
+    if (settings.serviceId === "pexels") return settings.credentialConfigured ? <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} credentialConfigured={settings.credentialConfigured} /> : null;
     if (settings.serviceId === "newsnow") return settings.endpoint ? <SavedConfigurationDetails name={row.name} endpoint={settings.endpoint} /> : null;
     if (settings.serviceId === "edge-tts") return <dl className="agent-saved-configuration"><dt>语音</dt><dd>{settings.voice}</dd></dl>;
-    if ("credentialConfigured" in settings) return <SavedConfigurationDetails name={row.name} credentialConfigured={settings.credentialConfigured} />;
+    if ("credentialConfigured" in settings) return settings.credentialConfigured ? <SavedConfigurationDetails name={row.name} credentialConfigured={settings.credentialConfigured} /> : null;
     return null;
   };
 
   return <>
+    {directoryError ? <div className="agent-settings-directory-error" role="alert">
+      <span>服务目录读取失败：{directoryError}</span>
+      <button type="button" onClick={() => void loadDirectory()}>重试读取目录</button>
+    </div> : null}
     <div className="agent-settings-toolbar agent-services-toolbar">
       <div className="agent-settings-tabs" role="tablist" aria-label="服务类型" onKeyDown={onTabsKeyDown}>{SERVICE_GROUPS.map(item => <button type="button" role="tab" aria-selected={group === item.id} key={item.id} id={`service-tab-${item.id}`} aria-controls="service-panel" tabIndex={group === item.id ? 0 : -1} ref={element => { tabRefs.current[item.id] = element; }} onClick={() => { setGroup(item.id); setQuery(""); }}><item.icon aria-hidden="true" />{item.label}</button>)}</div>
       <label className="agent-settings-search"><Search aria-hidden="true" /><input aria-label="搜索服务" placeholder="搜索名称或用途" value={query} onChange={event => setQuery(event.target.value)} /></label>
@@ -596,8 +634,71 @@ function EdgeTtsConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
     </div>
   </div>;
 }
+function ProfileStorage({ onCleaned }: { onCleaned?: (() => void) | undefined }) {
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<CleanupStorage | null>(null);
+  const load = useCallback(async () => {
+    setBusy(true);
+    try { setUsage(await agentApi.storageUsage()); setNotice(""); }
+    catch { setNotice("存储用量读取失败。"); }
+    finally { setBusy(false); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+
+  async function clean() {
+    if (!usage || busy) return;
+    const command = pending ?? { commandId: agentApi.newCommandId(), expectedRevision: usage.revision };
+    setPending(command); setBusy(true);
+    try {
+      const result = await agentApi.cleanupStorage(command);
+      setUsage(result.usage); setPending(null);
+      onCleaned?.();
+      setNotice(`已清理 ${result.freedFiles} 个文件，释放 ${formatBytes(result.freedBytes)}。`);
+    } catch (error) {
+      if (error instanceof AgentApiError) {
+        setPending(null);
+        if (error.payload.code === "STALE_REVISION") await load();
+        setNotice(error.payload.message);
+      } else setNotice("尚未收到清理结果，可重试本次清理。");
+    } finally { setBusy(false); }
+  }
+
+  return <section className="agent-profile-storage" aria-label="媒体存储">
+    <h3>媒体存储</h3>
+    {usage ? <><dl>{([["定稿作品", usage.finalBytes], ["会话草稿", usage.draftBytes], ["可清理的过期草稿", usage.reclaimableBytes]] as const)
+      .map(([name, bytes]) => <div key={name}><dt>{name}</dt><dd>{formatBytes(bytes)}</dd></div>)}</dl>
+      <button type="button" className="agent-secondary-button" onClick={() => void clean()} disabled={busy || usage.reclaimableBytes === 0}>
+        {busy ? "正在处理…" : pending ? "重试本次清理" : "清理过期草稿"}</button></>
+      : busy ? <p>正在读取用量…</p> : <button type="button" onClick={() => void load()}>重新读取存储用量</button>}
+    <p role="status">{notice}</p>
+  </section>;
+}
+
 // T2 用户页：资料保存在服务端（owner 一张），保存后 Bootstrap 展示名同步；不重建聊天。
-function ProfileEditor({ bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh }: {
+function ProfileBudget({ value, issue, onRetry }: { value: BudgetSummary | null; issue: string; onRetry: () => void }) {
+  const currency = (minor: number) => "¥" + (minor / 100).toFixed(2);
+  return <section className="frame-own-budget" aria-label="制作额度">
+    <header><h3>制作额度</h3>
+      {value ? <span className="agent-stage-muted">{value.timeZone === "Asia/Shanghai" ? "北京时间" : value.timeZone}</span> : null}
+    </header>
+    {issue ? <div role="status" className="agent-config-note">{issue} <button type="button" onClick={onRetry}>重试读取额度</button></div>
+      : value ? ([["个人", value.personal], ["共享空间", value.workspace]] as const).map(([scope, usage]) => <div key={scope}>
+        <h4>{scope}</h4>
+        <dl>{([["本会话", usage.conversation], ["今日", usage.day], ["本月", usage.month]] as const).map(([label, period]) =>
+          period !== null ? <div key={label}>
+            <dt>{label}</dt><dd>{period.remainingMinor !== null && period.limitMinor !== null
+              ? <>剩 {currency(period.remainingMinor)} <small>· 已用 {currency(period.usedMinor)}／{currency(period.limitMinor)}</small></>
+              : <>已用 {currency(period.usedMinor)} <small>· 不限额</small></>}</dd>
+          </div> : null)}</dl>
+      </div>) : <p className="agent-stage-muted" role="status">正在读取制作额度…</p>}
+  </section>;
+}
+
+function ProfileEditor({ bootstrap, conversations, onConversation, onPage, onLogout, onCatalogRefresh, onStorageCleaned, budgetPanel }: {
+  onStorageCleaned?: (() => void) | undefined;
+  budgetPanel: React.ReactNode;
   bootstrap: Bootstrap | null; conversations: Conversation[]; onConversation: (id: string) => void;
   onPage: (page: FramePage) => void; onLogout?: (() => Promise<void>) | undefined; onCatalogRefresh: () => Promise<void>;
 }) {
@@ -686,6 +787,6 @@ function ProfileEditor({ bootstrap, conversations, onConversation, onPage, onLog
         </form>}
       {onLogout ? <button className="agent-secondary-button" type="button" onClick={() => void onLogout()}>退出登录</button> : null}
     </article>
-    <div className="agent-profile-overview"><h3>接着聊</h3>{conversations.slice(0, 3).map(conversation => <button type="button" key={conversation.id} onClick={() => onConversation(conversation.id)}>{conversation.title}<ChevronRight aria-hidden="true" /></button>)}<button type="button" onClick={() => onPage("models")}><Cpu aria-hidden="true" />模型配置<ChevronRight aria-hidden="true" /></button><button type="button" onClick={() => onPage("services")}><FolderOpen aria-hidden="true" />免费服务<ChevronRight aria-hidden="true" /></button><button type="button" onClick={() => onPage("skills")}><Sparkles aria-hidden="true" />Skill 管理<ChevronRight aria-hidden="true" /></button></div>
+    <div className="agent-profile-overview">{budgetPanel}<ProfileStorage onCleaned={onStorageCleaned} /><h3>接着聊</h3>{conversations.slice(0, 3).map(conversation => <button type="button" key={conversation.id} onClick={() => onConversation(conversation.id)}>{conversation.title}<ChevronRight aria-hidden="true" /></button>)}{bootstrap?.accountRole !== "creator" ? <><button type="button" onClick={() => onPage("team")}><Users aria-hidden="true" />成员与预算<ChevronRight aria-hidden="true" /></button><button type="button" onClick={() => onPage("models")}><Cpu aria-hidden="true" />模型配置<ChevronRight aria-hidden="true" /></button><button type="button" onClick={() => onPage("services")}><PlugZap aria-hidden="true" />免费服务<ChevronRight aria-hidden="true" /></button><button type="button" onClick={() => onPage("skills")}><Sparkles aria-hidden="true" />Skill 管理<ChevronRight aria-hidden="true" /></button></> : null}</div>
   </div>;
 }

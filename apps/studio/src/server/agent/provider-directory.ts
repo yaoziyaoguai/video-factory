@@ -1,7 +1,8 @@
+import { providerAdapters, textBaseUrl } from "../../shared/agent/provider-capabilities.js";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { AvailableProviderModels, ProviderConnection, ProviderDirectoryModel } from "../../shared/agent/generated/contracts.js";
 import { AgentError } from "./errors.js";
-import { openaiChatCatalog } from "./text-model.js";
+import { findNativeTextModel, openaiChatCatalog } from "./text-model.js";
 import { SEEDREAM_IMAGES, OPENAI_IMAGE_MODEL_IDS, OPENAI_SPEECH_MODEL_IDS, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS } from "./media-config.js";
 
 interface DirectoryItem {
@@ -46,26 +47,44 @@ export async function readProviderDirectory(connection: ProviderConnection, fetc
       hasMore: false, syncedAt: new Date().toISOString(),
     };
   }
+  const payload = await fetchAccountModels(connection, fetcher, false);
+  const models = new Map<string, ProviderDirectoryModel>();
+  for (const item of payload.data) {
+    models.set(item.id, connection.protocol === "openai"
+      ? openaiDirectoryModel(item)
+      : connection.protocol === "ark" ? arkDirectoryModel(item) : compatibleDirectoryModel(item, connection));
+  }
+  return { models: [...models.values()], hasMore: payload.has_more ?? false, syncedAt: new Date().toISOString() };
+}
+
+async function fetchAccountModels(connection: ProviderConnection, fetcher: typeof fetch, probe: boolean) {
+  if (!providerAdapters[connection.protocol].accountDirectory) throw new AgentError("CAPABILITY_UNAVAILABLE", "此供应商未提供已接入的账户型号探测接口。");
   let payload: unknown;
   try {
-    const response = await fetcher(`${connection.baseUrl}/models`, {
-      headers: { authorization: `Bearer ${connection.apiKey}` },
+    const anthropic = connection.protocol === "anthropic-messages";
+    const url = new URL(connection.baseUrl + (anthropic ? "/v1/models" : "/models"));
+    if (probe && anthropic) url.searchParams.set("limit", "1");
+    if (!connection.apiKey) throw new AgentError("INVALID_INPUT", "请先保存 API Key。");
+    const headers: Record<string, string> = anthropic
+      ? { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01" }
+      : { authorization: `Bearer ${connection.apiKey}` };
+    const response = await fetcher(url.href, {
+      headers,
       redirect: "error", signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) throw new AgentError("TEMPORARILY_UNAVAILABLE", `供应商未返回型号列表（HTTP ${response.status}），请检查连接后重试。`);
     payload = await response.json();
   } catch (error) {
-    if (error instanceof AgentError) throw error;
+    if (!(error instanceof TypeError || error instanceof SyntaxError || error instanceof DOMException)) throw error;
     throw new AgentError("TEMPORARILY_UNAVAILABLE", "同步型号失败，请检查地址与 Key；已选型号未改动。");
   }
   if (!validatePage(payload)) throw new AgentError("TEMPORARILY_UNAVAILABLE", "供应商的型号列表格式不受支持；已选型号未改动。");
-  const models = new Map<string, ProviderDirectoryModel>();
-  for (const item of payload.data) {
-    models.set(item.id, connection.protocol === "openai"
-      ? openaiDirectoryModel(item)
-      : arkDirectoryModel(item, connection.protocol === "ark"));
-  }
-  return { models: [...models.values()], hasMore: payload.has_more ?? false, syncedAt: new Date().toISOString() };
+  return payload;
+}
+
+export async function probeAccountModels(connection: ProviderConnection, fetcher: typeof fetch) {
+  await fetchAccountModels(connection, fetcher, true);
+  return { checkedAt: new Date().toISOString() };
 }
 
 // OpenAI /models 不带任务/模态字段：文本按 Pi 精确目录识别，图片/配音只认实际适配的
@@ -86,7 +105,7 @@ function openaiDirectoryModel(item: DirectoryItem): ProviderDirectoryModel {
 }
 
 // 火山图片只列已接通报价和执行的具体型号；视频沿用厂商任务和模态。
-function arkDirectoryModel(item: DirectoryItem, isArk: boolean): ProviderDirectoryModel {
+function arkDirectoryModel(item: DirectoryItem): ProviderDirectoryModel {
   const tasks = item.task_type ?? [];
   const outputs = item.output_modalities ?? item.modalities?.output_modalities ?? [];
   const id = item.id.toLowerCase().split("/").at(-1)!;
@@ -94,13 +113,22 @@ function arkDirectoryModel(item: DirectoryItem, isArk: boolean): ProviderDirecto
     || outputs.includes("video")
     || (tasks.length === 0 && outputs.length === 0
       && (/^(doubao-seedance|minimax-hailuo)/.test(id) || /^wan.*(?:video|t2v|i2v|r2v|flf2v)/.test(id)));
-  const image = isArk ? SEEDREAM_IMAGES.get(item.id) : undefined;
+  const image = SEEDREAM_IMAGES.get(item.id);
   const status = (item.lifecycle ?? item.status ?? "").toLowerCase();
   return {
     id: item.id, name: image?.name ?? item.display_name ?? item.name ?? item.id,
-    kinds: image ? ["image"] : isVideo ? ["video"] : [],
+    kinds: image ? ["image"] : isVideo ? ["video"] : tasks.some(task => ["Chat", "TextGeneration", "TextToText"].includes(task)) || outputs.includes("text") ? ["text"] : [],
     status: ["shutdown", "retired"].includes(status) ? "retired" : ["retiring", "deprecated"].includes(status) ? "retiring" : "listed",
     contextWindowTokens: item.context_window || item.token_limits?.context_window || null,
     maxOutputTokens: item.max_output_tokens || item.token_limits?.max_output_token_length || null,
   };
+}
+
+function compatibleDirectoryModel(item: DirectoryItem, connection: ProviderConnection): ProviderDirectoryModel {
+  const known = findNativeTextModel(providerAdapters[connection.protocol].textApi, item.id, textBaseUrl(connection.protocol, connection.baseUrl));
+  // 兼容目录可能同时列出嵌入或媒体型号；只有厂商声明或 Pi 精确识别的才自动分类。
+  const listed = arkDirectoryModel(item);
+  const text = connection.protocol === "anthropic-messages" || known || listed.kinds.includes("text");
+  return { ...listed, kinds: text ? ["text"] : [], contextWindowTokens: known?.contextWindow ?? listed.contextWindowTokens,
+    maxOutputTokens: known?.maxTokens ?? listed.maxOutputTokens };
 }

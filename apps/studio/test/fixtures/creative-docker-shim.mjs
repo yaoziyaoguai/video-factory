@@ -1,7 +1,7 @@
 // 假 Docker CLI：让 creative-runner-host 的池化/GC/跳过逻辑无需真实 daemon 即可密封测试。
 // 通过 PATH 注入；状态（卷）与调用日志落在测试临时目录。宿主侧 spawn 的 env 只带 PATH
 // 与 DOCKER_CONFIG，因此配置必须烘焙进每个测试生成的 docker 包装脚本里。
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rename, writeFile } from "node:fs/promises";
 
 const dockerTime = at => {
   const iso = new Date(at).toISOString();
@@ -13,7 +13,14 @@ export async function main({ state, log, delay }) {
   const args = argv[0] === "--host" ? argv.slice(2) : argv;
   const record = () => appendFile(log, `${JSON.stringify({ argv: args })}\n`);
   const loadState = async () => {
-    try { return JSON.parse(await readFile(state, "utf8")); } catch { return { volumes: {} }; }
+    try { return JSON.parse(await readFile(state, "utf8")); }
+    catch (error) { if (error.code === "ENOENT") return { volumes: {} }; throw error; }
+  };
+  const saveState = async current => {
+    // 宿主和测试在独立进程读状态。原子替换让读者只看见完整的一版 JSON。
+    const temporary = `${state}.${process.pid}`;
+    await writeFile(temporary, JSON.stringify(current));
+    await rename(temporary, state);
   };
   const subcommand = args[0];
   if (subcommand === "image" && args[1] === "inspect") {
@@ -40,7 +47,7 @@ export async function main({ state, log, delay }) {
     await record();
     const current = await loadState();
     delete current.volumes[args.at(-1)];
-    await writeFile(state, JSON.stringify(current));
+    await saveState(current);
     return;
   }
   if (subcommand === "rm") {
@@ -59,8 +66,14 @@ export async function main({ state, log, delay }) {
       const source = /(?:^|,)src=([^,]+)/.exec(args[index + 1] ?? "")?.[1];
       if (source) current.volumes[source] ??= { createdAt: Date.now() };
     }
-    await writeFile(state, JSON.stringify(current));
+    await saveState(current);
     const name = args[args.indexOf("--name") + 1];
+    if (name.startsWith("frame-creative-init-")) {
+      const initialization = JSON.parse(args.at(-1));
+      if (initialization.action !== "initialize" || args.includes("--interactive")) throw new Error("卷初始化应是一次性动作");
+      process.stdout.write("{}\n");
+      return;
+    }
     if (args.at(-1) === "/opt/frame/creative-operations.py") {
       // 循环 helper 协议：每行一个请求，逐行立即回复；EOF 退出（与真实 helper 一致）。
       let buffer = "";

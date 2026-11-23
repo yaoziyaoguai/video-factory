@@ -1,0 +1,208 @@
+.agent-settings-page { flex:1; min-height:0; overflow:auto; background:var(--frame-paper); padding:36px 40px 52px; }
+.agent-settings-content { max-width:1080px; margin:0 auto; }
+.agent-settings-page[data-page=library] .agent-settings-content { width:100%; max-width:1520px; }
+.agent-settings-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--frame-line); padding:12px 0 20px; margin-bottom:24px; }
+.agent-settings-heading h1 { font:600 clamp(24px,2.2vw,30px)/1.3 var(--font-editorial); }
+/* AESTH-07 刊头胶囊：与工作台顶栏同源的返回动作。 */
+.agent-settings-back { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--frame-line); background:#fff; padding:6px 12px; border-radius:999px; font-size:12px; color:var(--frame-ink); }
+.agent-settings-back svg { width:14px; height:14px; }
+.agent-settings-heading h2 { font-size:25px; font-weight:500; }
+.agent-settings-heading>span { font-size:11px; color:var(--frame-muted); }
+.agent-settings-toolbar { display:flex; gap:16px; align-items:center; justify-content:space-between; border-bottom:1px solid var(--frame-line); }
+.agent-settings-directory-error { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin:14px 0 0; padding:9px 12px; background:#fff8e8; border:1px solid #eae0c7; border-radius:6px; font-size:12px; color:var(--frame-ink); }
+.agent-settings-directory-error button { flex:none; font-size:12px; color:var(--frame-accent); text-decoration:underline; text-underline-offset:3px; }
+.agent-settings-tabs { display:flex; gap:18px; }
+.agent-root .agent-settings-tabs>button { display:flex; align-items:center; gap:7px; height:48px; border-radius:0; padding:0 3px; border-bottom:2px solid transparent; color:var(--frame-muted); font-size:13px; white-space:nowrap; }
+.agent-root .agent-settings-tabs>button[aria-selected="true"] { border-color:var(--frame-green); color:var(--frame-green); }
+.agent-settings-tabs small { border-radius:4px; background:var(--frame-soft); padding:0 5px; font-size:10px; }
+.agent-settings-search { display:flex; gap:7px; align-items:center; border:1px solid var(--frame-line); padding:6px 9px; border-radius:6px; background:white; }
+.agent-settings-search input { width:130px; border:0; outline:none; background:transparent; font-size:12px; }
+.agent-settings-search svg { width:14px; color:var(--frame-muted); }
+.agent-root .agent-category-context { display:flex; align-items:baseline; justify-content:space-between; gap:16px; font-size:12px; color:var(--frame-muted); margin:20px 0; }
+.agent-service-row > .agent-saved-configuration { grid-column:1 / -1; padding-top:12px; border-top:1px solid var(--frame-line); }
+.agent-settings-empty { text-align:center; padding:38px 24px; color:var(--frame-muted); border:1px solid #e2dfd5; border-radius:10px; background:#f6f4ec; margin-top:25px; }
+.agent-settings-empty>svg { width:28px; height:28px; margin-bottom:16px; color:var(--frame-muted); }
+.agent-settings-empty h3 { font-size:16px; font-weight:400; margin-bottom:10px; }
+.agent-settings-empty p { font-size:12px; color:var(--frame-muted); }
+/* AESTH-07 空态主行动：深松绿实心，一眼找到首个配置动作。 */
+.agent-settings-empty .agent-model-config-button { background:var(--frame-green); border:1px solid var(--frame-green); color:#fff; font-weight:600; padding:8px 16px; border-radius:7px; }
+.agent-root .agent-settings-empty .agent-model-config-button:hover { background:#254b36; color:#fff; }
+.agent-profile-layout { display:grid; grid-template-columns:1.1fr 1fr; gap:24px; }
+.agent-profile-card,.agent-profile-overview { background:white; border:1px solid var(--frame-line); border-radius:9px; padding:28px; }
+.agent-profile-heading { display:flex; align-items:center; gap:14px; margin-bottom:28px; }
+.agent-profile-avatar { width:52px; height:52px; display:grid; place-items:center; border-radius:50%; background:var(--frame-soft); color:var(--frame-green); font-size:22px; }
+.agent-profile-heading h3 { font-size:17px; font-weight:500; }
+.agent-profile-heading p { font-size:12px; color:var(--frame-muted); }
+.agent-profile-card label { display:block; font-size:12px; color:var(--frame-muted); }
+.agent-profile-card label + .agent-profile-card label, .agent-profile-card form label + label { margin-top:14px; }
+.agent-profile-card input { display:block; width:100%; border:1px solid var(--frame-line); border-radius:5px; padding:8px 10px; background:#fbfaf6; margin-top:7px; }
+.agent-profile-card textarea { display:block; width:100%; border:1px solid var(--frame-line); border-radius:5px; padding:8px 10px; background:#fbfaf6; margin-top:7px; resize:vertical; min-height:84px; }
+.agent-profile-storage { padding-bottom: 16px; margin-bottom: 22px; border-bottom: 1px solid var(--frame-line); }
+.agent-profile-storage dl { margin: 0 0 12px; }
+.agent-profile-storage dl div { display:flex; justify-content:space-between; gap:12px; margin:8px 0; font-size:13px; }
+.agent-profile-storage dd { margin:0; font-variant-numeric:tabular-nums; }
+.agent-profile-storage [role="status"]:empty { display:none; }
+.agent-profile-overview h3 { font-size:14px; margin-bottom:18px; font-weight:500; }
+.agent-root .agent-profile-overview button { width:100%; display:flex; align-items:center; gap:9px; text-align:left; padding:14px 4px; border-bottom:1px solid var(--frame-line); border-radius:0; font-size:13px; }
+.agent-profile-overview button>svg:last-child { margin-left:auto; }
+@media (max-width:1180px) {
+  .agent-settings-page { padding:28px; }
+}
+
+.agent-saved-configuration { display:grid; grid-template-columns:70px minmax(0,1fr); gap:9px 12px; margin:16px 0; font-size:12px; line-height:1.6; }
+.agent-saved-configuration dt { color:var(--frame-muted); }
+.agent-saved-configuration dd { margin:0; min-width:0; overflow-wrap:anywhere; }
+.agent-saved-configuration input { box-sizing:border-box; width:100%; min-width:0; padding:7px 9px; border:1px solid var(--frame-line); border-radius:6px; color:var(--frame-ink); background:#f7f6ef; font-family:monospace; font-size:12px; }
+/* —— T3 免费服务目录（沿只读原型列表行） —— */
+.agent-services-toolbar { flex-wrap:wrap; }
+.agent-services-toolbar .agent-settings-tabs { flex-wrap:wrap; }
+.agent-service-list { border:1px solid var(--frame-line); border-radius:8px; overflow:hidden; background:#fff; }
+.agent-service-heading, .agent-service-row { display:grid; grid-template-columns:minmax(215px,1fr) 90px 100px 110px 118px; align-items:center; column-gap:16px; padding:0 21px; }
+.agent-service-heading { min-height:39px; color:var(--frame-muted); background:var(--frame-shelf); font-size:11px; }
+.agent-service-row { min-height:89px; border-top:1px solid var(--frame-line); }
+.agent-service-row:hover { background:#fcfbf8; }
+.agent-service-identity { display:flex; align-items:center; min-width:0; gap:14px; }
+.agent-service-identity > svg { flex-shrink:0; color:var(--frame-green); width:21px; height:21px; }
+.agent-service-identity h3 { color:var(--frame-ink); font-size:14px; font-weight:550; overflow-wrap:anywhere; }
+.agent-service-identity p { margin-top:6px; color:var(--frame-muted); font-size:12px; line-height:1.6; }
+.agent-service-types { display:flex; flex-wrap:wrap; gap:5px; color:var(--frame-muted); font-size:11px; }
+.agent-service-types span { padding:3px 5px; background:var(--frame-soft); border-radius:3px; }
+.agent-service-access { color:var(--frame-muted); font-size:12px; }
+.agent-service-toggle { display:flex; flex-direction:column; align-items:flex-start; gap:6px; }
+.agent-root .agent-service-toggle button { width:33px; height:19px; padding:3px; border:1px solid var(--frame-green); border-radius:12px; background:var(--frame-soft); transition:background .18s ease; }
+.agent-service-toggle button span { display:block; width:11px; height:11px; border-radius:50%; background:#fff; box-shadow:0 1px 2px #26423330; transition:transform .18s ease; }
+.agent-root .agent-service-toggle button[aria-checked="true"] { background:var(--frame-green); border-color:var(--frame-green); }
+.agent-service-toggle button[aria-checked="true"] span { transform:translateX(14px); }
+.agent-service-actions { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+.agent-root .agent-service-actions .agent-model-config-button { display:flex; align-items:center; gap:3px; }
+.agent-service-actions .agent-model-config-button svg { width:13px; height:13px; }
+.agent-service-actions small { color:var(--frame-muted); font-size:10px; white-space:nowrap; }
+.agent-service-footnote { margin:18px 0 0; color:var(--frame-muted); font-size:12px; line-height:1.8; }
+.agent-root .agent-config-check { display:flex; align-items:center; gap:8px; margin:0 0 12px; font-size:12px; color:var(--frame-muted); }
+.agent-config-check input { width:15px; height:15px; accent-color:var(--frame-green); }
+.agent-root .agent-config-field input[readonly] { background:var(--frame-soft); color:var(--frame-muted); }
+
+/* 模型页：每类一个当前使用 + 备选；连接与 Key 只在连接配置弹窗中编辑。 */
+.agent-models-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin:0 0 18px; }
+.agent-models-heading p { margin:0; color:var(--frame-muted); font-size:12px; }
+.agent-models-heading .agent-model-config-button { display:flex; align-items:center; gap:6px; }
+.agent-models-heading .agent-model-config-button svg { width:14px; height:14px; }
+.agent-model-tabs { border-bottom:1px solid var(--frame-line); margin-bottom:22px; }
+.agent-current-model { border:1px solid var(--frame-line); border-radius:10px; background:#fff; padding:18px 22px 20px; }
+.agent-current-label { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px; }
+.agent-current-label > span { display:flex; align-items:center; gap:7px; color:var(--frame-muted); font-size:12px; }
+.agent-current-label > span svg { width:15px; height:15px; }
+.agent-current-status { color:var(--frame-green) !important; }
+.agent-current-status svg { width:13px; height:13px; }
+.agent-connection-unavailable { color:#7a5c3e; }
+.agent-current-model h3 { display:flex; align-items:center; gap:12px; margin:0 0 6px; color:var(--frame-ink); font-size:17px; font-weight:600; }
+.agent-current-model h3 .agent-text-link { font-weight:400; }
+.agent-current-model > code { display:block; overflow-wrap:anywhere; font-size:12px; color:var(--frame-muted); }
+.agent-current-model > p { margin:8px 0 0; font-size:12px; color:var(--frame-muted); line-height:1.7; }
+.agent-model-picker { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; margin-top:16px; padding-top:16px; border-top:1px dashed var(--frame-line); }
+.agent-model-picker label { flex:1 1 200px; font-size:12px; color:var(--frame-muted); }
+.agent-model-picker select { display:block; width:100%; margin-top:4px; border:1px solid var(--frame-line); border-radius:6px; padding:8px 10px; font-size:13px; color:var(--frame-ink); background:#fff; }
+.agent-model-picker .agent-primary-button { flex-shrink:0; }
+.agent-current-reasoning { display:flex; align-items:center; gap:10px; margin-top:12px; font-size:12px; color:var(--frame-muted); }
+.agent-current-reasoning select { border:1px solid var(--frame-line); border-radius:6px; padding:6px 10px; font-size:13px; color:var(--frame-ink); background:#fff; }
+.agent-backup-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin:26px 0 12px; }
+.agent-backup-heading h3 { display:flex; align-items:center; gap:8px; margin:0; font-size:14px; font-weight:600; color:var(--frame-ink); }
+.agent-backup-heading h3 span { border-radius:4px; background:var(--frame-soft); padding:0 6px; font-size:11px; color:var(--frame-muted); }
+.agent-backup-heading .agent-model-config-button { display:flex; align-items:center; gap:5px; }
+.agent-backup-heading .agent-model-config-button svg { width:13px; height:13px; }
+.agent-backup-heading .agent-model-config-button[aria-expanded="true"] svg:last-child { transform:rotate(180deg); }
+.agent-backup-list { display:grid; gap:10px; }
+.agent-backup-row { display:flex; justify-content:space-between; align-items:center; gap:20px; border:1px solid var(--frame-line); border-radius:8px; background:#fff; padding:14px 18px; }
+.agent-backup-row > div:first-child { min-width:0; }
+.agent-backup-row strong { display:block; font-size:14px; font-weight:550; color:var(--frame-ink); }
+.agent-backup-row span { font-size:11px; color:var(--frame-muted); margin-right:8px; }
+.agent-backup-row code { overflow-wrap:anywhere; font-size:12px; color:var(--frame-muted); }
+.agent-backup-row p { margin:5px 0 0; font-size:12px; color:var(--frame-muted); }
+.agent-backup-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.agent-backup-actions .agent-connection-unavailable { font-size:11px; text-align:right; max-width:260px; }
+.agent-backup-actions .agent-icon-button svg { width:15px; height:15px; }
+.agent-inline-confirm { display:flex; justify-content:space-between; align-items:center; gap:18px; flex-wrap:wrap; border:1px solid #e4cfb4; border-radius:8px; background:#fdf8ee; padding:14px 18px; margin-top:14px; }
+.agent-inline-confirm p { margin:0; font-size:12px; color:#7a6a4d; line-height:1.7; }
+.agent-inline-confirm .agent-inline-actions { display:flex; gap:9px; }
+.agent-directory { border:1px solid var(--frame-line); border-radius:8px; background:#fbfaf6; padding:16px 18px; margin-top:16px; }
+.agent-directory legend { font-size:12px; color:var(--frame-muted); padding:0 6px; }
+/* 浏览长型号目录时，搜索和连接切换始终留在列表上方。 */
+.agent-directory-filters { display:flex; align-items:end; gap:12px; margin-bottom:10px; }
+.agent-directory-filters label { display:grid; gap:4px; color:var(--frame-muted); font-size:12px; }
+.agent-directory-filters label:last-child { flex:1; max-width:36rem; }
+.agent-directory-filters :is(input,select) { box-sizing:border-box; width:100%; min-height:36px; padding:6px 10px; border:1px solid var(--frame-line); border-radius:6px; background:white; font:inherit; color:var(--frame-ink); }
+.agent-directory-choices { max-height:min(38vh,22rem); overflow-y:auto; scrollbar-gutter:stable; }
+.agent-directory-current { margin-left:8px; color:var(--frame-green); font-size:12px; }
+.agent-directory-note { margin:0 0 14px; font-size:11px; color:var(--frame-muted); }
+.agent-directory-provider { border-top:1px solid var(--frame-line); padding-top:12px; margin-top:12px; }
+.agent-directory-provider:first-of-type { border-top:0; margin-top:0; padding-top:0; }
+.agent-directory-provider h4 { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:0 0 8px; font-size:13px; font-weight:550; color:var(--frame-ink); }
+.agent-directory-provider h4 .agent-model-config-button { display:flex; align-items:center; gap:5px; }
+.agent-directory-provider h4 .agent-model-config-button svg { width:12px; height:12px; }
+.agent-directory-row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.agent-directory-option { flex:1; min-width:0; display:flex; align-items:flex-start; gap:10px; padding:8px 4px; font-size:13px; color:var(--frame-ink); cursor:pointer; }
+.agent-directory-option input { margin-top:3px; accent-color:var(--frame-green); }
+.agent-directory-option strong { font-weight:500; }
+.agent-directory-option small { display:block; margin-top:2px; color:var(--frame-muted); font-size:11px; overflow-wrap:anywhere; }
+.agent-connection-fields { border:0; padding:0; margin:0; min-width:0; }
+.agent-connection-capacity { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px; }
+
+/* Skill 包管理沿用设置页表单和弹窗，只补来源与技能列表。 */
+.agent-skills-toolbar { padding-bottom:18px; }
+.agent-skills-toolbar .agent-inline-actions { display:flex; gap:9px; flex-shrink:0; }
+.agent-skills-toolbar button { display:flex; align-items:center; gap:6px; font-size:12px; }
+.agent-skills-toolbar button svg { width:14px; height:14px; }
+.agent-skill-packages { display:grid; gap:16px; margin-top:22px; }
+.agent-skill-package { border:1px solid var(--frame-line); border-radius:8px; background:#fff; min-width:0; }
+.agent-skill-package>header { display:flex; align-items:center; gap:16px; padding:18px 22px; }
+.agent-skill-package>header>div { min-width:0; flex:1; }
+.agent-skill-package h3 { font-size:15px; font-weight:500; }
+.agent-skill-source { display:block; font-size:12px; color:var(--frame-muted); overflow-wrap:anywhere; margin-top:4px; }
+.agent-skill-origin { display:inline-block; font-size:10px; font-weight:400; color:var(--frame-muted); margin-left:10px; }
+.agent-skill-status { color:var(--frame-green); font-size:12px; flex-shrink:0; }
+.agent-skill-status.no_skills,.agent-skill-status.invalid { color:var(--frame-muted); }
+.agent-package-skills { list-style:none; margin:0; padding:0 22px; }
+.agent-package-skills li { border-top:1px solid var(--frame-line); padding:12px 0; overflow-wrap:anywhere; }
+.agent-package-skills strong { font-size:13px; font-weight:500; }
+.agent-package-skills p { color:var(--frame-muted); font-size:12px; margin-top:4px; }
+.agent-skill-empty { font-size:12px; color:var(--frame-muted); padding:0 22px 18px; }
+.agent-skill-diagnostics { font-size:12px; color:var(--frame-muted); overflow-wrap:anywhere; margin:0 22px 18px; padding:10px 12px 10px 28px; border:1px dashed var(--frame-line); border-radius:6px; background:#f7f6ef; }
+/* B13-POLISH-04 Skill 卡底栏：运行依赖状态条补齐 22px 水平内边距与顶部分隔线，不再贴死卡片边框。 */
+.agent-skill-package > .agent-config-note { padding:10px 22px 14px; border-top:1px solid var(--frame-line); background:#fcfbf8; }
+.agent-skill-notice { margin-top:16px; }
+.agent-skill-dialog .agent-package-skills { padding:10px 0; max-height:210px; overflow:auto; }
+.agent-skill-dialog .agent-config-note { overflow-wrap:anywhere; }
+.agent-skills-toolbar~.agent-config-summary { margin-top:18px; }
+
+
+.frame-team-settings { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));align-items:start;gap:18px; }
+.frame-team-settings section>header { display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px; }
+.frame-team-settings h2 { font-size:18px; }
+.frame-team-members { list-style:none;padding:0;margin:8px 0; }
+.frame-team-members li { padding:9px 0;border-top:1px solid var(--frame-line); }
+.frame-member-row { display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:12px; }
+.frame-member-form { margin-top:12px; }
+.frame-team-members strong { overflow-wrap:anywhere;min-width:0; }
+.frame-team-members span { color:var(--frame-muted);white-space:nowrap; }
+.frame-admin-form fieldset { min-width:0;margin:0;padding:0;border:0; }
+.frame-admin-form label,.frame-budget-scope { display:grid;gap:4px; }
+.frame-budget-limits { display:grid;grid-template-columns:repeat(auto-fit,minmax(85px,1fr));gap:9px;margin:14px 0; }
+.frame-admin-form select,.frame-admin-form input,.frame-budget-scope select { width:100%;min-width:0;background:white;color:var(--frame-ink);border:1px solid var(--frame-line);padding:7px;border-radius:5px; }
+.frame-budget-scope { margin-bottom:13px; }
+.agent-profile-card .frame-budget-limits>label+label { margin-top:0; }
+.agent-profile-card .frame-budget-limits input { margin-top:4px; }
+.frame-own-budget { padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--frame-line); }
+.frame-own-budget header,.frame-own-budget dl>div { display:flex;align-items:baseline;justify-content:space-between;gap:8px; }
+.frame-own-budget h4 { margin:14px 0 4px;font-size:13px; }
+.frame-own-budget dl { margin:0;font-size:13px; }
+.frame-own-budget dl>div { padding:5px 0; }
+.frame-own-budget dd { margin:0;text-align:right;font-variant-numeric:tabular-nums; }
+.frame-own-budget small,.frame-own-budget dt { color:var(--frame-muted); }
+
+/* —— 设置面板专属的说明条与表单字段（仅 FrameSettings 子树渲染；modal/按钮基元在 work-library.css 共享块）。 —— */
+.agent-settings-note { margin:-16px 0 18px; color:var(--frame-green); font-size:12px; }
+.agent-root .agent-model-config-button { background:#fff; border:1px solid #d8d5cb; color:var(--frame-green); font-size:12px; padding:4px 12px; border-radius:6px; }
+.agent-config-field { display:block; margin-bottom:12px; font-size:12px; color:var(--frame-muted); }
+.agent-config-field input,.agent-config-field select,.agent-config-field textarea { display:block; width:100%; margin-top:4px; border:1px solid var(--frame-line); border-radius:6px; padding:8px 10px; font-size:13px; color:var(--frame-ink); background:#fff; }
+.agent-config-field textarea { resize:vertical; }
+.agent-config-summary { margin:2px 0 12px; padding:9px 12px; border:1px dashed var(--frame-line); border-radius:8px; color:var(--frame-muted); font-size:12px; line-height:1.8; }

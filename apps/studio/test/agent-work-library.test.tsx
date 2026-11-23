@@ -96,6 +96,8 @@ test("R5 只展示已记录的素材署名，媒体是否为模拟保持未知",
   expect(await within(unattributed!).findByText("真实或模拟来源未知")).toBeVisible();
   expect(within(unattributed!).queryByRole("link", { name: "原素材" })).toBeNull();
   expect(await within(attributed!).findByRole("link", { name: "原素材" })).toHaveAttribute("href", "https://example.invalid/asset");
+  // 来源托盘收拢为单行摘要（舞台纵向预算计提）：先展开再断言署名可见。
+  await userEvent.click(within(attributed!).getByText(/^素材来源 · 1 项/));
   expect(within(attributed!).getByText(/测试作者/)).toBeVisible();
   expect(within(attributed!).getByText("真实或模拟来源未知")).toBeVisible();
 });
@@ -140,4 +142,45 @@ test("DD-13 预览和带入始终读取选中的准确历史修订", async () =>
   }]);
   expect(basisReads()).toEqual(sources.map(material => [material.source.artifactId, material.source.revisionId]));
   expect(api.head).not.toHaveBeenCalled();
+});
+
+test("ISS-02 连续翻页时，同一视频修订只占一个位置", async () => {
+  const entry: LibraryVideo = { title: "定稿甲", finalizedAt: at, conversationId: "synthetic", workId: "work-1", originMessageId: null,
+    video, materials: [], projectFiles: [], project: null, narrationText: null, content: null, plan: null, provenanceStatus: "recorded", reviewSources: [] };
+  api.read.mockImplementation(async (id: string, rev: string) => revision(id, rev, 1, { format: "media", blobId: rev, mimeType: "video/mp4", durationMs: 1000 }));
+  api.list.mockResolvedValueOnce({ items: [entry], nextCursor: "older" }).mockResolvedValueOnce({
+    items: [entry, { ...entry, title: "定稿乙", video: { artifactId: "art-other", revisionId: "rev-other" } }], nextCursor: null,
+  });
+  render(library());
+  await userEvent.click(await screen.findByRole("button", { name: "更早的定稿" }));
+  expect(await screen.findByRole("button", { name: /定稿乙/ })).toBeVisible();
+  expect(screen.getAllByRole("button", { name: /定稿甲/ })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "更早的定稿" })).toBeNull();
+  expect(api.list).toHaveBeenCalledTimes(2);
+});
+
+test("ISS-06 两个冻结工程的同名文件分别读回原修订，展开预览不会勾选文件", async () => {
+  const project = { artifactId: "project-a", revisionId: "project-rev-a" };
+  const entry: LibraryVideo = { title: "两个工程", finalizedAt: at, conversationId: "synthetic", workId: "work-1", originMessageId: null,
+    video, project, materials: [], narrationText: null, content: null, plan: null, provenanceStatus: "recorded", reviewSources: [],
+    projectFiles: [{ project, relativePath: "src/main.tsx", blobId: "frozen-a", sizeBytes: 3, mimeType: "application/octet-stream" },
+      { project: { artifactId: "project-b", revisionId: "project-rev-b" }, relativePath: "src/main.tsx", blobId: "frozen-b", sizeBytes: 3, mimeType: "text/typescript" }] };
+  api.list.mockResolvedValue({ items: [entry], nextCursor: null });
+  api.read.mockResolvedValue(revision(video.artifactId, video.revisionId, 1, { format: "media", blobId: "final", mimeType: "video/mp4", durationMs: 1000 }));
+  const sourceFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async url => new Response(String(url).includes("frozen-a") ? "A()" : "B()", { status: 206 }));
+  try {
+    render(library());
+    await userEvent.click(await screen.findByRole("button", { name: /两个工程/ }));
+    const checks = await screen.findAllByRole("checkbox", { name: /src\/main.tsx/ });
+    expect(sourceFetch).not.toHaveBeenCalled();
+    for (const [i, name] of ["a", "b"].entries()) {
+      const row = within(checks[i]!.closest("li")!);
+      await userEvent.click(row.getByText("预览与下载"));
+      expect(await row.findByText(name.toUpperCase() + "()")).toBeVisible();
+      expect(row.getByRole("link", { name: "下载文件" })).toHaveAttribute("href", `/api/agent/v1/blobs/frozen-${name}/content?download=1`);
+      expect(checks[i]).not.toBeChecked();
+    }
+    expect(sourceFetch.mock.calls.map(([url, options]) => [url, new Headers(options?.headers).get("range")])).toEqual([
+      ["/api/agent/v1/blobs/frozen-a/content", "bytes=0-262144"], ["/api/agent/v1/blobs/frozen-b/content", "bytes=0-262144"] ]);
+  } finally { sourceFetch.mockRestore(); }
 });

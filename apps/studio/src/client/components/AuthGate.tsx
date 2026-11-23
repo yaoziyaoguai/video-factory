@@ -1,20 +1,43 @@
 import { ArrowRight, LoaderCircle, Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { authApi, subscribeToAuthenticationLoss, type StudioAuthSession } from "../auth-api.js";
+import { authApi, AuthRequestError, subscribeToAuthenticationLoss, type StudioAuthSession } from "../auth-api.js";
 
 interface AuthenticatedStudio {
   username?: string;
+  ownerId?: string;
   logout?(): Promise<void>;
+}
+
+const LAST_AUTH_OWNER = "vf:last-auth-user";
+
+function clearStudioLocalCache() {
+  const storage = window.localStorage;
+  for (let index = storage.length - 1; index >= 0; index -= 1) {
+    const key = storage.key(index);
+    if (key?.startsWith("vf:agent-") || key?.startsWith("vf:agent:")) storage.removeItem(key);
+  }
+  storage.removeItem(LAST_AUTH_OWNER);
 }
 
 export function AuthGate({ children }: { children: (studio: AuthenticatedStudio) => ReactNode }) {
   const [session, setSession] = useState<StudioAuthSession>();
   const [loadError, setLoadError] = useState("");
+  const [logoutNotice, setLogoutNotice] = useState("");
 
+  const acceptSession = (next: StudioAuthSession) => {
+    if (next.enabled) {
+      if (!next.authenticated) clearStudioLocalCache();
+      else if (window.localStorage.getItem(LAST_AUTH_OWNER) !== next.ownerId) {
+        clearStudioLocalCache();
+        window.localStorage.setItem(LAST_AUTH_OWNER, next.ownerId);
+      }
+    }
+    setSession(next);
+  };
   const load = async () => {
     setLoadError("");
     try {
-      setSession(await authApi.authSession());
+      acceptSession(await authApi.authSession());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "无法检查登录状态。");
     }
@@ -22,7 +45,7 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
   useEffect(() => { void load(); }, []);
   useEffect(() => subscribeToAuthenticationLoss(() => {
     setLoadError("");
-    setSession({ enabled: true, authenticated: false });
+    acceptSession({ enabled: true, authenticated: false });
   }), []);
 
   if (loadError) {
@@ -41,25 +64,26 @@ export function AuthGate({ children }: { children: (studio: AuthenticatedStudio)
     return <main className="auth-stage"><LoaderCircle className="auth-spinner" aria-label="正在检查登录状态" /></main>;
   }
   if (session.enabled && !session.authenticated) {
-    return <LoginPanel onAuthenticated={setSession} />;
+    return <LoginPanel notice={logoutNotice} onAuthenticated={authenticated => { setLogoutNotice(""); acceptSession(authenticated); }} />;
   }
   if (!session.enabled) return children({});
   return children({
     username: session.username,
+    ownerId: session.ownerId,
     logout: async () => {
-      await authApi.logout();
-      for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
-        const key = window.localStorage.key(index);
-        if (key?.startsWith("vf:agent-")) {
-          window.localStorage.removeItem(key);
-        }
+      try {
+        await authApi.logout();
+      } catch (error) {
+        if (!(error instanceof AuthRequestError || error instanceof TypeError)) throw error;
+        if (!(error instanceof AuthRequestError && error.status === 401)) setLogoutNotice("此设备的草稿已清除。服务器未确认退出。恢复连接后，请刷新页面核对登录状态。");
+      } finally {
+        acceptSession({ enabled: true, authenticated: false });
       }
-      setSession({ enabled: true, authenticated: false });
     },
   });
 }
 
-function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSession): void }) {
+function LoginPanel({ onAuthenticated, notice }: { notice: string; onAuthenticated(session: StudioAuthSession): void }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
 
@@ -82,6 +106,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
       <LoginFilm />
       <section className="auth-panel" aria-labelledby="auth-title">
         <h1 id="auth-title">回到创作现场</h1>
+        {notice && <p className="auth-error" role="status">{notice}</p>}
         <form className="auth-form" onSubmit={event => void submit(event)}>
           <label><span>用户名</span><input name="username" autoComplete="username" required autoFocus /></label>
           <label><span>密码</span><input name="password" type="password" autoComplete="current-password" required /></label>

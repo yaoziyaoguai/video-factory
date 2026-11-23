@@ -132,6 +132,10 @@ export function SkillPackagesPanel({ visible, onCatalogRefresh, onMutationChange
         const skill = view.skills.find(entry => entry.id === id);
         return <li key={id}><strong>{skill?.name ?? id}</strong><p>{skill?.description ?? "当前目录未发现此 Skill。"}</p></li>;
       })}</ul> : <p className="agent-skill-empty">{item.status === "invalid" ? "来源或 Skill 解析不可用，请查看诊断。" : "此来源未发现可用 Skill。"}</p>}
+      {item.status === "ready" ? <div className="agent-config-note" aria-label="运行依赖">
+        {{ unchecked: "未声明运行依赖", ready: "运行依赖已就绪", unavailable: "运行依赖未就绪" }[item.runtimeStatus]}
+        {item.runtimeMissing.length > 0 && <ul>{item.runtimeMissing.map(dep => <li key={dep}>{dep}</li>)}</ul>}
+      </div> : null}
       {item.diagnostics.length ? <ul className="agent-skill-diagnostics" aria-label={`${item.name} 诊断`}>{item.diagnostics.map((diagnostic, index) => <li key={index}>{diagnostic}</li>)}</ul> : null}
     </article>)}</div>
     {view?.packages.length === 0 ? <div className="agent-settings-empty"><Sparkles aria-hidden="true" /><h3>还没有 Skill 包</h3><p>从 npm、Git 仓库或服务器本机包目录安装。</p><button type="button" className="agent-model-config-button" disabled={blocked} onClick={event => open("install", event.currentTarget)}>安装第一个 Skill</button></div> : null}

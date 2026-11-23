@@ -1,10 +1,9 @@
 import { clampThinkingLevel, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import type { NativeTextApi } from "../../shared/agent/provider-capabilities.js";
 import type { ThinkingLevel } from "../../shared/agent/generated/contracts.js";
 
-// 文本执行能力的事实源：锁定 Pi 1.4.0 静态目录中 OpenAI 的精确对话型号。
-// openaiProvider 没有 refreshModels；本轮不把调用 Models.refresh 当作取得新能力，
-// 也不按 ID 前缀为目录外型号猜测容量或推理档位。
+// 型号能力取自 Pi 锁定目录，并严格匹配协议、地址与型号 ID。
 
 /** 精确型号的推理能力；只读投影，不进入保存命令或当前连接 JSON。 */
 export interface TextThinkingCapability {
@@ -38,8 +37,21 @@ export function findOpenAIChatModel(modelId: string, baseUrl: string): OpenAICha
   return new URL(official).href.replace(/\/$/, "") === new URL(baseUrl).href.replace(/\/$/, "") ? model : null;
 }
 
+const nativeCatalog = new Map<string, Model<NativeTextApi>>();
+for (const provider of builtinProviders()) {
+  for (const model of provider.getModels()) {
+    if (model.api !== "anthropic-messages" && model.api !== "openai-completions") continue;
+    if (model.baseUrl) nativeCatalog.set(JSON.stringify([model.api, model.baseUrl.replace(/\/$/, ""), model.id]), model as Model<NativeTextApi>);
+  }
+}
+
+export function findNativeTextModel(api: NativeTextApi | null, modelId: string, baseUrl: string): Model<NativeTextApi> | null {
+  if (api === "openai-responses") return findOpenAIChatModel(modelId, baseUrl);
+  return nativeCatalog.get(JSON.stringify([api, baseUrl.replace(/\/$/, ""), modelId])) ?? null;
+}
+
 // 已知型号给 Pi 实际支持列表与原生默认有效档位；未知身份返回 null，不冒充“不支持推理”。
-export function thinkingCapabilityOf(known: OpenAIChatModel | null): TextThinkingCapability | null {
+export function thinkingCapabilityOf(known: Model<NativeTextApi> | null): TextThinkingCapability | null {
   if (!known) return null;
   if (!known.reasoning) return { levels: ["off"], defaultLevel: "off" };
   // Pi 对 reasoning 型号至少保留一个原生档位（off 或更高），合同要求非空列表。
@@ -51,7 +63,7 @@ export function thinkingCapabilityOf(known: OpenAIChatModel | null): TextThinkin
 
 /** 配置档位转本请求实际档位：default 走 Pi 原生夹取；未知型号只能落到 off。 */
 export function resolveThinkingLevel(
-  known: OpenAIChatModel | null,
+  known: Model<NativeTextApi> | null,
   requested: ThinkingLevel | "default" | undefined,
 ): ThinkingLevel {
   if (requested !== undefined && requested !== "default") return requested;

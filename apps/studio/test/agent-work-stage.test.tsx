@@ -345,7 +345,6 @@ it("PC 继续在排队期间保持禁用，刷新恢复处理状态且不锁另�
 });
 
 it("PC 比较准确两版，选择审阅组不发送命令，聚焦审片保留聊天与稿旁意见", async () => {
-  vi.stubGlobal("innerWidth", 1440);
   const draft = { kind: "artifact_revision" as const, artifactId: "script", revisionId: "script-rev-2", digest: "sha256:v2" };
   const harness = installStageRoutes({ works: [workFixture({ id: "work-compare", title: "山路", content: { draft }, plan: { draft: null } })] });
   renderAt("/agent/conv-w");
@@ -357,12 +356,34 @@ it("PC 比较准确两版，选择审阅组不发送命令，聚焦审片保留�
   await userEvent.click(screen.getByRole("textbox", { name: "意见" }));
   await userEvent.type(screen.getByRole("textbox", { name: "意见" }), "稿旁意见");
   await userEvent.click(screen.getByRole("button", { name: "展开作品区" }));
-  await userEvent.click(await screen.findByRole("button", { name: "返回聊天与作品" }));
+  // B12-BUG-05 命名统一：聚焦按钮双向命名对称，返回方向即「展开对话」。
+  await userEvent.click(await screen.findByRole("button", { name: "展开对话" }));
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("聊天草稿");
   expect(screen.getByRole("textbox", { name: "意见" })).toHaveValue("稿旁意见");
   await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /画面与声音/ }));
   expect(screen.getByRole("option", { name: /画面与声音/ })).toHaveProperty("selected", true);
   expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
+});
+
+it("DECISION-01 舞台「在对话中改这版」只预填草稿不发送；随后的消息携带作品与版本目标", async () => {
+  const draft = { kind: "artifact_revision" as const, artifactId: "script", revisionId: "script-rev-2", digest: "sha256:v2" };
+  const harness = installStageRoutes({ works: [workFixture({ id: "work-revise", title: "山路", content: { draft } })],
+    artifacts: [artifactFixture("script", "山路脚本", "script-rev-2", 2)] });
+  renderAt("/agent/conv-w");
+  await findCanvasText("script 正文 script-rev-2");
+  // 绑定动作本身不产生任何请求，只把目标写进聊天草稿并亮出针对条。
+  await userEvent.click(screen.getByRole("button", { name: "↗ 在对话中改这版" }));
+  expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
+  expect(screen.getByText(/针对：山路 · 山路脚本/)).toBeInTheDocument();
+  const composer = screen.getByRole("textbox", { name: "消息输入" });
+  expect(composer).toHaveValue("");
+  expect(composer).toHaveFocus();
+  await userEvent.type(composer, "保留意思，语气安静一点");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  const command = harness.calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as MessageInput;
+  expect(command).toMatchObject({ text: "保留意思，语气安静一点", target: { artifactId: "script", revisionId: "script-rev-2", workId: "work-revise" }, mode: "new" });
+  // 发送完成后针对条随草稿一起清空。
+  await waitFor(() => expect(screen.queryByText(/针对：/)).toBeNull());
 });
 
 describe("R2 组审阅工作台", () => {
@@ -402,15 +423,15 @@ describe("R2 组审阅工作台", () => {
       } });
     let page = renderAt("/agent/conv-w");
     await userEvent.click(await screen.findByRole("button", { name: "普通提示词" }));
-    expect(screen.queryByRole("button", { name: "认可这一版" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "认可 v1" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "独立脚本文稿" }));
     await within(screen.getByRole("region", { name: "草稿与修改" })).findByText("独立脚本第一版");
     await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先留着我的聊天草稿");
-    await userEvent.click(screen.getByRole("button", { name: "认可这一版" }));
+    await userEvent.click(screen.getByRole("button", { name: "认可 v1" }));
     const command = harness.calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))!.body as MessageInput;
     expect(command).toMatchObject({ target: null, skillId: null, proposalRef: null, mode: "new", reviewContext: null });
     expect(command.librarySelections).toBeUndefined();
-    await waitFor(() => expect(screen.getByRole("button", { name: "认可这一版" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "认可 v1" })).toBeEnabled());
 
     harness.snapshot.artifacts.items[0] = { ...script, standaloneApproval: { confirmationId: "confirm-v1", revisionId: "script-v1", approvedAt: "2026-01-02T00:00:00Z" } };
     harness.snapshot.messages.items = [confirmationMessage];
@@ -420,9 +441,9 @@ describe("R2 组审阅工作台", () => {
     expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先留着我的聊天草稿");
 
     harness.snapshot.artifacts.items[0] = { ...harness.snapshot.artifacts.items[0]!, revisionId: "script-v2", revisionNumber: 2 };
-    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "draft-v2", kind: "artifact.delivered", entityId: "standalone", entityVersion: 2 });
+    FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "draft-v2", kind: "artifact.delivered", notification: "new_output", entityId: "standalone", entityVersion: 2 });
     await waitFor(() => expect(screen.getByRole("button", { name: "独立脚本文稿", pressed: true })).toHaveTextContent("有更新"));
-    expect(screen.queryByRole("button", { name: "认可这一版" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "认可 v2" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "独立脚本文稿", pressed: true }));
     await within(screen.getByRole("region", { name: "草稿与修改" })).findByText("独立脚本第二版");
     expect(within(screen.getByRole("region", { name: "已确认成果" })).getByText("独立脚本第一版")).toBeInTheDocument();
@@ -437,7 +458,7 @@ describe("R2 组审阅工作台", () => {
     expect(approvedAfterReload.getByText("第一版中段：雨落在窗台。")).toBeVisible();
     expect(approvedAfterReload.getByText("第一版结尾：灯还亮着。")).toBeVisible();
     expect(approvedAfterReload.queryByText("独立脚本第二版")).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "认可这一版" }));
+    await userEvent.click(screen.getByRole("button", { name: "认可 v2" }));
     headOutsidePage = { ...harness.snapshot.artifacts.items[0]!, standaloneApproval: { confirmationId: "confirm-v2", revisionId: "script-v2", approvedAt: "2026-01-03T00:00:00Z" } };
     harness.snapshot.artifacts.items = [];
     harness.snapshot.messages.items = [{ ...confirmationMessage, revision: 2, references: { ...confirmationMessage.references, artifacts: [{ artifactId: "standalone", revisionId: "script-v2" }] } }];
@@ -581,6 +602,82 @@ describe("R2 组审阅工作台", () => {
     command = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
     expect(command.reviewConfirmation).toMatchObject({ action: "finalize_video",
       items: [{ itemId: "item-video", source: { kind: "artifact_revision", revisionId: "video-rev-2", digest: "v2" } }] });
+  });
+
+  it("UIUX-08 成片已认可未定稿时底部原位给出主按钮「定稿并入库」，继续下一步降为次级；双击不重复提交", async () => {
+    const v1 = { kind: "artifact_revision" as const, artifactId: "video", revisionId: "video-rev-1", digest: "v1" };
+    const harness = installStageRoutes({ works: [workFixture({ id: "work-1", title: "城市短片", stage: "video",
+      video: { draft: v1, approved: v1, approvedAt: "2026-01-01T00:00:00.000Z", confirmationId: "conf-approve" } })],
+      artifacts: [artifactFixture("video", "视频初稿", "video-rev-1", 1, "video")] });
+    renderAt("/agent/conv-w");
+    await screen.findByText("已认可，可定稿");
+    const finalize = await screen.findByRole("button", { name: "以 v1 定稿并入库 · 视频初稿" });
+    expect(finalize).toHaveClass("agent-stage-primary");
+    const actionBar = finalize.closest(".agent-review-actions")!;
+    const continueButton = within(actionBar as HTMLElement).getByRole("button", { name: "继续下一步" });
+    expect(continueButton).toHaveClass("agent-stage-secondary");
+    expect(finalize.compareDocumentPosition(continueButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 同一连击的第二次点击不重复发送定稿命令。
+    fireEvent.click(finalize, { detail: 2 });
+    expect(harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages"))).toHaveLength(0);
+    await userEvent.click(finalize);
+    const command = harness.calls.filter(call => call.method === "POST" && call.url.endsWith("/messages")).at(-1)!.body as Record<string, unknown>;
+    expect(command.reviewConfirmation).toMatchObject({ action: "finalize_video",
+      items: [{ itemId: "item-video", source: { kind: "artifact_revision", artifactId: "video", revisionId: "video-rev-1" } }] });
+  });
+
+  it("UIUX-08 组声明后续意图时继续下一步保持主按钮，定稿以次级呈现；非视频角色不出现底部定稿", async () => {
+    const nextIntent = "定稿后我会整理入库信息";
+    const v1 = { kind: "artifact_revision" as const, artifactId: "art-video", revisionId: "video-rev-1", digest: "sha256:v1" };
+    const base = workFixture({ id: "work-1", title: "意图节奏" });
+    const approved = (artifactId: string, revisionId: string, digest: string) => ({ kind: "artifact_revision" as const, artifactId, revisionId, digest });
+    const harness = installStageRoutes({
+      works: [{ ...base, reviewGroups: [
+        { id: "group-video", title: "视频初稿", revision: 1, nextIntent,
+          items: [{ id: "item-video", label: "视频初稿", role: "video" as const, required: true,
+            draft: v1, approved: v1, finalizedSource: null, confirmationId: "conf-v", approvedAt: "2026-01-02T00:00:00.000Z" }] },
+        { id: "group-plan", title: "画面与声音", revision: 1, nextIntent: null,
+          items: [{ id: "item-plan", label: "画面与声音", role: "plan" as const, required: true,
+            draft: approved("art-plan", "plan-rev-1", "p1"), approved: approved("art-plan", "plan-rev-1", "p1"),
+            finalizedSource: null, confirmationId: "conf-p", approvedAt: "2026-01-02T00:00:00.000Z" }] },
+      ] }],
+      artifacts: [artifactFixture("art-video", "成片", "video-rev-1", 1, "video"), artifactFixture("art-plan", "方案", "plan-rev-1", 1, "script")] });
+    renderAt("/agent/conv-w");
+    await screen.findByText("已认可，可定稿");
+    const finalize = await screen.findByRole("button", { name: "以 v1 定稿并入库 · 视频初稿" });
+    expect(finalize).toHaveClass("agent-stage-secondary");
+    const actionBar = finalize.closest(".agent-review-actions")!;
+    expect(within(actionBar as HTMLElement).getByRole("button", { name: "继续下一步" })).toHaveClass("agent-stage-primary");
+    // 切到已认可的非视频组：底部动作栏没有定稿入口。
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "审阅组" }), screen.getByRole("option", { name: /画面与声音/ }));
+    const planBar = await waitFor(() => {
+      const bar = document.querySelector(".agent-review-actions") as HTMLElement;
+      expect(within(bar).getByRole("button", { name: "继续下一步" })).toBeInTheDocument();
+      return bar;
+    });
+    expect(within(planBar).queryByRole("button", { name: /定稿并入库/ })).toBeNull();
+  });
+
+  it("UIUX-08 对照试听与历史版本视图收起底部定稿入口，回到当前稿后恢复", async () => {
+    const v1 = { kind: "artifact_revision" as const, artifactId: "video", revisionId: "video-rev-1", digest: "v1" };
+    const v2 = { kind: "artifact_revision" as const, artifactId: "video", revisionId: "video-rev-2", digest: "v2" };
+    const media = (revisionId: string, version: number) => ({ ...videoRevisionFixture("video", revisionId, `run-${version}`, `blob-${version}`),
+      revisionNumber: version, baseRevisionId: version > 1 ? "video-rev-1" : null });
+    const harness = installStageRoutes({ works: [workFixture({ id: "work-1", title: "城市短片", stage: "video",
+      video: { draft: v2, approved: v2, approvedAt: "2026-01-01T00:00:00.000Z", confirmationId: "conf-approve" } })],
+      artifacts: [artifactFixture("video", "视频初稿", "video-rev-2", 2, "video")],
+      onRequest: url => url.endsWith("/revisions/video-rev-2") ? { status: 200, body: media("video-rev-2", 2) }
+        : url.endsWith("/revisions/video-rev-1") ? { status: 200, body: media("video-rev-1", 1) } : null });
+    renderAt("/agent/conv-w");
+    const finalize = await screen.findByRole("button", { name: "以 v2 定稿并入库 · 视频初稿" });
+    await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
+    await userEvent.click(await screen.findByRole("button", { name: "上一版 v1（0:03）" }));
+    const compareBar = document.querySelector(".agent-review-actions") as HTMLElement;
+    expect(within(compareBar).getByRole("button", { name: "回到 v2" })).toBeInTheDocument();
+    expect(within(compareBar).queryByRole("button", { name: /定稿并入库/ })).toBeNull();
+    await userEvent.click(within(compareBar).getByRole("button", { name: "回到 v2" }));
+    expect(await screen.findByRole("button", { name: "以 v2 定稿并入库 · 视频初稿" })).toBeEnabled();
+    expect(harness.calls.filter(call => call.method === "POST")).toHaveLength(0);
   });
 
   it("V1 出背景新稿时继续看旧稿：整组认可被禁用并指出原因，单项仍可认；回最新稿后整组只提交准确当前稿", async () => {
@@ -1195,22 +1292,96 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     readFailed = false;
     await userEvent.click(screen.getByRole("button", { name: "重试" }));
     await screen.findByText("第三版实际片段");
+    const activeVideo = () => document.querySelector(".agent-stage-body:not([hidden]) video");
+    const currentPlayer = activeVideo();
     await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
-    await userEvent.click(await screen.findByRole("button", { name: "上一版 v2" }));
-    expect(document.querySelector(".agent-stage-body video")?.getAttribute("src")).toContain("whole-2");
+    await userEvent.click(await screen.findByRole("button", { name: "上一版 v2（0:03）" }));
+    const previousPlayer = activeVideo();
+    expect(previousPlayer?.getAttribute("src")).toContain("whole-2");
     await screen.findByText("第二版实际片段");
     expect(screen.queryByText("第三版实际片段")).toBeNull();
     expect(runReads()).toEqual(["original-run-3", "original-run-3", "original-run-2"]);
-    await userEvent.click(screen.getByRole("button", { name: "当前版 v3" }));
+    await userEvent.click(screen.getByRole("button", { name: "当前版 v3（0:03）" }));
     await screen.findByText("第三版实际片段");
-    expect(document.querySelector(".agent-stage-body video")?.getAttribute("src")).toContain("whole-3");
+    expect(activeVideo()?.getAttribute("src")).toContain("whole-3");
+    expect(activeVideo()).toBe(currentPlayer);
     expect(runReads()).toEqual(["original-run-3", "original-run-3", "original-run-2"]);
-    await userEvent.click(screen.getByRole("button", { name: "上一版 v2" }));
+    await userEvent.click(screen.getByRole("button", { name: "上一版 v2（0:03）" }));
+    expect(activeVideo()).toBe(previousPlayer);
     await userEvent.click(screen.getByRole("button", { name: "查看制作记录" }));
     await screen.findByRole("heading", { name: "制作记录" });
     const selectedRun = within(document.querySelector<HTMLElement>(".agent-paper .agent-run")!);
     expect(selectedRun.getByText("第二版的真实制作")).toBeInTheDocument();
     expect(selectedRun.queryByText("第三版的真实制作")).toBeNull();
+  });
+
+  it("UIUX-04 对照试听显示两版时长，片长差异给出同时间码提示", async () => {
+    const video = { kind: "artifact_revision" as const, artifactId: "cut-video", revisionId: "cut-v3", digest: "v3" };
+    const media = (revisionId: string, version: number, durationMs: number, blob: string) => ({
+      ...videoRevisionFixture(video.artifactId, revisionId, "same-run", blob), revisionNumber: version,
+      baseRevisionId: version > 1 ? `cut-v${version - 1}` : null,
+      content: { format: "media" as const, blobId: blob, mimeType: "video/mp4", durationMs },
+    });
+    installStageRoutes({ works: [workFixture({ id: "cut-work", title: "时长对比", stage: "video", video: { draft: video } })],
+      onRequest: url => url.endsWith("/revisions/cut-v3") ? { status: 200, body: media("cut-v3", 3, 8000, "blob-3") }
+        : url.endsWith("/revisions/cut-v2") ? { status: 200, body: media("cut-v2", 2, 6000, "blob-2") } : null });
+    renderAt("/agent/conv-w");
+    await screen.findByLabelText<HTMLVideoElement>("视频预览");
+    await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
+    expect(await screen.findByRole("button", { name: "上一版 v2（0:06）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "当前版 v3（0:08）" })).toBeInTheDocument();
+    expect(screen.getByText("两版片长有调整，同一时间码未必对应同一画面。")).toBeVisible();
+    expect(screen.queryByText(/不同制作生成/)).toBeNull();
+  });
+
+  it("UIUX-04 仅制作来源不同时提示同时间码可能对应不同画面，不报片长差", async () => {
+    const video = { kind: "artifact_revision" as const, artifactId: "runs-video", revisionId: "runs-v3", digest: "v3" };
+    const media = (revisionId: string, version: number, run: string) => ({
+      ...videoRevisionFixture(video.artifactId, revisionId, run, `runs-blob-${version}`), revisionNumber: version,
+      baseRevisionId: version > 1 ? `runs-v${version - 1}` : null,
+    });
+    installStageRoutes({ works: [workFixture({ id: "runs-work", title: "制作对比", stage: "video", video: { draft: video } })],
+      onRequest: url => url.endsWith("/revisions/runs-v3") ? { status: 200, body: media("runs-v3", 3, "run-three") }
+        : url.endsWith("/revisions/runs-v2") ? { status: 200, body: media("runs-v2", 2, "run-two") } : null });
+    renderAt("/agent/conv-w");
+    await screen.findByLabelText<HTMLVideoElement>("视频预览");
+    await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
+    expect(await screen.findByRole("button", { name: "上一版 v2（0:03）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "当前版 v3（0:03）" })).toBeInTheDocument();
+    expect(screen.getByText("两版由不同制作生成，同一时间码可能对应不同画面。")).toBeVisible();
+    expect(screen.queryByText(/片长有调整/)).toBeNull();
+  });
+
+  it("UIUX-04 对照试听上一版时意见仍可编辑并绑定当前版，时间码前缀标注对照版本", async () => {
+    const video = { kind: "artifact_revision" as const, artifactId: "cmp-video", revisionId: "cmp-v3", digest: "v3" };
+    const media = (revisionId: string, version: number) => ({
+      ...videoRevisionFixture(video.artifactId, revisionId, `run-${version}`, `cmp-blob-${version}`), revisionNumber: version,
+      baseRevisionId: version > 1 ? `cmp-v${version - 1}` : null,
+    });
+    const harness = installStageRoutes({ works: [workFixture({ id: "cmp-work", title: "对照试听", stage: "video", video: { draft: video } })],
+      onRequest: (url, call) => call.method === "POST" && url.endsWith("/feedback") ? { status: 201, body: { messageId: "feedback-cmp", disposition: "recorded", replayed: false } }
+        : url.endsWith("/revisions/cmp-v3") ? { status: 200, body: media("cmp-v3", 3) }
+        : url.endsWith("/revisions/cmp-v2") ? { status: 200, body: media("cmp-v2", 2) } : null });
+    renderAt("/agent/conv-w");
+    await screen.findByLabelText<HTMLVideoElement>("视频预览");
+    await userEvent.click(screen.getByRole("button", { name: "比较版本" }));
+    await userEvent.click(await screen.findByRole("button", { name: "上一版 v2（0:03）" }));
+    expect(screen.getByText("上一版 · 对照试听")).toBeVisible();
+    // 上一版播放器是活跃画面：意见取它的时间码，但草稿键与提交目标仍是当前版。
+    const previousPlayer = document.querySelector<HTMLVideoElement>('[data-cut="previous"] video')!;
+    act(() => { previousPlayer.currentTime = 47; });
+    await userEvent.click(screen.getByRole("button", { name: "对此时刻提意见" }));
+    const textarea = screen.getByRole("textbox", { name: "意见" });
+    expect(textarea).not.toHaveAttribute("readonly");
+    expect(textarea).toHaveValue("[00:47 对照 v2] ");
+    expect(screen.getByText("正在对照 v2 试听，意见将绑定到当前版 v3")).toBeInTheDocument();
+    await userEvent.type(textarea, "这版转场更顺");
+    await userEvent.click(screen.getByRole("button", { name: "记录意见" }));
+    await screen.findByText("意见已记录。");
+    expect(harness.calls.find(call => call.url.endsWith("/feedback"))?.body).toMatchObject({
+      text: "[00:47 对照 v2] 这版转场更顺",
+      target: { artifactId: "cmp-video", revisionId: "cmp-v3", workId: "cmp-work" },
+    });
   });
 
   it("DD-12 无制作来源的历史视频保留预览，既不显示其他运行也不补读", async () => {
@@ -1593,11 +1764,21 @@ describe("E1 片段阅读身份（AUD-01）", () => {
     const draft = { kind: "artifact_revision" as const, artifactId: "art-basis", revisionId: "art-basis-rev-3", digest: "sha256:art-basis-rev-3" };
     const work = workFixture({ id: "work-1", title: "城市短片", stage: "content", content: { draft } });
     work.reviewGroups[0]!.items[0]!.label = "内容依据 v1";
-    installStageRoutes({ works: [work], artifacts: [artifactFixture("art-basis", "内容依据", "art-basis-rev-3", 3)] });
+    let releaseRevision!: () => void;
+    const readingRevision = new Promise<void>(resolve => { releaseRevision = resolve; });
+    installStageRoutes({
+      works: [work], artifacts: [artifactFixture("art-basis", "内容依据", "art-basis-rev-3", 3)],
+      onRequest: async url => {
+        if (url.endsWith(`/artifacts/${draft.artifactId}/revisions/${draft.revisionId}`)) await readingRevision;
+        return null;
+      },
+    });
     renderAt("/agent/conv-w");
     // 事项卡头：h4 原样保留标签文字，准确版本在独立元素里显示。
     const heading = await within(await screen.findByRole("region", { name: "草稿与修改" })).findByRole("heading", { level: 4, name: "内容依据 v1" });
-    expect(within(heading.parentElement!).getByText("v3")).toBeInTheDocument();
+    expect(within(heading.parentElement!).queryByText("v3")).toBeNull();
+    releaseRevision();
+    expect(await within(heading.parentElement!).findByText("v3")).toBeInTheDocument();
     // 待确认卡：可访问名 = 动词 + 标签原文 + 独立追加的准确版本；strong 不剥掉标签里的 v1。
     const pendingCard = await within(screen.getByRole("region", { name: "未确认" })).findByRole("button", { name: "审阅内容依据 v1 v3" });
     const strong = within(pendingCard).getByText("内容依据 v1");
@@ -1818,6 +1999,65 @@ it("mixed 制作区分复用画面/配音与新配音费用，提案和运行只
 });
 
 describe("独立验收反例", () => {
+  it.each([
+    ["image", "张图片", "海边的树"],
+    ["video", "段视频", "海边长镜头"],
+    ["audio", "首音乐", "海边钢琴"],
+  ] as const)("ISS-06 %s 候选在原批次内直接预览并采用第二项", async (kind, unit, title) => {
+    const visualKind = kind === "video" ? "video" : "image";
+    const batch: MaterialBatch = { ...batchFixture("batch-coast", "海边", []),
+      query: { provider: kind === "audio" ? "incompetech" : "pexels", kind, query: "海边", limit: 2 },
+      results: ["第一件", title].map((name, i) => ({ ...candidateFixture(`coast-${i + 1}`, name, visualKind),
+        provider: kind === "audio" ? "incompetech" : "pexels", kind,
+        previewUrl: `https://cdn.example.com/preview-${i + 1}.${kind === "audio" ? "mp3" : "jpg"}` })) };
+    const { calls } = installStageRoutes({ messages: [messageFixture({ id: "source", role: "assistant", text: "原始选材",
+      references: { artifacts: [], proposalIds: [], runIds: [], materialBatchIds: [batch.batchId] } })], batchDetails: { [batch.batchId]: batch } });
+    renderAt("/agent/conv-w");
+    const row = (await screen.findByText("原始选材")).closest("[data-message-id]") as HTMLElement;
+    await userEvent.click(within(row).getByRole("button", { name: /素材/ }));
+    const pane = within(await screen.findByTestId("standalone-batch"));
+    const li = (await pane.findByText(title)).closest("li")!;
+    if (kind === "video") {
+      const player = within(li).getByLabelText(`预览 ${title}`);
+      expect(player).toHaveAttribute("src", "/api/agent/v1/material-batches/batch-coast/candidates/coast-2/preview");
+      expect(player).toHaveAttribute("poster", batch.results[1]!.previewUrl);
+      expect(player).toHaveAttribute("preload", "none");
+      expect(player).toHaveAttribute("controls");
+      expect(player).not.toHaveAttribute("autoplay");
+    } else if (kind === "image") expect(li.querySelector("img")).toHaveAttribute("src", batch.results[1]!.previewUrl);
+    else expect(li.querySelector("audio")).toHaveAttribute("preload", "none");
+    const adopt = within(li).getByRole("button", { name: `采用「${title}」` });
+    expect(adopt).toHaveTextContent(`采用这${unit}`);
+    expect(calls.filter(c => c.method === "POST")).toEqual([]);
+    await userEvent.click(adopt);
+    const write = calls.filter(c => c.method === "POST");
+    expect(write).toHaveLength(1);
+    expect(write[0]!.url).toMatch(/\/messages$/);
+    const command = write[0]!.body as MessageInput;
+    expect(command.text).toContain(`原批次第 2 ${unit}「${title}」`);
+    expect(command.text).toContain("/material-batches/batch-coast#candidate=coast-2");
+    expect(command.reviewConfirmation).toBeUndefined();
+  });
+
+  it("CAP-01 提案显示冻结的竖屏画幅，逐镜覆盖和静帧动效对应实际镜头", () => {
+    const proposal = proposalFixture("vertical", "竖屏短片", null);
+    const base = { operationId: "render", outputSlot: "out", kind: "render" as const, model: null,
+      inputs: [{ kind: "blob" as const, blobId: "clip", digest: "a".repeat(64) }, { kind: "blob" as const, blobId: "still", digest: "b".repeat(64) }] as const,
+      maxCreateAttempts: 1 as const, quotePerAttempt: { currency: "CNY" as const, amountMinor: 0 as const }, priceKind: "bounded" as const };
+    const frozen: Proposal = { ...proposal, spec: { ...proposal.spec, finalOutput: { operationId: "render", outputSlot: "out" }, operations: [{
+      ...base, inputs: [...base.inputs], parameters: { assembly: "mixed_concat", format: "mp4", width: 1080, height: 1920, fps: 30,
+        fitMode: "blur_backdrop", segments: [{ kind: "video", inputSlot: 0, startMs: 0, durationMs: 2000, fitMode: "cover_crop" },
+          { kind: "image", inputSlot: 1, durationMs: 1000, kenBurns: "zoom_in" }], segmentIds: ["A","B"] },
+    }] } };
+    const ui = render(<ProposalCard proposal={frozen} />);
+    expect(screen.getByText("9:16 · 1080×1920 · 30 fps · 模糊背景")).toBeVisible();
+    expect(screen.getByText(/镜头顺序/)).toHaveTextContent(/视频 0.0s 起 2.0s · 居中裁切.*静帧 1.0s · 推近/);
+    ui.rerender(<ProposalCard proposal={{ ...frozen, spec: { ...frozen.spec, operations: [{...base, inputs: [...base.inputs],
+      parameters: { assembly: "ordered_concat", format: "mp4", width: 720, height: 720, fps: 25, visualStyles: [{ inputSlot: 1, fitMode: "cover_crop" }] } }] } }} />);
+    expect(screen.getByText("1:1 · 720×720 · 25 fps · 完整画面留边")).toBeVisible();
+    expect(screen.getByText(/拼接顺序/)).toHaveTextContent(/已有素材 1 → 保留 · 已有素材 2 · 居中裁切/);
+  });
+
   it("查看 B 时采用 A 的旧音乐候选，消息仍指向 A", async () => {
     const draft = { kind: "artifact_revision" as const, artifactId: "script-a", revisionId: "script-a-1", digest: "sha256:a1" };
     const batch: MaterialBatch = { ...batchFixture("a-music", "piano", []), workId: "work-a",

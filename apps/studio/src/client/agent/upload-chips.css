@@ -1,0 +1,17 @@
+.agent-uploads { margin:6px 0 8px; font-size:12px; }
+.agent-uploads ul { max-height:min(26vh,200px); overflow:auto; display:grid; gap:4px; list-style:none; padding:0; margin:0; }
+.agent-uploads li { min-width:0; }
+.agent-upload-chip,.agent-upload-open { display:flex; align-items:center; gap:8px; min-width:0; text-align:left; }
+.agent-upload-chip { padding:4px 6px; border:1px solid var(--frame-line); border-radius:6px; background:var(--frame-paper); }
+.agent-upload-open { flex:1; overflow:hidden; }
+.agent-upload-thumb { display:grid; place-items:center; flex:0 0 34px; height:34px; overflow:hidden; background:var(--frame-soft); border-radius:4px; color:var(--frame-green); }
+.agent-upload-thumb img { width:100%; height:100%; object-fit:cover; }
+.agent-upload-thumb svg { width:16px; }
+.agent-upload-caption { display:grid; min-width:0; line-height:1.4; }
+.agent-upload-caption strong { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:12px; }
+.agent-upload-caption small { color:var(--frame-muted); overflow-wrap:anywhere; }
+.agent-upload-remove { margin-left:auto; display:grid; place-items:center; width:27px; height:27px; flex:none; }
+.agent-upload-remove svg { width:14px; height:14px; }
+.agent-uploads progress { display:block; width:100%; height:4px; accent-color:var(--frame-green); }
+.agent-uploads .agent-upload-consent { margin-top:6px; font-size:12px; font-weight:600; color:var(--frame-green); text-decoration:underline; text-underline-offset:3px; }
+.agent-uploads [data-upload-state=failed] small { color:var(--frame-accent); }

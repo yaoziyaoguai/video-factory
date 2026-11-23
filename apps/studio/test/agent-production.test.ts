@@ -1,3 +1,4 @@
+import { referencedTurnProposals } from "../src/server/agent/turn-context.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ import { studioRoot } from "../src/server/agent/offline.js";
 import { EventHub } from "../src/server/agent/event-log.js";
 import { consumeSubmitPermit, issueSubmitPermit } from "../src/server/agent/submit-permit.js";
 import { validatorFor } from "../src/server/agent/validate.js";
-import { invalidateLegacyNarrationProposals, productionAudioFacts, productionNarrationText } from "../src/server/agent/artifact-store.js";
+import { getProposalRow, rowToProposal, invalidateLegacyNarrationProposals, productionAudioFacts, productionNarrationText } from "../src/server/agent/artifact-store.js";
 import { recordReviewConfirmation } from "../src/server/agent/creative-work.js";
 import { persistSearchBatch } from "../src/server/agent/material-store.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
@@ -207,7 +208,7 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
     }
     // 认可依据携带当时脚本：mixed 绑定 l1 的认可（复用配音即 l1），换稿后的拒绝分支单独换 l2 认可。
     const l1ReviewInput = confirmed.reviewInput;
-    const mixed: ProductionIntent = { ...reuse,
+    const mixed = { ...reuse,
       inputSources: [{ kind: "artifact_revision", artifactId: oldAudio.artifactId, revisionId: oldAudio.revisionId, digest: oldAudio.digest }],
       reviewInputs: [l1ReviewInput], operations: [{ kind: "render", operationId: "mix", outputSlot: "mixed", model: null, maxCreateAttempts: 1,
         inputs: [{ kind: "blob", blobId: external.id, digest: external.digest },
@@ -218,13 +219,42 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
           segmentIds: ["mix-a", "mix-b"], music: { inputSlot: 2, candidateId: "fixture-song", sourceStartMs: 1000, sourceDurationMs: 6000,
             timelineStartMs: 0, playDurationMs: 6000, repeat: false, gain: 0.2, fadeInMs: 200, fadeOutMs: 400, duckUnderNarration: true },
           narration: { inputSlot: 1, timelineStartMs: 0, gain: 1 } },
-      }], finalOutput: { operationId: "mix", outputSlot: "mixed" } };
+      }], finalOutput: { operationId: "mix", outputSlot: "mixed" } } satisfies ProductionIntent;
     assert.equal(productionAudioFacts(f.app.database, mixed).knownNarrationText, l1, "未知原声和歌曲不清空已知独立L1");
     // 换稿：脚本推进到 l2 并重新认可后，引用 l2 认可的报价与 l1 复用配音不一致，必须在准备时拒绝。
     const second = confirmScript(l2);
     await assert.rejects(() => admitLocalIntent(f.app, scope, { ...mixed, reviewInputs: [confirmed.reviewInput] }, false), /旁白.*不一致/);
     const musicRun = (await admitLocalIntent(f.app, scope, mixed, false)).run;
     assert.equal(musicRun.audioSummary?.narration?.text, l1);
+    // 模拟作品库带入另一会话的配音。克隆修订保留原 blob，生产快照仍属于原会话。
+    const db = f.app.database;
+    db.exec("SAVEPOINT imported_voice");
+    try {
+      const imported = f.app.service.createConversation(scope.ownerId, {commandId: cmd(), title: "复用配音"}).conversation;
+      db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES('copied-audio',?,?,'已带入配音','audio','copied-voice',1,1,?,?)")
+        .run(imported.id, scope.ownerId, f.clock(), f.clock());
+      db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,digest,content_json,created_at,origin_kind) VALUES('copied-voice','copied-audio',1,?,?,?,'library_import')")
+        .run(oldAudio.digest, canonicalJson(oldAudio.content), f.clock());
+      const frozen = structuredClone(p1.spec);
+      const render = frozen.operations.find(operation => operation.kind === "render")!;
+      const mix = structuredClone(mixed.operations[0]!);
+      assert.ok(mix.kind === "render");
+      render.inputs = mix.inputs;
+      render.parameters = mix.parameters;
+      const voice = render.inputs[1]!;
+      assert.ok(voice.kind === "artifact_revision");
+      voice.artifactId = "copied-audio";
+      voice.revisionId = "copied-voice";
+      db.prepare("INSERT INTO proposals(id,conversation_id,owner_id,digest,spec_json,state,price_disclosure,expires_at,revision,created_seq,created_at,updated_at) SELECT 'mix-copy',?,owner_id,?,?,'ready',price_disclosure,expires_at,1,1,created_at,updated_at FROM proposals WHERE id=?")
+        .run(imported.id, digestOf(frozen), canonicalJson(frozen), p1.id);
+      const row = getProposalRow(db, scope.ownerId, "mix-copy")!;
+      const originalProjection = rowToProposal(row, db);
+      assert.equal(originalProjection.audioSummary?.narration?.text, l1);
+      assert.deepEqual(referencedTurnProposals(db, scope.ownerId, imported.id, ["mix-copy"]), [originalProjection]);
+    } finally {
+      db.exec("ROLLBACK TO imported_voice");
+      db.exec("RELEASE imported_voice");
+    }
     assert.equal(musicRun.audioSummary?.music?.source.title, "本地音乐夹具");
     assert.equal(musicRun.audioSummary?.original[0]?.textCoverage, "unknown");
     assert.equal(musicRun.finance, null);
@@ -237,7 +267,7 @@ it("F2 逐字旁白在首次报价、同稿重报、换稿重认和两版作品�
     disguisedRender.inputs[2] = { kind: "artifact_revision", artifactId: oldAudio.artifactId, revisionId: oldAudio.revisionId, digest: oldAudio.digest };
     disguisedRender.parameters.music = { ...disguisedRender.parameters.music!, candidateId: "fixture-disguised-speech", sourceStartMs: 0, sourceDurationMs: 1, playDurationMs: 1, fadeInMs: 0, fadeOutMs: 0 };
     await assert.rejects(() => admitLocalIntent(f.app, scope, disguised, false), /已知配音不能放进音乐槽/);
-    const noNarration = structuredClone(mixed);
+    const noNarration: ProductionIntent = structuredClone(mixed);
     const noNarrationRender = noNarration.operations[0]!;
     if (noNarrationRender.kind !== "render" || noNarrationRender.parameters.assembly !== "mixed_concat") throw new Error("expected mixed render");
     delete noNarrationRender.parameters.narration;

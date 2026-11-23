@@ -1,12 +1,24 @@
-:root { color-scheme:light; --bg:#f5f7f5; --surface:#fff; --text:#293a32; --muted:#758478; --border:#dce5dc; --accent:#396e54; --shadow:0 16px 56px #233d2910; --radius-lg:14px; --font-body:"Noto Sans SC Variable",sans-serif; }
+@font-face { font-family:"Frame Brand"; font-style:normal; font-weight:200 900; font-display:swap; src:url("@fontsource-variable/noto-serif-sc/files/noto-serif-sc-latin-wght-normal.woff2") format("woff2"); unicode-range:U+0000-00FF; }
+:root { color-scheme:light; --bg:#f4f3ee; --surface:#fff; --text:#272825; --muted:#60645e; --border:#dcdad2; --accent:#2f5d44; --shadow:0 16px 56px #233d2910; --radius-lg:14px; --font-body:"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei UI","Source Han Sans SC","Noto Sans SC","Noto Sans CJK SC",system-ui,sans-serif;
+  /* 创作台色彩系统的唯一声明处：纸色 78 / 架与软色 14 / 语义绿与琥珀 5 / 赤陶强调 3。
+     其余样式表只消费 var()，不得重复声明同名 token（agent-static-contracts 校验）。 */
+  --frame-ink:#242522; --frame-muted:#5c6059; --frame-green:#2f5d44; --frame-green-tint:#eef4f0; --frame-soft:#eceae2;
+  --frame-amber:#7d5318; --frame-paper:#faf9f5; --frame-shelf:#f2f1eb; --frame-line:#dedbd2; --frame-accent:#98442d;
+  --frame-disabled-bg:#e2dfd7; --frame-disabled-ink:#6b6e67; }
 * { box-sizing:border-box; }
 body { margin:0; font-family:var(--font-body); color:var(--text); background:white; }
 button,input,textarea,select { font:inherit; }
 button { cursor:pointer; }
 button:disabled { cursor:default; }
-button:focus-visible,a:focus-visible,input:focus-visible { outline:2px solid #43836a; outline-offset:3px; }
+button:focus-visible,a:focus-visible,input:focus-visible { outline:2px solid #98442d; outline-offset:3px; }
 #root { min-height:100dvh; }
 
-:root { --ink:var(--text); --canvas:var(--bg); --canvas-grid:#eaf0e9; --paper:var(--surface); --line:var(--border); --shadow-raised:var(--shadow); --font-editorial:"Noto Serif SC Variable",serif; --control-border:var(--border); --field-radius:6px; --field-shadow:none; --focus:#43836a; --focus-soft:#e7efe8; --action:var(--accent); --action-ink:#fff; --action-hover:#2b6149; --red:#a64545; }
-.auth-mark { background:#2f634a; }
-.auth-error-panel .button { padding:10px 16px; border:1px solid #b9ccbb; border-radius:6px; color:#366547; background:#f0f6ee; }
+:root { --ink:var(--text); --canvas:var(--bg); --canvas-grid:#e6e4da; --paper:var(--surface); --line:var(--border); --shadow-raised:var(--shadow); --font-editorial:"Songti SC","Noto Serif SC","Source Han Serif SC","STZhongsong","FangSong",serif; --control-border:var(--border); --field-radius:6px; --field-shadow:none; --focus:#98442d; --focus-soft:#eceae2; --action:var(--accent); --action-ink:#fff; --action-hover:#2b503e; --red:#a64545; }
+/* 版本号与计时读数固定等宽数字：限定语义计时元素，正文的中英混排字宽不受影响。 */
+time, output { font-variant-numeric: tabular-nums; }
+/* AESTH-05 动效总闸：用户偏好减少动效时，关闭全部过渡与动画（含一次性显影）。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}
+.auth-mark { background:#2f5d44; }
+.auth-error-panel .button { padding:10px 16px; border:1px solid #c9c6ba; border-radius:6px; color:#98442d; background:#eceae2; }

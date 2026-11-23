@@ -6,9 +6,9 @@ import type { MarkdownContent } from "../../shared/agent/generated/contracts.js"
 
 const SAFE_LINK = /^https?:\/\//i;
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+function renderInline(text: string, keyPrefix: string, links = true): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|!\[[^\]]*\]\([^)\s]+\)|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s）)】\]]+)/g;
+  const pattern = /(\*\*[^*]+\*\*|\*[^*\n]+\*|(?<!\w)_[^_\n]+_(?!\w)|`[^`]+`|!\[[^\]]*\]\([^)\s]+\)|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s）)】\]]+)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   let index = 0;
@@ -18,7 +18,9 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     const key = `${keyPrefix}-i${index}`;
     index += 1;
     if (token.startsWith("**")) {
-      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+      nodes.push(<strong key={key}>{renderInline(token.slice(2, -2), key, links)}</strong>);
+    } else if (token.startsWith("*") || token.startsWith("_")) {
+      nodes.push(<em key={key}>{renderInline(token.slice(1, -1), key, links)}</em>);
     } else if (token.startsWith("`")) {
       nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
     } else if (token.startsWith("![")) {
@@ -35,12 +37,12 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       const linkMatch = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
       const label = linkMatch?.[1] ?? token;
       const href = linkMatch?.[2] ?? "";
-      if (linkMatch && SAFE_LINK.test(href)) {
-        nodes.push(<a key={key} href={href} target="_blank" rel="noreferrer noopener">{label}</a>);
+      if (links && linkMatch && SAFE_LINK.test(href)) {
+        nodes.push(<a key={key} href={href} target="_blank" rel="noreferrer noopener">{renderInline(label, key, false)}</a>);
       } else {
         nodes.push(label);
       }
-    } else if (SAFE_LINK.test(token)) {
+    } else if (links && SAFE_LINK.test(token)) {
       nodes.push(<a key={key} href={token} target="_blank" rel="noreferrer noopener">{token}</a>);
     } else {
       nodes.push(token);
@@ -52,11 +54,13 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 }
 
 interface Block {
-  kind: "p" | "h" | "ul" | "ol" | "pre" | "table";
+  kind: "p" | "h" | "ul" | "ol" | "pre" | "table" | "quote" | "rule";
+  language?: string;
   level?: number;
   lines: string[];
 }
 
+const isRule = (line: string) => /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
 const isTableRow = (line: string) => /^\s*\|.*\|\s*$/.test(line);
 const isTableDivider = (line: string) => /^\s*\|?[\s:|-]*-[\s:|-]*$/.test(line);
 const splitRow = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
@@ -90,10 +94,21 @@ function parseBlocks(text: string): Block[] {
         index += 1;
       }
       index += 1; // 收尾围栏（ tolerate 缺失）
-      blocks.push({ kind: "pre", lines: code });
+      blocks.push({ kind: "pre", lines: code, language: line.slice(3).trim() });
       continue;
     }
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (isRule(line)) {
+      blocks.push({ kind: "rule", lines: [] });
+      index++;
+      continue;
+    }
+    if (/^>/.test(line)) {
+      const quote: string[] = [];
+      while (index < lines.length && /^>/.test(lines[index]!)) quote.push(lines[index++]!.replace(/^> ?/, ""));
+      blocks.push({ kind: "quote", lines: quote });
+      continue;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
       blocks.push({ kind: "h", level: heading[1]!.length, lines: [heading[2]!] });
       index += 1;
@@ -118,7 +133,7 @@ function parseBlocks(text: string): Block[] {
       continue;
     }
     const paragraph: string[] = [];
-    while (index < lines.length && lines[index]!.trim() !== "" && !/^(#{1,3}\s|```|\s*[-•]\s|\s*\d+[.、]\s)/.test(lines[index]!)
+    while (index < lines.length && lines[index]!.trim() !== "" && !isRule(lines[index]!) && !/^(#{1,6}\s|>|```|\s*[-•]\s|\s*\d+[.、]\s)/.test(lines[index]!)
       && !(isTableRow(lines[index]!) && index + 1 < lines.length && isTableDivider(lines[index + 1]!))) {
       paragraph.push(lines[index]!);
       index += 1;
@@ -135,8 +150,10 @@ export const MarkdownText = memo(function MarkdownText({ text }: { text: string 
       {blocks.map((block, blockIndex) => {
         const key = `b${blockIndex}`;
         if (block.kind === "pre") {
-          return <pre key={key}><code>{block.lines.join("\n")}</code></pre>;
+          return <pre key={key}>{block.language && <span className="agent-code-language">{block.language}</span>}<code>{block.lines.join("\n")}</code></pre>;
         }
+        if (block.kind === "rule") return <hr key={key} />;
+        if (block.kind === "quote") return <blockquote key={key}>{block.lines.map((line, index) => <p key={index}>{renderInline(line, `${key}-q${index}`)}</p>)}</blockquote>;
         if (block.kind === "table") {
           const [header, ...body] = block.lines;
           return <div className="agent-md-table" key={key}><table>
@@ -145,7 +162,7 @@ export const MarkdownText = memo(function MarkdownText({ text }: { text: string 
           </table></div>;
         }
         if (block.kind === "h") {
-          const Tag = (block.level === 1 ? "h4" : block.level === 2 ? "h5" : "h6") as "h4" | "h5" | "h6";
+          const Tag = (block.level === 1 || block.level === 4 ? "h4" : block.level === 2 || block.level === 5 ? "h5" : "h6") as "h4" | "h5" | "h6";
           return <Tag key={key}>{renderInline(block.lines[0]!, key)}</Tag>;
         }
         if (block.kind === "ul" || block.kind === "ol") {

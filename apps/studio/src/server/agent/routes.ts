@@ -1,3 +1,5 @@
+import multipart from "@fastify/multipart";
+import { uploadLimits } from "./conversation-uploads.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AgentService } from "./agent-service.js";
 import { AgentError } from "./errors.js";
@@ -19,6 +21,7 @@ export interface AgentPluginOptions {
   uiOrigin: string;
   /** 显式本地单用户模式：仅允许环回地址访问。 */
   localOwnerOnly?: boolean;
+  isAdmin?: (ownerId:string)=>boolean;
   /**
    * 已验签会话的过期信息。SSE 握手由 requireOwner 全量验签后，逐帧只做过期时间戳
    * 比对（时钟与会话判定共用），吊销仍由周期性全量复核收敛。本地模式无会话则缺省。
@@ -31,14 +34,25 @@ export interface AgentPluginOptions {
 
 const HEARTBEAT_MS = 15_000;
 const POLL_MS = 5_000;
+const inlineMedia = new Map([
+  ["video/mp4", "mp4"], ["video/webm", "webm"], ["audio/mpeg", "mp3"], ["audio/wav", "wav"],
+  ["image/png", "png"], ["image/jpeg", "jpg"], ["image/webp", "webp"],
+]);
 
 declare module "fastify" {
+  interface FastifyContextConfig { frameUpload?: boolean }
   interface FastifyRequest {
     agentOwnerId?: string;
   }
 }
 
+export function mutationOriginError(request: FastifyRequest, uiOrigin: string): AgentError | undefined {
+  if (request.headers.origin !== uiOrigin) return new AgentError("FORBIDDEN", "请求来源不受信任，请从工作台页面操作。");
+  if (request.headers["x-video-factory-request"] !== "studio") return new AgentError("FORBIDDEN", "请求缺少安全校验，请刷新页面后重试。");
+}
+
 export async function agentRoutes(app: FastifyInstance, options: AgentPluginOptions): Promise<void> {
+  await app.register(multipart, { limits: uploadLimits });
   const streams = new Set<() => void>();
   const posters = new Map<string, Buffer>();
   const pendingPosters = new Map<string, Promise<Buffer>>();
@@ -55,34 +69,36 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
   };
 
   const guardMutation = (request: FastifyRequest): void => {
-    if (request.headers["content-type"]?.split(";")[0]?.trim() !== "application/json") throw new AgentError("INVALID_INPUT", "请使用 application/json 请求正文。");
-    const origin = request.headers.origin;
-    if (!origin || origin !== options.uiOrigin) {
-      throw new AgentError("FORBIDDEN", "请求来源不受信任，请从工作台页面操作。");
-    }
-    if (request.headers["x-video-factory-request"] !== "studio") {
-      throw new AgentError("FORBIDDEN", "请求缺少安全校验，请刷新页面后重试。");
-    }
+    const type = request.routeOptions.config.frameUpload ? "multipart/form-data" : "application/json";
+    if (request.headers["content-type"]?.split(";")[0]?.trim() !== type) throw new AgentError("INVALID_INPUT", `请使用 ${type} 请求正文。`);
+    const rejection = mutationOriginError(request, options.uiOrigin);
+    if (rejection) throw rejection;
   };
 
   app.addHook("onRequest", async (request, reply) => {
+    reply.header("x-content-type-options", "nosniff");
+    if (request.url.split("?", 1)[0]!.startsWith("/api/agent/v1/blobs/")) {
+      reply.header("content-security-policy", "default-src 'none'; sandbox");
+      reply.header("vary", "Cookie").header("cache-control", "private, no-store");
+    }
+    if(request.routeOptions.url?.startsWith("/api/agent/v1/settings/") && options.isAdmin && !options.isAdmin(requireOwner(request))) throw new AgentError("FORBIDDEN","只有管理员可以管理团队设置。");
     if (request.method === "GET" || request.method === "HEAD") {
       requireOwner(request);
       return;
     }
     guardMutation(request);
     requireOwner(request);
-    void reply;
   });
 
   app.setErrorHandler((error, request, reply) => {
+    if (request.routeOptions.config.frameUpload && (request.raw.aborted || reply.raw.destroyed)) return reply.hijack();
     const requestId = newAgentId("req");
     if (error instanceof AgentError) {
       return reply.code(error.statusCode).send({ ...error.toPayload(), requestId });
     }
     const status = error instanceof Error && "statusCode" in error ? error.statusCode : undefined;
     if (status === 400 || status === 413 || status === 415) {
-      return reply.code(400).send({ ...new AgentError("INVALID_INPUT", "请求正文不是有效的 JSON 或超过允许大小。").toPayload(), requestId });
+      return reply.code(400).send({ ...new AgentError("INVALID_INPUT", request.routeOptions.config.frameUpload ? "上传字段或文件超出允许范围。" : "请求正文不是有效的 JSON 或超过允许大小。").toPayload(), requestId });
     }
     request.log.error(error, "agent route failure");
     return reply.code(503).send({
@@ -96,7 +112,34 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
 
   const service = options.service;
 
-  app.get("/bootstrap", async request => service.bootstrap(requireOwner(request)));
+  app.get("/bootstrap", async request => {
+    const owner=requireOwner(request),info=service.bootstrap(owner);
+    const admin=options.isAdmin ? options.isAdmin(owner) : true;
+    return {...info,accountRole:admin?"admin":"creator",models:admin?info.models:info.models.filter(model=>model.availability==="configured")};
+  });
+  const stillAdmin = (request: FastifyRequest, ownerId: string) =>
+    () => requireOwner(request) === ownerId && (!options.isAdmin || options.isAdmin(ownerId));
+  app.get("/settings/accounts", async (_request, reply) =>
+    reply.header("cache-control", "private, no-store").send(service.accounts.list()));
+  app.post("/settings/accounts", async (request, reply) => {
+    const owner = requireOwner(request);
+    return reply.code(201).send(await service.accounts.create(owner, body(request), stillAdmin(request, owner)));
+  });
+  app.patch<{ Params: { username: string } }>("/settings/accounts/:username", async (request, reply) => {
+    const owner = requireOwner(request);
+    return reply.header("cache-control", "private, no-store")
+      .send(await service.accounts.update(owner, request.params.username, body(request), stillAdmin(request, owner)));
+  });
+  app.get("/settings/budgets",async()=>service.accounts.budgets());
+  app.post("/settings/budgets",async(request)=>service.accounts.saveBudget(requireOwner(request),body(request)));
+  app.get<{ Querystring: { conversationId?: string } }>("/profile/budget", async (request, reply) => {
+    const owner = requireOwner(request), { conversationId } = request.query;
+    if (conversationId !== undefined) {
+      if (typeof conversationId !== "string") throw new AgentError("INVALID_INPUT", "请提供一个会话 ID。");
+      requireConversation(service.database(), owner, conversationId);
+    }
+    return reply.header("cache-control", "private, no-store").send(service.accounts.budgetSummary(owner, conversationId ?? null));
+  });
 
   app.get("/settings/model-connections", async (_request, reply) => {
     reply.header("cache-control", "no-store");
@@ -109,6 +152,11 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
   app.get<{ Params: { connectionId: string } }>("/settings/model-connections/:connectionId/models", async (request, reply) => {
     reply.header("cache-control", "no-store");
     return service.listAvailableProviderModels(request.params.connectionId);
+  });
+
+  app.get<{ Params: { connectionId: string } }>("/settings/model-connections/:connectionId/probe", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return service.probeProviderConnection(request.params.connectionId);
   });
 
   app.get("/settings/skills", async (_request, reply) => {
@@ -129,6 +177,12 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return service.readImportedSettings(requireOwner(request));
   });
 
+  // 目录快照必须注册在参数路由之前，挂载只发一次请求；单服务读取保留给重试与保存后回读。
+  app.get("/settings/services", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return service.readFreeServiceSettingsDirectory(requireOwner(request));
+  });
+
   app.get("/settings/services/:serviceId", async (request, reply) => {
     reply.header("cache-control", "no-store");
     const params = request.params as { serviceId: string };
@@ -139,6 +193,15 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     reply.header("cache-control", "no-store");
     const params = request.params as { serviceId: string };
     return service.saveFreeServiceSettings(requireOwner(request), params.serviceId, body(request));
+  });
+
+  app.get("/storage", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return service.storageUsage(requireOwner(request));
+  });
+  app.post("/storage/cleanup", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return service.cleanupStorage(requireOwner(request), body(request));
   });
 
   app.get("/profile", async (request, reply) => {
@@ -170,6 +233,9 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     const params = request.params as { conversationId: string };
     return reply.send(service.renameConversation(requireOwner(request), params.conversationId, body(request)));
   });
+
+  app.get<{ Params: { conversationId: string } }>("/conversations/:conversationId", async request =>
+    service.readConversation(requireOwner(request), request.params.conversationId));
 
   app.get("/conversations/:conversationId/snapshot", async request => {
     const params = request.params as { conversationId: string };
@@ -205,6 +271,16 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     const params = request.params as { conversationId: string };
     const query = pageQuery(request);
     return service.listWorks(requireOwner(request), params.conversationId, query.cursor, query.limit);
+  });
+
+  app.post<{ Params: { conversationId: string } }>("/conversations/:conversationId/uploads", { config: { frameUpload: true } }, async (request, reply) => {
+    const controller = new AbortController();
+    const close = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    reply.raw.once("close", close);
+    try {
+      const receipt = await service.uploadMedia(requireOwner(request), request.params.conversationId, request.parts(), controller.signal);
+      return reply.code(201).send(receipt);
+    } finally { reply.raw.off("close", close); }
   });
 
   app.post("/requests/:requestId/stop", async (request, reply) => {
@@ -250,6 +326,27 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return reply.code(202).send(service.acceptProposal(requireOwner(request), params.proposalId, body(request)));
   });
 
+  app.post<{Params:{workId:string}}>("/works/:workId/subtitle-tracks",async(request,reply)=>
+    reply.code(201).send(await service.createSubtitles(requireOwner(request),request.params.workId,body(request))));
+  app.post<{Params:{artifactId:string}}>("/artifacts/:artifactId/subtitle-revisions",async(request,reply)=>
+    reply.code(201).send(service.saveSubtitleRevision(requireOwner(request),request.params.artifactId,body(request))));
+  app.get<{Params:{artifactId:string;revisionId:string};Querystring:{format:string}}>("/artifacts/:artifactId/revisions/:revisionId/subtitles",async(request,reply)=>{
+    const format=request.query.format,source=service.downloadSubtitles(requireOwner(request),request.params.artifactId,request.params.revisionId,format);
+    return reply.type(format==="vtt"?"text/vtt; charset=utf-8":"application/x-subrip; charset=utf-8")
+      .header("cache-control", "private, no-store").header("Content-Disposition","attachment; filename=frame-subtitles."+format).send(source);
+  });
+  app.get<{Params:{runId:string};Querystring:{revisionId:string}}>("/runs/:runId/remix-timeline",async(request)=>service.remixTimeline(requireOwner(request),request.params.runId,request.query.revisionId));
+  app.post<{Params:{runId:string}}>("/runs/:runId/remix-proposals",async(request,reply)=>reply.code(201).send(await service.remix(requireOwner(request),request.params.runId,body(request))));
+  app.get<{Params:{artifactId:string;revisionId:string};Querystring:{runId?:string}}>("/artifacts/:artifactId/revisions/:revisionId/archive.zip",async(req,reply)=>{
+    const {artifactId,revisionId}=req.params;const stream=service.frozenArchive(requireOwner(req),artifactId,revisionId,req.query.runId);
+    reply.raw.once("close",()=>{if(!stream.destroyed)stream.destroy();});
+    return reply.type("application/zip").header("Cache-Control","private, no-store").header("Content-Disposition","attachment; filename=frame-project.zip").send(stream);
+  });
+  app.get<{Params:{runId:string};Querystring:{format:string;revisionId?:string}}>("/runs/:runId/export",async(req,reply)=>{
+    const stream=await service.editingArchive(requireOwner(req),req.params.runId,req.query.format,req.query.revisionId);
+    reply.raw.once("close",()=>{if(!stream.destroyed)stream.destroy();});
+    return reply.type("application/zip").header("Cache-Control","private, no-store").header("Content-Disposition","attachment; filename=frame-"+req.query.format+".zip").send(stream);
+  });
   app.get("/runs/:runId", async (request, reply) => {
     const params = request.params as { runId: string };
     return reply.send(service.getRun(requireOwner(request), params.runId));
@@ -294,9 +391,21 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
   app.get("/blobs/:blobId/content", async (request, reply) => {
     const params = request.params as { blobId: string };
     const blob = service.readBlob(requireOwner(request), params.blobId);
-    reply.header("accept-ranges", "bytes").header("cache-control", "private, no-store").type(blob.mime_type);
-    reply.header("content-disposition", `inline; filename="${blob.id}.${blob.mime_type === "audio/mpeg" ? "mp3" : blob.mime_type.split("/")[1]}"`);
-    const range = request.headers.range;
+    const download = (request.query as { download?: string }).download;
+    if (download !== undefined && download !== "1") throw new AgentError("INVALID_INPUT", "下载参数只接受 1。");
+    const mime = blob.mime_type.split(";", 1)[0]!.trim().toLowerCase();
+    const extension = inlineMedia.get(mime);
+    const script = /(?:java|ecma)script$/.test(mime) || mime === "text/html" || mime === "image/svg+xml";
+    reply.type(script ? "text/plain; charset=utf-8" : mime);
+    // 源文件的原名由工程清单提供。省略生成的附件名，让浏览器使用该清单的下载文件名。
+    reply.header("content-disposition", extension && download === undefined
+      ? `inline; filename="${blob.id}.${extension}"` : "attachment");
+    const etag = `"${blob.digest}"`;
+    reply.header("accept-ranges", "bytes").header("etag", etag);
+    if (extension) reply.header("cache-control", "private, max-age=86400, immutable");
+    const matches = request.headers["if-none-match"]?.split(",").some(value => value.trim() === "*" || value.trim().replace(/^W\//, "") === etag);
+    if (matches) return reply.code(304).send();
+    const range = !request.headers["if-range"] || request.headers["if-range"] === etag ? request.headers.range : undefined;
     if (range) {
       const match = /^bytes=(\d*)-(\d*)$/.exec(range);
       const start = match?.[1] ? Number(match[1]) : Math.max(0, blob.size_bytes - Number(match?.[2]));
@@ -321,6 +430,15 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     const params = request.params as { workId: string; groupId: string; itemId: string };
     const query = request.query as { cursor?: string };
     return service.listReviewApprovalHistory(requireOwner(request), params.workId, params.groupId, params.itemId, query.cursor);
+  });
+
+  app.get("/material-batches/:batchId/candidates/:candidateId/preview", async (request, reply) => {
+    const { batchId, candidateId } = request.params as { batchId: string; candidateId: string };
+    const controller = new AbortController();
+    reply.raw.once("close", () => controller.abort());
+    const video = await service.previewMaterialVideo(requireOwner(request), batchId, candidateId, controller.signal);
+    return reply.header("cache-control", "private, no-store").header("x-content-type-options", "nosniff")
+      .header("content-security-policy", "default-src 'none'; sandbox").type(video.mimeType).send(video.stream);
   });
 
   app.get("/material-batches/:batchId", async request => {
@@ -389,6 +507,7 @@ async function streamEvents(
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
     "x-accel-buffering": "no",
+    "x-content-type-options": "nosniff",
   });
   raw.write("retry: 3000\n\n");
 

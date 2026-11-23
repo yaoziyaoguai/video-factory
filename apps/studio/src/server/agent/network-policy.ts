@@ -116,14 +116,14 @@ export type HostResolver = (host: string) => Promise<{ address: string }[]>;
 const defaultResolveHost: HostResolver = host => lookup(host, { all: true, verbatim: true });
 
 /** 请求前解析目标主机并核对全部记录；任一记录落在私网即拒绝，覆盖多值 DNS 与 rebinding 到内网的常见形态。 */
-export async function assertPublicResolvedHost(host: string, resolveHost: HostResolver = defaultResolveHost): Promise<void> {
-  if (privateNetworkAllowed()) return;
+export async function assertPublicResolvedHost(host: string, resolveHost: HostResolver = defaultResolveHost, allowPrivate = privateNetworkAllowed()): Promise<void> {
+  if (allowPrivate) return;
   const bare = host.replace(/^\[|\]$/g, "");
-  if (isPrivateIpAddress(bare)) throw new AgentError("FORBIDDEN", "NewsNow 请求目标解析到内网地址，已拒绝。");
+  if (isPrivateIpAddress(bare)) throw new AgentError("FORBIDDEN", "请求目标属于内网地址，已拒绝。");
   const records = await resolveHost(bare);
   for (const record of records) {
     if (isPrivateIpAddress(record.address)) {
-      throw new AgentError("FORBIDDEN", `NewsNow 地址解析到内网 IP（${record.address}），已拒绝请求。`);
+      throw new AgentError("FORBIDDEN", `目标地址解析到内网 IP（${record.address}），已拒绝请求。`);
     }
   }
 }

@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { link, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { it } from "node:test";
 
+import { probeAudioFile, probeImageFile } from "../src/server/agent/media-probe.js";
+import { sweepAttemptFiles } from "../src/server/agent/media-port-support.js";
 import { ImageGenerationPort } from "../src/server/agent/image-generation.js";
 import { OpenAISpeechPort } from "../src/server/agent/openai-speech.js";
 import { ArkMediaPort, RealMediaGateway } from "../src/server/agent/ark-media.js";
@@ -77,7 +79,7 @@ async function startImageStub(mode: ImageStubMode, goodPng: Buffer, smallPng: Bu
       if (mode === "multi") { response.end(JSON.stringify({ data: [imageOf(goodPng), imageOf(goodPng)] })); return; }
       if (mode === "badB64") { response.end(JSON.stringify({ data: [{ b64_json: "###not-base64###" }] })); return; }
       const bytes = mode === "okSmall" ? smallPng : mode === "okJpeg" ? jpeg : goodPng;
-      response.end(JSON.stringify({ data: [imageOf(bytes)] }));
+      response.end(JSON.stringify({ data: [imageOf(bytes)],usage:{input_tokens:14,output_tokens:312} }));
     });
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -212,6 +214,7 @@ it("image: 请求体冻结为单图 low PNG，成功解码验收并登记 blob",
   assert.equal(observation.state, "succeeded");
   assert.equal(observation.billing, null);
   assert.equal(observation.blob?.mimeType, "image/png");
+  assert.deepEqual(observation.usage,{inputTokens:14,outputTokens:312,width:1536,height:864});
   assert.equal(stub.posts.length, 1);
   const post = stub.posts[0]!;
   assert.equal(post.url, "/v1/images/generations");
@@ -221,7 +224,9 @@ it("image: 请求体冻结为单图 low PNG，成功解码验收并登记 blob",
   const receipt = attemptOutput(db, "attempt");
   assert.equal(receipt?.blob_id, observation.blob?.id);
   assert.equal(receipt?.digest, observation.blob?.digest);
-  assert.ok(existsSync(path.join(directory, "work", "attempt", "image.png")));
+  assert.ok(observation.blob);
+  assert.equal((await probeImageFile(path.join(directory, "blobs", observation.blob.digest))).width, 1536);
+  assert.equal(existsSync(path.join(directory, "work", "attempt")), false);
   assert.ok(!existsSync(path.join(directory, "work", "attempt", "image.part")));
 });
 
@@ -357,8 +362,15 @@ it("image: query 复用成功收据；收据缺失但有完成文件时重验补
 
   // 落盘与登记之间中断：删除收据，完成文件仍在 → 按冻结参数重验后补收据（同字节同 blob）。
   seeded.db.prepare("DELETE FROM production_attempt_outputs WHERE attempt_id='attempt'").run();
+  assert.ok(submitted.blob);
+  const interrupted = path.join(seeded.directory, "work", "attempt");
+  await mkdir(interrupted);
+  await link(seeded.blobs.filePath(submitted.blob.digest), path.join(interrupted, "image.png"));
+  await sweepAttemptFiles(seeded.db, path.dirname(interrupted));
+  assert.ok(existsSync(path.join(interrupted, "image.png")), "启动清扫须保留收据之前的完整成品");
   const recovered = await seeded.port.query(seeded.query);
   assert.equal(recovered.state, "succeeded");
+  assert.equal(existsSync(interrupted), false);
   assert.equal(recovered.blob?.id, submitted.blob?.id);
   assert.equal(attemptOutput(seeded.db, "attempt")?.blob_id, submitted.blob?.id);
   assert.equal(blobCount(seeded.db), afterSubmit);
@@ -399,11 +411,14 @@ it("speech: wire 冻结（wss/Authorization/marin/pcm24k/4096/low），成功转
   assert.equal(observation.blob?.mimeType, "audio/mpeg");
   assert.equal(observation.billing, null);
   assert.match(observation.message ?? "", /音频 1\.0 秒/);
+  assert.equal(observation.usage?.inputTokens,55);assert.equal(observation.usage?.outputTokens,176);assert.ok(observation.usage!.mediaDurationMs!>=1000);
   assert.match(observation.message ?? "", /输入 55 \/ 输出 176 token/);
   const receipt = attemptOutput(db, "attempt");
   assert.equal(receipt?.blob_id, observation.blob?.id);
   assert.match(receipt?.detail ?? "", /实际用量：输入 55 \/ 输出 176/);
-  assert.ok(existsSync(path.join(directory, "work", "attempt", "speech.mp3")));
+  assert.ok(observation.blob);
+  assert.equal((await probeAudioFile(path.join(directory, "blobs", observation.blob.digest))).sampleRate, 24000);
+  assert.equal(existsSync(path.join(directory, "work", "attempt")), false);
   assert.ok(!existsSync(path.join(directory, "work", "attempt", "narration.pcm")));
 
   const session = hub.sessions[0]!;
@@ -540,8 +555,15 @@ it("speech: query 复用收据与用量明细；收据缺失但有成品文件�
   assert.equal(blobCount(seeded.db), afterSubmit);
 
   seeded.db.prepare("DELETE FROM production_attempt_outputs WHERE attempt_id='attempt'").run();
+  assert.ok(submitted.blob);
+  const interrupted = path.join(seeded.directory, "work", "attempt");
+  await mkdir(interrupted);
+  await link(seeded.blobs.filePath(submitted.blob.digest), path.join(interrupted, "speech.mp3"));
+  await sweepAttemptFiles(seeded.db, path.dirname(interrupted));
+  assert.ok(existsSync(path.join(interrupted, "speech.mp3")), "启动清扫须保留收据之前的完整成品");
   const recovered = await seeded.port.query(seeded.query);
   assert.equal(recovered.state, "succeeded");
+  assert.equal(existsSync(interrupted), false);
   assert.equal(recovered.blob?.id, submitted.blob?.id);
   assert.equal(attemptOutput(seeded.db, "attempt")?.blob_id, submitted.blob?.id);
   assert.equal(blobCount(seeded.db), afterSubmit);

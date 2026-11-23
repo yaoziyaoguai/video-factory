@@ -1,26 +1,41 @@
 import { fauxAssistantMessage, fauxToolCall, type AssistantMessage, type FauxContentBlock, type FauxResponseFactory, type JsonObject, type Message, type ToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ArtifactRevision } from "../../shared/agent/generated/contracts.js";
+import type { DemoMediaSeeds, DemoSeedRef } from "./offline-demo-media.js";
 
 // 离线默认体验的 Faux 场景表：响应永远带【离线测试回放】标识，不冒充真实模型理解。
-// 可触发的测试输入只有下面三条精确句子（记录在 contracts/agent/v1/IMPORT.md）；
+// 可触发的测试输入只有下面四条精确句子（与 BOUNDARY_HINT、FrameWelcome 离线示例一致）；
 // 任何其他输入都返回测试边界说明，这是 ACCEPTANCE 对“输入不在替身能力范围时显示测试边界”的要求。
 // 不做关键词模糊匹配，不把它当作真实 Agent 的语义能力。
 
 export const SCENARIO_DELIVER_BATCH = "给我三个不同方向的脚本，先不要制作";
 export const SCENARIO_REVISE = "保留意思，语气安静一点";
 export const SCENARIO_PROPOSAL = "按这份准备制作提案，先不要开始";
+export const SCENARIO_WORK_DEMO = "演示多作品总览与审片工作台";
+
+// 演示口令一次建立的三件作品：前两件带可播放样片成片，第三件只建内容稿。
+const DEMO_WORK_TITLES = ["山径晨光", "城市夜色", "咖啡手记"] as const;
 
 const LABEL = "【离线测试回放】";
 const BOUNDARY_HINT = `离线替身只回放固定场景，可触发输入：
 1）新话题发送「${SCENARIO_DELIVER_BATCH}」（未绑定修改目标时交付三个独立脚本）；
-2）在预览里点“提意见”绑定目标后发送「${SCENARIO_REVISE}」（生成该产物的 v2）；
-3）绑定一份脚本 后发送「${SCENARIO_PROPOSAL}」（只准备模拟制作提案，等待明确确认）。
+2）在预览里点“提意见”绑定目标后发送「${SCENARIO_REVISE}」（生成该产物的 v2；演示成片换静音样片，其余为安静版文稿）；
+3）绑定一份脚本 后发送「${SCENARIO_PROPOSAL}」（只准备模拟制作提案，等待明确确认）；
+4）发送「${SCENARIO_WORK_DEMO}」（用真实业务工具一次建立三件对齐作品：脚本与可播放样片成片，均在总览查看）。
 其他输入不在替身能力范围内，只返回本说明。此入口不验证真实模型的自由问答效果。`;
 
 interface FrameContext {
   target: { artifactId: string; revisionId: string } | null;
   artifacts: { artifactId: string; title: string; kind: string; headRevisionId: string | null }[];
+  // 新字段由宿主帧提供；旧测试帧未携带，按缺省处理（works 视为空）。
+  conversationId?: string;
+  works?: { id: string; title: string; reviewGroups: unknown[] }[];
   deliveryClosed: boolean;
+}
+
+/** 离线演示口令的样片存取：plant 落库并缓存，seedsOf 只读；未装配媒体替身时整个对象为 null。 */
+export interface DemoMediaAccess {
+  seedsOf(conversationId: string | undefined): DemoMediaSeeds | null;
+  plant(conversationId: string): DemoMediaSeeds | null;
 }
 
 /** 仅消费投影末尾的系统业务帧；不扫描或清洗任何历史用户文字。 */
@@ -65,7 +80,7 @@ function toolFailureMessage(pending: { call: ToolCall; result: ToolResultMessage
 }
 
 /** 持久场景工厂：每次被消费前把自己补回队列，队列永不枯竭；并发会话各自消费互不占用。 */
-export function offlineScenarioFactory(options: { selfAppend: () => void }): FauxResponseFactory {
+export function offlineScenarioFactory(options: { selfAppend: () => void; demoMedia?: DemoMediaAccess | null }): FauxResponseFactory {
   return (context): AssistantMessage => {
     options.selfAppend();
     const { frame, userText, messages } = offlineTurn(context.messages);
@@ -94,14 +109,108 @@ export function offlineScenarioFactory(options: { selfAppend: () => void }): Fau
       }
       return fauxAssistantMessage([fauxToolCall("read_artifact", { artifactId: frame.target.artifactId, revisionId: frame.target.revisionId })]);
     }
-    return scenarioReply({ frame, userText, pending });
+    if (userText === SCENARIO_WORK_DEMO) {
+      return demoWorkReply({ frame, userText, pending }, options.demoMedia ?? null);
+    }
+    return scenarioReply({ frame, userText, pending, demo: options.demoMedia ?? null });
   };
+}
+
+// 演示口令状态机只看帧里的当前作品数：0/1/2→start_work，3→种样片运行+一次性交付。
+// 样片在第 3 件作品建好、交付前才落库（底层运行输出，不插顶层产物），演示旅程中段不再出现种子。
+// 延续回合按真实 toolResult 成败推进；重复口令（作品已齐且无挂起调用）不再重建。
+function demoWorkReply(state: {
+  frame: FrameContext | null;
+  userText: string;
+  pending: { call: ToolCall; result: ToolResultMessage } | null;
+}, demo: DemoMediaAccess | null): AssistantMessage {
+  const frame = state.frame;
+  if (!frame) {
+    return fauxAssistantMessage(`${LABEL}演示场景需要宿主业务帧，本次调用没有提供，未建立任何作品。${BOUNDARY_HINT}`);
+  }
+  if (state.pending) {
+    if (state.pending.result.isError) return toolFailureMessage(state.pending);
+    if (state.pending.call.name === "deliver_artifacts") {
+      return fauxAssistantMessage(`${LABEL}三件演示作品已建立：脚本挂在各作品的内容事项上，两条可播放成片来自本机演示样片，全部是未认可草稿。切到总览即可逐件查看；想看修订链，在预览里点“提意见”绑定某条成片后发送「${SCENARIO_REVISE}」。`);
+    }
+    // start_work 成功：帧中 works 已增长，按数量继续推进。
+  }
+  const works = frame.works ?? [];
+  if (works.length >= DEMO_WORK_TITLES.length) {
+    if (!state.pending) {
+      return fauxAssistantMessage(`${LABEL}演示作品已建立过，不再重复创建。总览里应能看到「${DEMO_WORK_TITLES.join("」「")}」；如需重新演示，请新建会话。${BOUNDARY_HINT}`);
+    }
+    if (!frame.conversationId) {
+      return fauxAssistantMessage(`${LABEL}演示场景需要帧携带会话标识，未交付内容。${BOUNDARY_HINT}`);
+    }
+    return demoDeliverReply(frame, demo);
+  }
+  if (works.length === 0 && !demo) {
+    return fauxAssistantMessage(`${LABEL}本次装配没有启用媒体替身，演示口令需要可播放样片才能建立对齐作品，未创建任何内容。${BOUNDARY_HINT}`);
+  }
+  const index = works.length;
+  const title = DEMO_WORK_TITLES[index]!;
+  return fauxAssistantMessage([
+    fauxToolCall("start_work", { title } satisfies JsonObject),
+    { type: "text", text: `${LABEL}建立第 ${index + 1} 件作品「${title}」，三件齐后一次性交付脚本与样片成片。` },
+  ]);
+}
+
+function demoDeliverReply(frame: FrameContext, demo: DemoMediaAccess | null): AssistantMessage {
+  // 交付前才种样片运行（幂等）：三件作品已建好，种子以底层运行输出落库，不产生顶层产物。
+  const seeds = demo?.plant(frame.conversationId!) ?? null;
+  if (!seeds) {
+    return fauxAssistantMessage(`${LABEL}当前装配没有启用媒体替身，演示样片未能登记，未交付成片。${BOUNDARY_HINT}`);
+  }
+  const workId = (title: string): string => {
+    const work = (frame.works ?? []).find(candidate => candidate.title === title);
+    if (!work) throw new Error(`演示交付前提不成立：找不到作品「${title}」。`);
+    return work.id;
+  };
+  // 成片按运行输出交付（run_output），字节来自演示运行的操作槽。
+  const runOutput = (seed: DemoSeedRef) => ({ kind: "run_output", runId: seed.runId, operationId: seed.operationId, outputSlot: seed.outputSlot });
+  return fauxAssistantMessage([
+    fauxToolCall("deliver_artifacts", {
+      items: [
+        { mode: "create", title: "山径晨光 · 脚本", kind: "script", content: { format: "markdown", text: "晨光穿过山径树影，脚步声与鸟鸣交替收进同期声……（离线演示脚本一）" } },
+        { mode: "create", title: "城市夜色 · 脚本", kind: "script", content: { format: "markdown", text: "入夜后的城市灯牌与车流延时，配克制的旁白……（离线演示脚本二）" } },
+        { mode: "create", title: "咖啡手记 · 脚本", kind: "script", content: { format: "markdown", text: "手冲咖啡的蒸汽特写与慢节奏旁白，落在一句收尾……（离线演示脚本三）" } },
+        { mode: "create", title: "山径晨光 · 成片 v1", kind: "video",
+          content: { format: "local_output", source: runOutput(seeds.trail) } },
+        { mode: "create", title: "咖啡手记 · 成片 v1", kind: "video",
+          content: { format: "local_output", source: runOutput(seeds.coffee) } },
+      ],
+      reviewGroups: [
+        { workId: workId("山径晨光"), group: { mode: "create", key: "demo-main", title: "内容与成片", nextIntent: "认可脚本或成片后再继续制作" }, items: [
+          { item: { mode: "create", key: "script", label: "脚本", role: "content", required: true }, itemIndex: 0, inputSources: [], reviewInputs: [], purpose: "draft" },
+          { item: { mode: "create", key: "cut", label: "成片", role: "video", required: true }, itemIndex: 3, inputSources: [], reviewInputs: [], purpose: "draft" },
+        ] },
+        { workId: workId("城市夜色"), group: { mode: "create", key: "demo-main", title: "内容", nextIntent: "认可脚本后再继续画面方案" }, items: [
+          { item: { mode: "create", key: "script", label: "脚本", role: "content", required: true }, itemIndex: 1, inputSources: [], reviewInputs: [], purpose: "draft" },
+        ] },
+        { workId: workId("咖啡手记"), group: { mode: "create", key: "demo-main", title: "内容与成片", nextIntent: "认可脚本或成片后再继续制作" }, items: [
+          { item: { mode: "create", key: "script", label: "脚本", role: "content", required: true }, itemIndex: 2, inputSources: [], reviewInputs: [], purpose: "draft" },
+          { item: { mode: "create", key: "cut", label: "成片", role: "video", required: true }, itemIndex: 4, inputSources: [], reviewInputs: [], purpose: "draft" },
+        ] },
+      ],
+    } satisfies JsonObject),
+    { type: "text", text: `${LABEL}一次性交付三件作品的脚本草稿与两条成片草稿，全部未认可；下一步由你在总览或预览里明确操作。` },
+  ]);
+}
+
+// 演示成片的 v2 用静音孪生样片：字节不同、时长一致，修订差异可证明；按标题认族。
+function twinSeedOf(title: string, seeds: DemoMediaSeeds | null): DemoSeedRef | null {
+  if (!seeds) return null;
+  if (title.includes("山径")) return seeds.trailSilent;
+  if (title.includes("咖啡")) return seeds.coffeeSilent;
+  return null;
 }
 
 export function scenarioReply(state: {
   frame: FrameContext | null;
   userText: string;
   pending: { call: ToolCall; result: ToolResultMessage } | null;
+  demo?: DemoMediaAccess | null;
 }): AssistantMessage {
   const blocks: FauxContentBlock[] = [];
   if (state.pending) {
@@ -140,6 +249,24 @@ export function scenarioReply(state: {
       return fauxAssistantMessage(`${LABEL}修订场景需要先绑定修改目标：在右侧预览打开某一版，点“提意见”，再发送「${SCENARIO_REVISE}」。${BOUNDARY_HINT}`);
     }
     const base = state.frame?.artifacts.find(artifact => artifact.artifactId === target.artifactId) ?? null;
+    if (base?.kind === "video") {
+      // 演示成片的 v2 换静音孪生样片：两版字节不同、时长一致，编辑差异可证明。
+      const twin = twinSeedOf(base.title, state.demo?.seedsOf(state.frame?.conversationId) ?? null);
+      if (!twin) {
+        return fauxAssistantMessage(`${LABEL}视频修订演示只覆盖演示成片（山径晨光 / 咖啡手记）；当前绑定目标没有对应样片，未生成修订。${BOUNDARY_HINT}`);
+      }
+      // 标题先去掉尾缀版本号再接「· 静音版」，杜绝「（有声）（静音版）」式叠拼。
+      const cleanTitle = base.title.replace(/\s*(?:·\s*)?v\d+$/, "");
+      blocks.push(fauxToolCall("deliver_artifacts", {
+        items: [{
+          mode: "revise", artifactId: target.artifactId, baseRevisionId: target.revisionId,
+          title: `${cleanTitle} · 静音版`, kind: "video",
+          content: { format: "local_output", source: { kind: "run_output", runId: twin.runId, operationId: twin.operationId, outputSlot: twin.outputSlot } },
+        }],
+      } satisfies JsonObject));
+      blocks.push({ type: "text", text: `${LABEL}按场景对绑定成片交付静音 v2，基线是你在输入框里绑定的那一版。` });
+      return fauxAssistantMessage(blocks);
+    }
     blocks.push(fauxToolCall("deliver_artifacts", {
       items: [{
         mode: "revise", artifactId: target.artifactId, baseRevisionId: target.revisionId,

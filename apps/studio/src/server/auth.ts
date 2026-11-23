@@ -16,11 +16,18 @@ const DEFAULT_SESSION_TTL_SECONDS = 12 * 60 * 60;
 const DEFAULT_LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_LOGIN_ATTEMPT_LIMIT = 5;
 
+interface SessionAccount {
+  id: string;
+  username: string;
+  sessionVersion: number;
+}
+
 export interface StudioAuthOptions {
   username: string;
   passwordHash: string;
   sessionSecret: string;
   secureCookie: boolean;
+  findAccount?: (username: string) => (SessionAccount & { passwordHash: string; disabledAt: string | null }) | undefined;
   sessionTtlSeconds?: number;
   loginWindowMs?: number;
   loginAttemptLimit?: number;
@@ -59,6 +66,7 @@ interface SessionPayload {
   username: string;
   expiresAt: number;
   nonce: string;
+  sessionVersion?: number;
 }
 
 interface LoginWindow {
@@ -85,7 +93,7 @@ export class StudioAuthenticator {
   }
 
   // 异步校验：scrypt 派生是数十毫秒级计算，同步变体会阻塞事件循环（登录风暴时放大）。
-  async authenticate(username: string, password: string, clientId: string): Promise<"accepted" | "rejected" | "limited"> {
+  async authenticate(username: string, password: string, clientId: string): Promise<SessionAccount | "rejected" | "limited"> {
     const now = this.now();
     const window = this.currentLoginWindow(clientId, now);
     if (window.attempts >= this.loginAttemptLimit) return "limited";
@@ -93,17 +101,25 @@ export class StudioAuthenticator {
     // 先计数、后异步校验：scrypt 让出事件循环期间，并发请求不得越过单窗口尝试上限。
     // 上限本就只统计失败尝试，登录成功时作废整个窗口。
     window.attempts += 1;
-    const validUsername = safeTextEqual(username, this.options.username);
-    const validPassword = await verifyPassword(password, this.options.passwordHash);
-    if (!validUsername || !validPassword) return "rejected";
+    const account = this.findAccount(username);
+    // 对不存在及停用的账号同样进行原有的密码派生，避免通过耗时枚举成员。
+    const validPassword = await verifyPassword(password, account?.passwordHash ?? this.options.passwordHash);
+    if (!account || account.disabledAt !== null || !validPassword) return "rejected";
     this.loginWindows.delete(clientId);
-    return "accepted";
+    return { id: account.id, username: account.username, sessionVersion: account.sessionVersion };
   }
 
-  createSessionCookie(): string {
+  private findAccount(username: string) {
+    if (this.options.findAccount) return this.options.findAccount(username);
+    if (!safeTextEqual(username, this.options.username)) return undefined;
+    return { id: username, username, sessionVersion: 0, disabledAt: null, passwordHash: this.options.passwordHash };
+  }
+
+  createSessionCookie(account: SessionAccount = { id: this.options.username, username: this.options.username, sessionVersion: 0 }): string {
     const payload: SessionPayload = {
       version: 1,
-      username: this.options.username,
+      username: account.username,
+      sessionVersion: account.sessionVersion,
       expiresAt: this.now() + this.sessionTtlSeconds * 1000,
       nonce: randomBytes(12).toString("base64url"),
     };
@@ -133,23 +149,28 @@ export class StudioAuthenticator {
     } catch { /* 无法解析的 Cookie 无需吊销。 */ }
   }
 
-  authenticatedUsername(cookieHeader: string | undefined): string | undefined {
+  authenticatedAccount(cookieHeader: string | undefined): SessionAccount | undefined {
     const token = readCookie(cookieHeader, COOKIE_NAME);
     if (!token) return undefined;
     const [encoded, signature, extra] = token.split(".");
     if (!encoded || !signature || extra) return undefined;
     const expected = this.sign(encoded);
     if (!safeTextEqual(signature, expected)) return undefined;
+    let payload: Partial<SessionPayload> | null;
     try {
-      const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Partial<SessionPayload>;
-      if (payload.version !== 1 || payload.username !== this.options.username || typeof payload.expiresAt !== "number") {
-        return undefined;
-      }
-      if (typeof payload.nonce === "string" && this.revokedSessions.has(payload.nonce)) return undefined;
-      return payload.expiresAt > this.now() ? payload.username : undefined;
-    } catch {
-      return undefined;
+      payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError) return undefined;
+      throw error;
     }
+    if (!payload || payload.version !== 1 || typeof payload.username !== "string" || typeof payload.expiresAt !== "number"
+      || typeof payload.nonce !== "string" || payload.expiresAt <= this.now() || this.revokedSessions.has(payload.nonce)) return undefined;
+    const account = this.findAccount(payload.username);
+    if (!account || account.disabledAt !== null) return undefined;
+    // 升级前的 Cookie 没有版本字段，账号第一次变更前仍可继续使用。
+    const version = payload.sessionVersion === undefined ? 0 : payload.sessionVersion;
+    if (version !== account.sessionVersion) return undefined;
+    return { id: account.id, username: account.username, sessionVersion: account.sessionVersion };
   }
 
   // 读取已验签会话的过期时间戳（毫秒）。仅解码负载、不做 HMAC——调用方必须先用
@@ -198,10 +219,13 @@ export class StudioAuthenticator {
 export function createPasswordHash(password: string, salt = randomBytes(16)): string {
   if (!password) throw new Error("Password is required.");
   const derived = scryptSync(password, salt, 32);
-  return `${HASH_PREFIX}:${salt.toString("base64url")}:${derived.toString("base64url")}`;
+  return encodedPassword(salt,derived);
 }
 
-async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
+const encodedPassword=(salt:Buffer,derived:Buffer)=>`${HASH_PREFIX}:${salt.toString("base64url")}:${derived.toString("base64url")}`;
+export async function derivePasswordHash(password:string){const salt=randomBytes(16);return encodedPassword(salt,await scryptAsync(password,salt,32));}
+
+export async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
   const { salt, expected } = parsePasswordHash(encodedHash);
   const actual = await scryptAsync(password, salt, expected.length);
   return timingSafeEqual(actual, expected);

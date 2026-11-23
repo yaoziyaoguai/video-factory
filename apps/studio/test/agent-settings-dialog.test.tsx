@@ -34,10 +34,11 @@ const directory = (): AvailableProviderModels => ({ models: [
   { id: "faux-video-2", name: "视频乙", kinds: ["video"], status: "listed", contextWindowTokens: null, maxOutputTokens: null },
 ], hasMore: false, syncedAt: "2026-10-31T06:00:00Z" });
 
-function routes(options: { directory?: () => Response; failRead?: boolean; settings?: ProviderConnectionSettings; post?: (body: SaveProviderConnection) => Response | Promise<Response> } = {}) {
+function routes(options: { directory?: () => Response; probe?: () => Response; failRead?: boolean; settings?: ProviderConnectionSettings; post?: (body: SaveProviderConnection) => Response | Promise<Response> } = {}) {
   let value = options.settings ?? fixture(); const posts: SaveProviderConnection[] = []; let reads = 0; let syncs = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/probe") && options.probe) return options.probe();
     if (url.endsWith("/models")) { syncs++; return options.directory?.() ?? Response.json(directory()); }
     if (url.endsWith("/settings/model-connections")) {
       if (init?.method === "POST") {
@@ -387,4 +388,61 @@ it("R4 模型页页签支持方向键/Home/End 与 roving tabindex，tabpanel �
   await userEvent.keyboard("{ArrowLeft}"); // 第一项向左回绕到最后一项
   expect(screen.getByRole("tab", { name: /配音模型/ })).toHaveAttribute("aria-selected", "true");
   expect(document.activeElement).toBe(screen.getByRole("tab", { name: /配音模型/ }));
+});
+
+it("个人设置显示真实分类用量，响应中断后以同一清理命令取回结果", async () => {
+  const commands: unknown[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url=String(input);
+    if (url.endsWith("/profile")) return Response.json({displayName:"创作者",bio:"",revision:1});
+    if (url.endsWith("/storage")) return Response.json({revision:3,finalBytes:8192,draftBytes:4096,reclaimableBytes:2048});
+    if (url.endsWith("/storage/cleanup")) {
+      commands.push(JSON.parse(init!.body as string));
+      if (commands.length===1) throw new TypeError("connection closed");
+      return Response.json({usage:{revision:4,finalBytes:8192,draftBytes:2048,reclaimableBytes:0},freedBytes:2048,freedFiles:2});
+    }
+    throw new Error("Unexpected route "+url);
+  }));
+  render(<FrameSettings page="profile" bootstrap={null} conversations={[]} onConversation={()=>{}} onPage={()=>{}} onCatalogRefresh={async()=>{}} />);
+  const panel=within(await screen.findByRole("region",{name:"媒体存储"}));
+  expect(await panel.findByText("8 KiB")).toBeInTheDocument();
+  await userEvent.click(panel.getByRole("button",{name:"清理过期草稿"}));
+  await userEvent.click(await panel.findByRole("button",{name:"重试本次清理"}));
+  expect(commands).toHaveLength(2);expect(commands[0]).toEqual(commands[1]);
+  expect(await panel.findByText("已清理 2 个文件，释放 2 KiB。")).toBeInTheDocument();
+  expect(panel.getByRole("button",{name:"清理过期草稿"})).toBeDisabled();
+});
+
+it("ISS-16 探活只从已保存连接发出，输入修改后需先保存", async () => {
+  const probe = vi.fn(() => Response.json({checkedAt:"2026-11-22T02:00:00Z"}));
+  const api = routes({probe}); page();
+  await userEvent.click(await screen.findByRole("button", {name:"连接配置"}));
+  const dialog = screen.getByRole("dialog", {name:"连接配置"});
+  expect(probe).toHaveBeenCalledTimes(0);
+  await userEvent.click(within(dialog).getByRole("button",{name:"测试连接"}));
+  expect(await within(dialog).findByText(/账户型号接口已响应/)).toBeVisible();
+  expect(probe).toHaveBeenCalledTimes(1);
+  expect(api.posts).toHaveLength(0);
+  await userEvent.type(within(dialog).getByLabelText("连接名称"), "2");
+  expect(within(dialog).getByRole("button",{name:"测试连接"})).toBeDisabled();
+  expect(within(dialog).queryByText(/账户型号接口已响应/)).toBeNull();
+});
+
+it("ISS-16 兼容连接可手动登记供应商部署 ID 与真实容量", async () => {
+  const settings = fixture();
+  const gateway = { ...settings.connections[0]!, protocol: "openai-chat-completions" as const,
+    id:"provider-gateway",name:"方舟兼容端点",baseUrl:"https://gateway.example.test/v1",models:[] };
+  const api = routes({settings:{ ...settings, connections:[gateway], modelStatuses:[] }});
+  page();
+  expect(await screen.findByRole("combobox",{name:"文本连接"})).toHaveValue(gateway.id);
+  await userEvent.click(screen.getByRole("button",{name:"管理备选"}));
+  await userEvent.click(screen.getByRole("button",{name:"手动添加文本型号"}));
+  const dialog = screen.getByRole("dialog",{name:"配置型号"});
+  await userEvent.type(within(dialog).getByLabelText("型号名称"),"分镜助手");
+  await userEvent.type(within(dialog).getByLabelText("型号 ID"),"ep-director");
+  await userEvent.type(within(dialog).getByLabelText("上下文窗口（tokens）"),"32000");
+  await userEvent.type(within(dialog).getByLabelText("最大输出（tokens）"),"4096");
+  await userEvent.click(within(dialog).getByRole("button",{name:"保存"}));
+  await waitFor(()=>expect(api.posts).toHaveLength(1));
+  expect(api.posts[0]!.connection.models).toMatchObject([{modelId:"ep-director",contextWindowTokens:32000,maxOutputTokens:4096,isDefault:false}]);
 });

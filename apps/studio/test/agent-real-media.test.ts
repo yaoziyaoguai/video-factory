@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -325,9 +325,14 @@ it("C1-03：创建请求映射、单次创建、成功下载合规成品、终�
       assert.equal(post.body.resolution, "720p"); assert.equal(post.body.generate_audio, false); assert.equal(post.body.watermark, false);
       const attempt = attemptsFor(runtime.database, runId).at(-1)!;
       assert.equal(attempt.provider_task_id, "task-001");
+      const usage=JSON.parse(runtime.database.prepare("SELECT usage_json FROM production_attempts WHERE id=?").pluck().get(attempt.id) as string);
+      assert.deepEqual([usage.outputTokens,usage.width,usage.height,usage.resolution],[108000,1280,720,"720p"]);assert.ok(Math.abs(usage.mediaDurationMs-5000)<=100);
       const receipt = runtime.database.prepare("SELECT * FROM production_attempt_outputs WHERE attempt_id=?").get(attempt.id) as { provider_task_id: string; blob_id: string; digest: string };
       assert.equal(receipt.provider_task_id, "task-001"); assert.ok(receipt.blob_id);
-      const facts = await probeVideoFile(path.join(directory, "media-work", attempt.id, "download.mp4"));
+      assert.equal(existsSync(path.join(directory, "media-work", attempt.id)), false);
+      const stored = runtime.service.readBlob("local-owner", receipt.blob_id);
+      assert.equal(stored.digest, receipt.digest);
+      const facts = await probeVideoFile(stored.path);
       assert.equal(facts.width, 1280); assert.equal(facts.height, 720);
       assert.equal(facts.hasAudio, false); assert.ok(Math.abs(facts.durationMs - 5000) <= 100);
       // C1-05：终态账务未核（含人工标记冲突）也不再触发供应商 GET。

@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { it, type TestContext } from "node:test";
 import Fastify from "fastify";
-import { MaintenanceGate } from "../src/server/maintenance-gate.js";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { buildFrameApp } from "../src/server/agent/app.js";
 import { agentRoutes } from "../src/server/agent/routes.js";
@@ -44,9 +43,7 @@ async function setup(t: TestContext) {
         models: () => { const current = readArkVideoCurrent(db); return current ? [arkVideoModelView(current, render)] : []; } };
     } },
   });
-  const maintenanceGate = new MaintenanceGate();
-  await maintenanceGate.announceStartup();
-  const app = buildFrameApp({ maintenanceGate, agent: { service: runtime.service, resolveOwner: () => "local-owner", localOwnerOnly: true, uiOrigin: origin } });
+  const app = buildFrameApp({ agent: { service: runtime.service, resolveOwner: () => "local-owner", localOwnerOnly: true, uiOrigin: origin } });
   t.after(async () => { await app.close(); await runtime.close(); await rm(directory, { recursive: true, force: true }); });
   const connection = (): ProviderConnection => readProviderConnections(runtime.database).connections.find(item => item.protocol === "ark")!;
   const save = (value: ProviderConnection) => runtime.service.saveProviderConnection("local-owner", {
@@ -83,12 +80,22 @@ it("统一配置 HTTP：响应符合合同，权限/Origin/安全头有效；旧
   try {
     assert.equal((await anon.inject({ method: "GET", url: "/api/agent/v1/settings/model-connections" })).statusCode, 401);
     assert.equal((await anon.inject({ method: "POST", url: "/api/agent/v1/settings/model-connections", headers, payload })).statusCode, 401);
+    assert.equal((await anon.inject({ method: "GET", url: "/api/agent/v1/settings/services" })).statusCode, 401);
   } finally { await anon.close(); }
   for (const serviceId of ["pexels", "newsnow"]) {
     const response = await f.app.inject({ method: "GET", url: `/api/agent/v1/settings/services/${serviceId}` });
     assert.equal(response.statusCode, 200);
     assert.equal(validatorFor("FreeServiceSettings")(response.json()).ok, true);
   }
+  // UIUX-10 目录快照：一条 GET 返回全部 15 项固定顺序，挂载不再逐服务请求。
+  const directory = await f.app.inject({ method: "GET", url: "/api/agent/v1/settings/services" });
+  assert.equal(directory.statusCode, 200);
+  assert.equal(directory.headers["cache-control"], "no-store");
+  assert.equal(validatorFor("FreeServiceSettingsDirectory")(directory.json()).ok, true);
+  assert.deepEqual(directory.json().services.map((service: { serviceId: string }) => service.serviceId), [
+    "pexels", "pixabay", "unsplash", "coverr", "wikimedia", "nasa", "met", "cleveland", "archive", "freetouse", "incompetech",
+    "douyin-music", "tiktok-sounds", "newsnow", "edge-tts",
+  ]);
 });
 
 it("统一 Ark 保存：改名沿用版本，改Key冻结旧身份，幂等/冲突/原子回滚沿现有命令规则", async t => {

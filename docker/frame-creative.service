@@ -10,7 +10,7 @@ Group=@GROUP@
 SupplementaryGroups=@DOCKER_GROUP@
 Environment=PATH=@DOCKER_PATH@:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/rm -f @SOCKET_DIRECTORY@/runner.sock
-ExecStart=@NODE@ /opt/frame-creative/creative-runner-host.mjs --socket=@SOCKET_DIRECTORY@/runner.sock --workspace-root=@WORKSPACE_ROOT@ --docker-socket=@DOCKER_SOCKET@ --uid=1001 --gid=1001
+ExecStart=@NODE@ /opt/frame-creative/creative-runner-host.mjs --socket=@SOCKET_DIRECTORY@/runner.sock --workspace-root=@WORKSPACE_ROOT@ --docker-socket=@DOCKER_SOCKET@ --data-volume=video-factory_video_factory_workspace --uid=1001 --gid=1001
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=45

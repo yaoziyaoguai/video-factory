@@ -1,4 +1,4 @@
-import type { AgentDatabase } from "./db.js";
+import { stmt, type AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { insertEvent, type EventHub } from "./event-log.js";
 import { canonicalJson, digestOf, newAgentId } from "./util.js";
@@ -56,6 +56,7 @@ export interface MessageRow {
   references_json: string;
   feedback_json: string | null;
   library_selections_json: string | null;
+  uploads_json: string | null;
   review_context_json: string | null;
   review_confirmation_json: string | null;
   execution_json: string | null;
@@ -80,6 +81,7 @@ export function rowToMessage(row: MessageRow): Message {
     target: row.target_json ? (JSON.parse(row.target_json) as Target) : null,
     createdAt: row.created_at,
     createdSequence: row.created_seq,
+    ...(row.uploads_json ? { uploads: JSON.parse(row.uploads_json) as NonNullable<Message["uploads"]> } : {}),
     references: { ...emptyReferences(), ...JSON.parse(row.references_json) as MessageReferences },
     kind: row.kind,
     execution: row.execution_json ? JSON.parse(row.execution_json) as Exclude<Message["execution"], undefined> : null,
@@ -96,7 +98,7 @@ export function emptyReferences(): MessageReferences {
 }
 
 export function getConversation(db: AgentDatabase, ownerId: string, conversationId: string): ConversationRow | undefined {
-  return db.prepare("SELECT * FROM conversations WHERE id = ? AND owner_id = ?").get(conversationId, ownerId) as ConversationRow | undefined;
+  return stmt(db, "SELECT * FROM conversations WHERE id = ? AND owner_id = ?").get(conversationId, ownerId) as ConversationRow | undefined;
 }
 
 export function requireConversation(db: AgentDatabase, ownerId: string, conversationId: string): ConversationRow {
@@ -108,10 +110,10 @@ export function requireConversation(db: AgentDatabase, ownerId: string, conversa
 
 export function nextSeq(db: AgentDatabase, table: "messages" | "artifacts" | "proposals" | "conversations", conversationId?: string): number {
   if (table === "conversations") {
-    const row = db.prepare("SELECT COALESCE(MAX(created_seq), 0) AS seq FROM conversations WHERE owner_id = ?").get(conversationId!) as { seq: number };
+    const row = stmt(db, "SELECT COALESCE(MAX(created_seq), 0) AS seq FROM conversations WHERE owner_id = ?").get(conversationId!) as { seq: number };
     return row.seq + 1;
   }
-  const row = db.prepare(`SELECT COALESCE(MAX(created_seq), 0) AS seq FROM ${table} WHERE conversation_id = ?`).get(conversationId!) as { seq: number };
+  const row = stmt(db, `SELECT COALESCE(MAX(created_seq), 0) AS seq FROM ${table} WHERE conversation_id = ?`).get(conversationId!) as { seq: number };
   return row.seq + 1;
 }
 
@@ -120,7 +122,7 @@ export function insertConversation(
   now: string,
   row: { id: string; ownerId: string; title: string; createdSeq: number; piSessionId: string },
 ): void {
-  db.prepare(
+  stmt(db,
     `INSERT INTO conversations(id, owner_id, title, revision, created_seq, epoch, pi_session_id, created_at, updated_at)
      VALUES (?, ?, ?, 1, ?, 0, ?, ?, ?)`,
   ).run(row.id, row.ownerId, row.title, row.createdSeq, row.piSessionId, now, now);
@@ -138,7 +140,7 @@ export function renameConversationRow(
   if (conversation.revision !== expectedRevision) {
     throw new AgentError("STALE_REVISION", "会话已更新，请刷新后重试。", { currentRevisionId: null });
   }
-  const info = db.prepare("UPDATE conversations SET title = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?")
+  const info = stmt(db, "UPDATE conversations SET title = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?")
     .run(title, now, conversationId, expectedRevision);
   if (info.changes !== 1) throw new AgentError("STALE_REVISION", "会话已更新，请刷新后重试。", { currentRevisionId: null });
   insertEvent(db, now, {
@@ -148,7 +150,7 @@ export function renameConversationRow(
 }
 
 export function touchConversation(db: AgentDatabase, now: string, conversationId: string): void {
-  db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, conversationId);
+  stmt(db, "UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, conversationId);
 }
 
 export function listConversations(db: AgentDatabase, ownerId: string, limit: number, beforeSeq?: number): ConversationRow[] {
@@ -156,25 +158,25 @@ export function listConversations(db: AgentDatabase, ownerId: string, limit: num
     ? "SELECT * FROM conversations WHERE owner_id = ? ORDER BY created_seq DESC LIMIT ?"
     : "SELECT * FROM conversations WHERE owner_id = ? AND created_seq < ? ORDER BY created_seq DESC LIMIT ?";
   return (beforeSeq === undefined
-    ? db.prepare(sql).all(ownerId, limit)
-    : db.prepare(sql).all(ownerId, beforeSeq, limit)) as ConversationRow[];
+    ? stmt(db, sql).all(ownerId, limit)
+    : stmt(db, sql).all(ownerId, beforeSeq, limit)) as ConversationRow[];
 }
 
 export function maxConversationSeq(db: AgentDatabase, ownerId: string): number {
-  const row = db.prepare("SELECT COALESCE(MAX(created_seq), 0) AS seq FROM conversations WHERE owner_id = ?").get(ownerId) as { seq: number };
+  const row = stmt(db, "SELECT COALESCE(MAX(created_seq), 0) AS seq FROM conversations WHERE owner_id = ?").get(ownerId) as { seq: number };
   return row.seq;
 }
 
 // —— 请求队列 ——
 
 export function pendingRequestCount(db: AgentDatabase, conversationId: string): number {
-  const row = db.prepare("SELECT COUNT(*) AS count FROM requests WHERE conversation_id = ? AND state = 'queued'").get(conversationId) as { count: number };
+  const row = stmt(db, "SELECT COUNT(*) AS count FROM requests WHERE conversation_id = ? AND state = 'queued'").get(conversationId) as { count: number };
   return row.count;
 }
 
 // 只合并显式继续意图；带组归属的普通消息仍是独立的新指令。
 export function pendingReviewRequest(db: AgentDatabase, ownerId: string, conversationId: string, workId: string, groupId: string): RequestRow | undefined {
-  return db.prepare(`SELECT r.* FROM requests r JOIN messages m ON m.id=r.message_id
+  return stmt(db, `SELECT r.* FROM requests r JOIN messages m ON m.id=r.message_id
     WHERE r.owner_id=? AND r.conversation_id=? AND r.state IN ('queued','running') AND (
       (json_extract(m.review_context_json,'$.intent')='continue'
         AND json_extract(m.review_context_json,'$.workId')=? AND json_extract(m.review_context_json,'$.groupId')=?)
@@ -184,7 +186,7 @@ export function pendingReviewRequest(db: AgentDatabase, ownerId: string, convers
 }
 
 export function nextQueueSeq(db: AgentDatabase, conversationId: string): number {
-  const row = db.prepare("SELECT COALESCE(MAX(queue_seq), 0) AS seq FROM requests WHERE conversation_id = ?").get(conversationId) as { seq: number };
+  const row = stmt(db, "SELECT COALESCE(MAX(queue_seq), 0) AS seq FROM requests WHERE conversation_id = ?").get(conversationId) as { seq: number };
   return row.seq + 1;
 }
 
@@ -197,7 +199,7 @@ export function insertQueuedRequest(
     messageId: string;
   },
 ): void {
-  db.prepare(
+  stmt(db,
     `INSERT INTO requests(id, conversation_id, owner_id, command_id, text, target_json, skill_id, model_id, mode,
       queue_seq, state, execution_epoch, stop_requested, delivery_closed, message_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, 'queued', NULL, 0, 0, ?, ?, ?)`,
@@ -212,14 +214,14 @@ export interface ClaimedRequest {
 }
 
 export function claimNextRequest(db: AgentDatabase, now: string, conversationId: string): ClaimedRequest | null {
-  const next = db.prepare(
+  const next = stmt(db,
     "SELECT * FROM requests WHERE conversation_id = ? AND state = 'queued' ORDER BY queue_seq ASC LIMIT 1",
   ).get(conversationId) as RequestRow | undefined;
   if (!next) return null;
   const epoch = bumpEpoch(db, conversationId);
-  db.prepare("UPDATE requests SET state = 'running', execution_epoch = ?, updated_at = ? WHERE id = ? AND state = 'queued'")
+  stmt(db, "UPDATE requests SET state = 'running', execution_epoch = ?, updated_at = ? WHERE id = ? AND state = 'queued'")
     .run(epoch, now, next.id);
-  db.prepare("UPDATE messages SET state = 'running', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, next.message_id);
+  stmt(db, "UPDATE messages SET state = 'running', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, next.message_id);
   insertEvent(db, now, {
     conversationId, ownerId: next.owner_id, kind: "message.changed", entityId: next.message_id,
     entityVersion: messageRevision(db, next.message_id),
@@ -228,21 +230,21 @@ export function claimNextRequest(db: AgentDatabase, now: string, conversationId:
 }
 
 function messageRevision(db: AgentDatabase, messageId: string): number {
-  const row = db.prepare("SELECT revision FROM messages WHERE id = ?").get(messageId) as { revision: number };
+  const row = stmt(db, "SELECT revision FROM messages WHERE id = ?").get(messageId) as { revision: number };
   return row.revision;
 }
 
 export function bumpEpoch(db: AgentDatabase, conversationId: string): number {
-  db.prepare("UPDATE conversations SET epoch = epoch + 1 WHERE id = ?").run(conversationId);
-  return (db.prepare("SELECT epoch FROM conversations WHERE id = ?").get(conversationId) as { epoch: number }).epoch;
+  stmt(db, "UPDATE conversations SET epoch = epoch + 1 WHERE id = ?").run(conversationId);
+  return (stmt(db, "SELECT epoch FROM conversations WHERE id = ?").get(conversationId) as { epoch: number }).epoch;
 }
 
 export function getRequestRow(db: AgentDatabase, ownerId: string, requestId: string): RequestRow | undefined {
-  return db.prepare("SELECT * FROM requests WHERE id = ? AND owner_id = ?").get(requestId, ownerId) as RequestRow | undefined;
+  return stmt(db, "SELECT * FROM requests WHERE id = ? AND owner_id = ?").get(requestId, ownerId) as RequestRow | undefined;
 }
 
 export function runningRequest(db: AgentDatabase, conversationId: string): RequestRow | undefined {
-  return db.prepare("SELECT * FROM requests WHERE conversation_id = ? AND state = 'running' ORDER BY queue_seq DESC LIMIT 1")
+  return stmt(db, "SELECT * FROM requests WHERE conversation_id = ? AND state = 'running' ORDER BY queue_seq DESC LIMIT 1")
     .get(conversationId) as RequestRow | undefined;
 }
 
@@ -251,12 +253,12 @@ export function activeRequestId(db: AgentDatabase, conversationId: string): stri
 }
 
 export function markStopRequested(db: AgentDatabase, now: string, requestId: string): void {
-  db.prepare("UPDATE requests SET stop_requested = 1, updated_at = ? WHERE id = ?").run(now, requestId);
+  stmt(db, "UPDATE requests SET stop_requested = 1, updated_at = ? WHERE id = ?").run(now, requestId);
 }
 
 export function stopQueuedRequest(db: AgentDatabase, now: string, request: RequestRow): void {
-  db.prepare("UPDATE requests SET state = 'stopped', updated_at = ? WHERE id = ?").run(now, request.id);
-  db.prepare("UPDATE messages SET state = 'stopped', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, request.message_id);
+  stmt(db, "UPDATE requests SET state = 'stopped', updated_at = ? WHERE id = ?").run(now, request.id);
+  stmt(db, "UPDATE messages SET state = 'stopped', revision = revision + 1, updated_at = ? WHERE id = ?").run(now, request.message_id);
   insertEvent(db, now, {
     conversationId: request.conversation_id, ownerId: request.owner_id, kind: "message.changed",
     entityId: request.message_id, entityVersion: messageRevision(db, request.message_id),
@@ -264,7 +266,7 @@ export function stopQueuedRequest(db: AgentDatabase, now: string, request: Reque
 }
 
 export function interruptedRunningRequests(db: AgentDatabase): RequestRow[] {
-  return db.prepare("SELECT * FROM requests WHERE state = 'running' ORDER BY queue_seq ASC").all() as RequestRow[];
+  return stmt(db, "SELECT * FROM requests WHERE state = 'running' ORDER BY queue_seq ASC").all() as RequestRow[];
 }
 
 export function markRequestTerminal(
@@ -274,15 +276,15 @@ export function markRequestTerminal(
   state: "completed" | "stopped" | "failed",
   completionReason?: RequestExecution["completionReason"],
 ): void {
-  db.prepare("UPDATE requests SET state = ?, updated_at = ? WHERE id = ?").run(state, now, request.id);
-  db.prepare("UPDATE messages SET execution_json = json_patch(execution_json, ?) WHERE id = ? AND execution_json IS NOT NULL")
+  stmt(db, "UPDATE requests SET state = ?, updated_at = ? WHERE id = ?").run(state, now, request.id);
+  stmt(db, "UPDATE messages SET execution_json = json_patch(execution_json, ?) WHERE id = ? AND execution_json IS NOT NULL")
     .run(canonicalJson({ endedAt: now, completionReason: completionReason ?? null }), request.message_id);
 }
 
 // 活动流不推进业务游标；同一份受控摘要随原始用户消息持久化，终态由正常消息事件发布。
 // SQL 同时核对执行代次，失去请求所有权的迟到工具回调不能覆盖新记录。
 export function recordRequestProgress(db: AgentDatabase, requestId: string, epoch: number, progress: RequestProgress): void {
-  db.prepare(`UPDATE messages SET execution_json = json_object(
+  stmt(db, `UPDATE messages SET execution_json = json_object(
       'startedAt', COALESCE(json_extract(execution_json, '$.startedAt'), ?),
       'endedAt', NULL, 'progress', json(?))
     WHERE id = (SELECT message_id FROM requests WHERE id = ? AND state = 'running' AND execution_epoch = ?)
@@ -301,20 +303,21 @@ export function insertMessage(
     text: string; target: Target | null; references: MessageReferences; createdSeq: number;
     feedback?: Message["feedback"];
     librarySelections?: Message["librarySelections"];
+    uploads?: Message["uploads"];
     reviewContext?: Message["reviewContext"];
     reviewConfirmation?: ReviewConfirmation;
   },
 ): void {
-  db.prepare(
+  stmt(db,
     `INSERT INTO messages(id, conversation_id, owner_id, request_id, role, kind, state, revision, text, target_json,
-      references_json, feedback_json, library_selections_json, review_context_json, review_confirmation_json, created_seq, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      references_json, feedback_json, library_selections_json, review_context_json, review_confirmation_json, uploads_json, created_seq, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(input.id, input.conversationId, input.ownerId, input.requestId, input.role, input.kind, input.state,
     input.text, input.target ? JSON.stringify(input.target) : null, JSON.stringify(input.references),
     input.feedback ? JSON.stringify(input.feedback) : null,
     input.librarySelections ? JSON.stringify(input.librarySelections) : null,
     input.reviewContext ? JSON.stringify(input.reviewContext) : null,
-    input.reviewConfirmation ? JSON.stringify(input.reviewConfirmation) : null, input.createdSeq, now, now);
+    input.reviewConfirmation ? JSON.stringify(input.reviewConfirmation) : null, input.uploads ? JSON.stringify(input.uploads) : null, input.createdSeq, now, now);
   insertEvent(db, now, {
     conversationId: input.conversationId, ownerId: input.ownerId, kind: "message.changed",
     entityId: input.id, entityVersion: 1,
@@ -322,7 +325,7 @@ export function insertMessage(
 }
 
 export function getMessageRow(db: AgentDatabase, ownerId: string, messageId: string): MessageRow | undefined {
-  return db.prepare("SELECT * FROM messages WHERE id = ? AND owner_id = ?").get(messageId, ownerId) as MessageRow | undefined;
+  return stmt(db, "SELECT * FROM messages WHERE id = ? AND owner_id = ?").get(messageId, ownerId) as MessageRow | undefined;
 }
 
 export function listMessageRows(db: AgentDatabase, conversationId: string, limit: number, beforeSeq?: number): MessageRow[] {
@@ -330,18 +333,18 @@ export function listMessageRows(db: AgentDatabase, conversationId: string, limit
     ? "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_seq DESC LIMIT ?"
     : "SELECT * FROM messages WHERE conversation_id = ? AND created_seq < ? ORDER BY created_seq DESC LIMIT ?";
   return (beforeSeq === undefined
-    ? db.prepare(sql).all(conversationId, limit)
-    : db.prepare(sql).all(conversationId, beforeSeq, limit)) as MessageRow[];
+    ? stmt(db, sql).all(conversationId, limit)
+    : stmt(db, sql).all(conversationId, beforeSeq, limit)) as MessageRow[];
 }
 
 // 定位窗口：锚点消息及其之前最近的消息（含锚点本身），页大小由调用方约束。
 export function listMessageRowsThrough(db: AgentDatabase, conversationId: string, anchorSeq: number, limit: number): MessageRow[] {
-  return db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND created_seq <= ? ORDER BY created_seq DESC LIMIT ?")
+  return stmt(db, "SELECT * FROM messages WHERE conversation_id = ? AND created_seq <= ? ORDER BY created_seq DESC LIMIT ?")
     .all(conversationId, anchorSeq, limit) as MessageRow[];
 }
 
 export function maxMessageSeq(db: AgentDatabase, conversationId: string): number {
-  const row = db.prepare("SELECT COALESCE(MAX(created_seq), 0) AS seq FROM messages WHERE conversation_id = ?").get(conversationId) as { seq: number };
+  const row = stmt(db, "SELECT COALESCE(MAX(created_seq), 0) AS seq FROM messages WHERE conversation_id = ?").get(conversationId) as { seq: number };
   return row.seq;
 }
 
@@ -351,9 +354,9 @@ export function finalizeRequestMessages(
   request: RequestRow,
   state: "completed" | "stopped" | "failed",
 ): void {
-  db.prepare("UPDATE messages SET state = ?, revision = revision + 1, updated_at = ? WHERE request_id = ? AND state IN ('queued','running')")
+  stmt(db, "UPDATE messages SET state = ?, revision = revision + 1, updated_at = ? WHERE request_id = ? AND state IN ('queued','running')")
     .run(state, now, request.id);
-  for (const row of db.prepare("SELECT id, revision FROM messages WHERE request_id = ?").all(request.id) as { id: string; revision: number }[]) {
+  for (const row of stmt(db, "SELECT id, revision FROM messages WHERE request_id = ?").all(request.id) as { id: string; revision: number }[]) {
     insertEvent(db, now, {
       conversationId: request.conversation_id, ownerId: request.owner_id, kind: "message.changed",
       entityId: row.id, entityVersion: row.revision,
@@ -386,7 +389,7 @@ export function checkCommandReceipt<T>(
   key: { ownerId: string; operation: string; targetId: string; commandId: string },
   body: unknown,
 ): ReplayOutcome<T> {
-  const row = db.prepare(
+  const row = stmt(db,
     "SELECT body_digest, receipt_json FROM command_receipts WHERE owner_id = ? AND operation = ? AND target_id = ? AND command_id = ?",
   ).get(key.ownerId, key.operation, key.targetId, key.commandId) as { body_digest: string; receipt_json: string } | undefined;
   if (!row) return { kind: "new" };
@@ -403,7 +406,7 @@ export function storeCommandReceipt(
   body: unknown,
   receipt: unknown,
 ): void {
-  db.prepare(
+  stmt(db,
     `INSERT INTO command_receipts(owner_id, operation, target_id, command_id, body_digest, receipt_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(key.ownerId, key.operation, key.targetId, key.commandId, digestOf(body), canonicalJson(receipt), now);
@@ -413,9 +416,10 @@ export function storeCommandReceipt(
 export function saveAssistantMessage(db: AgentDatabase, now: string, request: RequestRow, text: string, state: MessageRow["state"]): void {
   const id = `msg-${request.id.slice(4)}`;
   const prior = getMessageRow(db, request.owner_id, id);
-  const artifacts = db.prepare("SELECT artifact_id AS artifactId, id AS revisionId FROM artifact_revisions WHERE request_id = ?").all(request.id) as MessageReferences["artifacts"];
-  const proposals = db.prepare("SELECT DISTINCT proposal_id FROM tool_invocations WHERE request_id = ? AND proposal_id IS NOT NULL").all(request.id) as { proposal_id: string }[];
-  const batches = db.prepare("SELECT id FROM material_search_batches WHERE request_id = ? ORDER BY created_at ASC, rowid ASC").all(request.id) as { id: string }[];
+  const artifacts = stmt(db, `SELECT artifact_id AS artifactId, id AS revisionId FROM artifact_revisions
+    WHERE request_id = ? AND origin_kind IN ('delivered','production_output') ORDER BY rowid`).all(request.id) as MessageReferences["artifacts"];
+  const proposals = stmt(db, "SELECT DISTINCT proposal_id FROM tool_invocations WHERE request_id = ? AND proposal_id IS NOT NULL").all(request.id) as { proposal_id: string }[];
+  const batches = stmt(db, "SELECT id FROM material_search_batches WHERE request_id = ? ORDER BY created_at ASC, rowid ASC").all(request.id) as { id: string }[];
   const references = {
     artifacts, proposalIds: proposals.map(row => row.proposal_id), runIds: [],
     materialBatchIds: batches.map(row => row.id),
@@ -423,9 +427,9 @@ export function saveAssistantMessage(db: AgentDatabase, now: string, request: Re
   if (!text && !prior && artifacts.length === 0 && proposals.length === 0 && batches.length === 0) return;
   const body = text || prior?.text || "已保存本次成果。";
   // 批次与展示它的助手消息同事务关联，读取方不按最近时间猜。
-  db.prepare("UPDATE material_search_batches SET message_id = ? WHERE request_id = ?").run(id, request.id);
+  stmt(db, "UPDATE material_search_batches SET message_id = ? WHERE request_id = ?").run(id, request.id);
   if (prior) {
-    db.prepare("UPDATE messages SET text=?, state=?, references_json=?, revision=revision+1, updated_at=? WHERE id=?")
+    stmt(db, "UPDATE messages SET text=?, state=?, references_json=?, revision=revision+1, updated_at=? WHERE id=?")
       .run(body, state, JSON.stringify(references), now, id);
     insertEvent(db, now, { conversationId: request.conversation_id, ownerId: request.owner_id, kind: "message.changed", entityId: id, entityVersion: prior.revision + 1 });
   } else {

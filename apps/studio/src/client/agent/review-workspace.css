@@ -1,7 +1,8 @@
 .agent-task-progress { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:0 6px; margin:0 14px 7px; }
 .agent-task-disclosure { display:contents; }
 .agent-task-current { grid-row:1; grid-column:1; min-width:0; }
-.agent-task-heading strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* DECISION-04 同体合并：三处省略号声明收进一组；各选择器间无 overflow/white-space 竞争规则。 */
+.agent-task-heading strong,.agent-execution-summary,.agent-center-tools .agent-task-heading strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-task-current .agent-task-chevron { margin-left:0; }
 .agent-task-detail { grid-row:2; grid-column:1/-1; }
 .agent-task-footer { grid-row:1; grid-column:2; margin:0; gap:6px; flex-wrap:nowrap; }
@@ -11,7 +12,13 @@
 .agent-root .agent-task-footer>.agent-stop { font-size:0; padding:5px; min-width:26px; min-height:26px; }
 .agent-stop svg { width:12px; height:12px; }
 .agent-composer { padding-inline:14px; }
-.agent-composer-tools { gap:4px; }
+.agent-composer-tools { gap:4px; justify-content:flex-start; }
+.agent-composer-pickers { display:flex; gap:4px; }
+.agent-composer[data-file-drop] .agent-composer-card { outline:2px dashed var(--frame-green); outline-offset:-2px; background:#f1f6ef; }
+.agent-video-anchors { display:grid; gap:4px; margin-block:8px; }
+.agent-video-anchors>button,.agent-video-anchors>span { display:flex; align-items:center; gap:8px; text-align:left; }
+.agent-video-anchors>button { color:var(--frame-green); text-decoration:underline; text-underline-offset:3px; }
+.agent-video-anchors img { object-fit:contain; width:46px; height:32px; border-radius:3px; background:var(--frame-soft); }
 .agent-skill-selector { flex:0 1 144px; min-width:min(100%,128px); }
 .agent-skill-selector svg { flex-shrink:0; }
 .agent-skill-selector select { min-width:0; }
@@ -29,11 +36,15 @@
 @container (max-width:300px) { .agent-message { font-size:13px; } .agent-messages { padding-inline:12px; } }
 .agent-task-updated { color:var(--frame-muted); font-size:11px; padding-top:6px; }
 .agent-execution-record { margin:0 0 20px 28px; color:var(--frame-muted); font-size:12px; }
+.agent-execution-static { display:flex; align-items:center; gap:7px; margin:0 0 20px 28px; color:var(--frame-muted); font-size:12px; }
+.agent-execution-static svg { width:13px; height:13px; flex-shrink:0; }
+.agent-execution-static time { font-variant-numeric:tabular-nums; }
 .agent-execution-record>summary { display:flex; align-items:center; gap:7px; min-height:28px; cursor:pointer; list-style:none; }
 .agent-execution-record>summary::-webkit-details-marker { display:none; }
 .agent-execution-record>summary svg { width:13px; height:13px; flex-shrink:0; }
-.agent-execution-record>summary svg:last-child { margin-left:auto; }
+.agent-execution-record>summary svg:last-child { margin-left:auto; transition:transform 160ms cubic-bezier(0.22,1,0.36,1); }
 .agent-execution-record[open]>summary svg:last-child { transform:rotate(180deg); }
+.agent-execution-record[open] .agent-task-steps { animation:agent-steps-in 150ms ease; }
 .agent-execution-record>summary:focus-visible { outline:2px solid var(--frame-green); outline-offset:3px; border-radius:4px; }
 .agent-execution-record .agent-task-steps { margin:8px 0 0 6px; border-left:1px solid var(--frame-line); padding-left:12px; }
 .agent-execution-record .agent-task-steps small { white-space:normal; }
@@ -43,15 +54,19 @@
 @container (max-width:300px) {
   .agent-skill-selector { max-width:calc(100% - 36px); }
   .agent-skill-selector select { min-width:0; max-width:100%; }
-  .agent-composer-tools>.agent-library-picker-trigger { font-size:0; padding:5px; }
+  .agent-composer-pickers>.agent-library-picker-trigger { font-size:0; padding:5px; }
 }
 
-/* PC 创作台。纸色承载文字，状态和用户决定各有自己的颜色。 */
+@container (max-width:380px) {
+  .agent-skill-selector { flex-basis:110px; min-width:82px; }
+  .agent-skill-selector>svg { display:none; }
+  .agent-composer-pickers>.agent-library-picker-trigger { padding-inline:5px; }
+}
+
+/* PC 创作台。纸色承载文字，状态和用户决定各有自己的颜色；色彩 token 声明在 frame-base.css。 */
 .agent-root {
-  --frame-paper:#faf9f5; --frame-shelf:#f2f1eb; --frame-ink:#272825; --frame-muted:#60645e;
-  --frame-line:#dcdad2; --frame-green:#356348; --frame-accent:#98442d; --frame-soft:#eceae2;
   --rail-width:78px; --desk-pad:clamp(15px,2.1vw,34px);
-  --frame-serif:"Noto Serif SC Variable","Songti SC",STSong,Georgia,serif;
+  --frame-serif:var(--font-editorial);
 }
 .agent-root,.agent-root.sidebar-hidden { grid-template-columns:var(--rail-width) minmax(0,1fr); background:var(--frame-paper); }
 .agent-root ::selection { background:#efd6c9; color:#32291f; }
@@ -95,12 +110,15 @@
 .agent-root .agent-center-back { color:var(--frame-muted); white-space:nowrap; padding-right:12px; border-right:1px solid var(--frame-line); border-radius:0; }
 .agent-center-back small { display:none; }
 .agent-current-work-title { font-family:var(--frame-serif); }
-.agent-work-switch { flex:none; }
-.agent-work-switch select { width:20px; max-width:20px; padding:0; color:transparent; border:0; background:transparent; cursor:pointer; }
-.agent-work-switch select option { color:var(--frame-ink); }
-.agent-work-switch { position:relative; }
-.agent-work-switch::before { content:""; position:absolute; left:3px; top:12px; width:6px; height:6px; border:solid var(--frame-muted); border-width:0 1px 1px 0; transform:rotate(45deg); pointer-events:none; }
 .agent-center-tools,.agent-center-tools>button,.agent-focus-toggle { display:flex; align-items:center; gap:6px; }
+/* UIUX-06 切换作品热区铺满标题+箭头整体（≥36px 高）；select 透明覆盖，标题仍是焦点交接目标。 */
+.agent-work-switch { position:relative; display:flex; align-items:center; min-width:0; min-height:36px; }
+.agent-work-switch select { position:absolute; inset:0; width:100%; height:100%; max-width:none; padding:0; color:transparent; border:0; background:transparent; cursor:pointer; opacity:0; }
+.agent-work-switch select option { color:var(--frame-ink); }
+.agent-work-switch::before { content:""; position:absolute; right:2px; top:50%; margin-top:-4px; width:7px; height:7px; border:solid var(--frame-muted); border-width:0 1.5px 1.5px 0; transform:rotate(45deg); pointer-events:none; }
+/* B13-POLISH-05 焦点环收敛：程序化 focus 交接不触发容器绿框；仅键盘 Tab 到下拉切换器才显示，且统一赤陶色。 */
+.agent-work-switch:has(select:focus-visible) { outline:2px solid var(--frame-accent); outline-offset:2px; border-radius:5px; }
+.agent-center-tools .agent-chat-dot { width:7px; height:7px; border-radius:50%; background:#d07a52; flex-shrink:0; }
 .agent-work-center[data-view=review] .agent-center-tools { margin-left:auto; }
 .agent-root .agent-center-tools>button { font-size:12px; padding:5px; white-space:nowrap; color:var(--frame-muted); }
 .agent-center-tools>button svg { width:15px; }
@@ -116,13 +134,16 @@
 .agent-work-row-content { display:contents; }
 .agent-work-row h4 { margin:0; min-width:0; }
 .agent-root .agent-work-row h4>button { display:grid; grid-template-columns:minmax(64px,44%) 1fr; width:100%; align-items:center; gap:12px; padding:0; text-align:left; }
-.agent-row-title { font:650 clamp(17px,1.55vw,24px)/1.4 var(--frame-serif); overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+.agent-row-title { font:600 18px/1.35 var(--font-editorial); overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; }
+.agent-row-progress { grid-column:2; font-size:12px; color:var(--frame-muted); }
 .agent-revision-cover { position:relative; min-width:0; display:grid; place-items:center; overflow:hidden; isolation:isolate; width:100%; aspect-ratio:1.6; border-radius:4px; background:#e8e5db; color:#595b52; }
+/* AESTH-02 相纸装裱：作品主卡封面加细描边与浅投影，卷宗行获得横向锚点。 */
+.agent-work-row h4 .agent-revision-cover { border-radius:6px; box-shadow:0 2px 8px rgba(28,30,26,0.08); border:1px solid rgba(39,40,37,0.08); }
 .agent-revision-cover>img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
 .agent-cover-placeholder,.agent-cover-excerpt { display:grid; justify-items:start; gap:3px; padding:7px; font:500 11px/1.5 var(--frame-serif); }
 .agent-cover-excerpt>span { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
 .agent-cover-duration { position:absolute; bottom:5px; right:5px; color:white; background:#151715dd; border-radius:3px; padding:2px 4px; font:11px/1.3 Menlo,monospace; }
-.agent-work-row .agent-cover-duration,.agent-review-index .agent-cover-duration { display:none; }
+.agent-review-index .agent-cover-duration { display:none; }
 .agent-work-deliveries { margin:0; padding:0; min-width:0; }
 .agent-delivery-grid { display:grid; gap:8px; }
 .agent-delivery-card,.agent-delivery-card.compact { min-width:0; background:none; border:0; border-radius:4px; margin:0; }
@@ -132,13 +153,32 @@
 .agent-delivery-title strong { font-size:15px; font-weight:570; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-delivery-title span,.agent-review-version { font:12px/1.5 Menlo,monospace; color:var(--frame-muted); white-space:nowrap; }
 .agent-delivery-title svg { width:16px; height:16px; color:var(--frame-muted); }
-.agent-delivery-excerpt,.agent-item-duration { margin-left:22px; font-size:12px; line-height:1.55; color:var(--frame-muted); }
+.agent-delivery-excerpt,.agent-item-duration { margin-left:22px; font-size:12px; line-height:1.55; color:var(--frame-muted); font-variant-numeric:tabular-nums; }
 .agent-delivery-excerpt { -webkit-line-clamp:1; }
-.agent-delivery-footer { margin:1px 0 0 22px; display:flex; justify-content:flex-start; align-items:center; gap:4px; color:var(--frame-accent); font-size:12px; }
+.agent-delivery-footer { margin:1px 0 0 22px; display:flex; justify-content:flex-start; align-items:center; gap:4px; color:var(--frame-amber); font-size:12px; }
 .agent-delivery-card[data-state=approved] .agent-delivery-footer { color:var(--frame-green); }
+/* AESTH-02 卷宗行纸签卡：白底 + 左侧语义色边（琥珀待审 / 松绿已认）；悬停只动阴影，不再整片泛灰。 */
+.agent-work-row .agent-delivery-card { background:#fff; border:1px solid #e4e1d8; border-left:3px solid #c98a3b; border-radius:7px; padding:9px 12px; transition:border-color 140ms ease, box-shadow 140ms ease; }
+.agent-work-row .agent-delivery-card[data-state=approved] { background:#f7f6f1; border-left-color:var(--frame-green); }
+.agent-work-row .agent-delivery-card:hover { box-shadow:0 2px 10px rgba(28,30,26,0.1); }
+.agent-root .agent-work-row .agent-delivery-open { padding:0; border-radius:6px; }
+.agent-root .agent-work-row .agent-delivery-open:hover { background:none; }
+/* B13-POLISH-01 无缩略图卡同样“左内容 + 右胶囊”双列栅格，待审胶囊不再撑满整卡拉出大黄条。 */
+.agent-work-row .agent-delivery-open { grid-template-columns:minmax(0,1fr) auto; gap:2px 12px; }
+/* 视觉缩略图升级 16:9 画幅 64×36（AESTH-02-03）；去审阅/已认可收拢为右侧垂直居中胶囊。 */
+.agent-work-row .agent-delivery-open:has(.agent-revision-cover) { grid-template-columns:64px minmax(0,1fr) auto; gap:2px 10px; }
+.agent-work-row .agent-delivery-open .agent-revision-cover { grid-column:1; grid-row:1/span 3; aspect-ratio:16/9; border-radius:4px; }
+.agent-work-row .agent-revision-cover~.agent-delivery-title svg { display:none; }
+.agent-work-row .agent-delivery-excerpt,.agent-work-row .agent-item-duration { margin-left:0; }
+.agent-work-row .agent-delivery-footer { display:inline-flex; width:fit-content; grid-column:-2/-1; grid-row:1/span 2; align-self:center; justify-self:end; margin:0; padding:3px 10px; border:1px solid #eedcb8; border-radius:999px; font-size:11px; font-weight:500; white-space:nowrap; background:var(--frame-green-tint); }
+.agent-work-row .agent-delivery-open:has(.agent-revision-cover) .agent-delivery-footer { grid-column:3; grid-row:1/span 3; }
+.agent-work-row .agent-delivery-card:not([data-state=approved]) .agent-delivery-footer { color:var(--frame-amber); background:#fff4de; }
+.agent-work-row .agent-delivery-card[data-state=approved] .agent-delivery-footer { border-color:#cfe0d5; }
 .agent-delivery-footer svg { width:12px; height:12px; }
+.agent-root .agent-work-row .agent-delivery-more { margin-left:15px; }
 .agent-root .agent-delivery-more { width:auto; display:flex; align-items:center; gap:2px; margin-left:22px; padding:4px 0; font-size:12px; color:var(--frame-accent); }
-.agent-lane-empty { display:block; min-height:0; text-align:left; font-size:12px; }
+/* B13-POLISH-01 右列空态文案退后：纯状态空位提示降调并垂直居中，不与左列主信息抢戏。 */
+.agent-lane-empty { display:block; min-height:0; text-align:left; font-size:12px; color:#8a8d86; }
 .agent-independent-outputs { padding-top:6px; }
 .agent-center-detail { overflow:hidden; }
 .agent-root .agent-work { border:0; border-radius:0; max-width:none; background:var(--frame-paper); }
@@ -157,35 +197,78 @@
 .agent-review-more>div { top:100%; bottom:auto; z-index:5; min-width:175px; }
 .agent-review-content.agent-work-draft-scroll,.agent-root.review-focused .agent-review-content.agent-work-draft-scroll { container-type:size; flex:1; min-height:0; overflow:auto; padding:0 var(--desk-pad) 6px; }
 .agent-stage-body { font-size:14px; line-height:1.8; }
-.agent-stage-body .agent-preview-media video,.agent-stage-body .agent-preview-media img { display:block; width:100%; max-height:100cqh; object-fit:contain; border-radius:4px; background:#171c1e; }
-.agent-stage-body .agent-preview-media video { aspect-ratio:16/9; max-height:calc(100cqh - 3px); }
-.agent-review-content[data-synced] .agent-preview-media video { max-height:calc(100cqh - 35px); }
-.agent-review-content[data-history] .agent-preview-media video { max-height:calc(100cqh - 44px); }
-.agent-review-content[data-synced][data-history] .agent-preview-media video { max-height:calc(100cqh - 76px); }
+/* AESTH-03 放映暗场托盘：影像沉入深炭托盘还原影调；导出行与来源信息仍留在纸面。 */
+.agent-stage-body .agent-preview-media video,.agent-stage-body .agent-preview-media img { display:block; width:100%; max-height:100cqh; object-fit:contain; border-radius:10px; padding:10px; background:#161816; box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 8px 24px rgba(22,24,22,0.08); }
+/* 高度预算：视频下方只保留导出行 + 单行工具条，按 data-synced/data-history 叠加扣除，下限 180px 保证窄高容器仍可播放。 */
+.agent-stage-body .agent-preview-media video { --stage-video-height:max(180px,calc(100cqh - 54px - var(--stage-source-budget,0px))); width:min(100%,calc(var(--stage-video-height) * var(--frame-video-ratio,1.777778))); height:auto; max-height:var(--stage-video-height); margin-inline:auto; aspect-ratio:auto 16/9; }
+.agent-review-content[data-synced] .agent-preview-media video { --stage-video-height:max(180px,calc(100cqh - 90px - var(--stage-source-budget,0px))); }
+.agent-review-content[data-history] .agent-preview-media video { --stage-video-height:max(180px,calc(100cqh - 98px - var(--stage-source-budget,0px))); }
+.agent-review-content[data-synced][data-history] .agent-preview-media video { --stage-video-height:max(180px,calc(100cqh - 132px - var(--stage-source-budget,0px))); }
+/* B13-POLISH-02 放映信息托条：连接说明/下载/来源收进同一条暖灰托带，取代黑场下零散文字行与虚线；
+   预算按托条收拢态计提（42px 起步，浏览器四视口复核后校准）。 */
+.agent-stage-body .agent-preview-media:has(.agent-stage-plinth) { --stage-source-budget:42px; }
+.agent-stage-body .agent-stage-plinth { display:flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:4px 12px; margin-top:8px; padding:6px 10px; background:var(--frame-shelf); border:1px solid var(--frame-line); border-radius:7px; font-size:12px; }
+.agent-stage-body .agent-stage-plinth>.agent-stage-muted { margin:0; }
+.agent-stage-body .agent-stage-plinth>a { text-decoration:none; color:var(--frame-green); }
+.agent-stage-body .agent-stage-plinth>a:hover { text-decoration:underline; }
+.agent-stage-body .agent-stage-plinth .agent-media-sources { margin:0; padding:0; border-top:0; }
+.agent-stage-body .agent-stage-plinth .agent-media-sources[open] { flex-basis:100%; margin-top:4px; padding-top:6px; border-top:1px solid var(--frame-line); }
+.agent-stage-body .agent-media-sources>div { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:8px; }
+.agent-stage-body .agent-source-details small { display:inline; }
+.agent-stage-body .agent-batch-source { margin-top:0; }
+/* 视频下方元素合并为单行工具条：不再逐块堆叠，间距由容器统一控制。 */
+.agent-stage-utility-bar { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; min-height:36px; padding-top:8px; }
+.agent-stage-utility-bar>.frame-review-tools { margin:0; }
+.agent-stage-utility-bar>.frame-review-tools .frame-refinement { border-block-start:0; }
+.agent-stage-utility-bar>.frame-review-tools .frame-refinement>summary { padding:5px 2px; }
+.agent-stage-utility-bar>details, .agent-stage-utility-bar>p { margin:0; }
+/* B13-POLISH-02 满载态内嵌白卡：展开的工具面板（生成字幕/微调时间线/声音与片段）各居白底细边容器。 */
+.agent-stage-utility-bar details[open] { flex-basis:100%; margin-top:6px; background:#ffffff; border:1px solid var(--frame-line); border-radius:7px; padding:10px 12px; }
 .agent-preview-media>.agent-stage-muted { margin-right:8px; }
 .agent-delivery-title>span { margin-left:0; }
 .agent-stage-body .agent-preview-media>p { font-size:11px; margin:0 0 3px; color:var(--frame-muted); }
 .agent-stage-runlink,.agent-media-context { font-size:12px; margin:5px 0; color:var(--frame-muted); }
-.agent-cut-switch { display:flex; align-items:center; gap:5px; flex-wrap:wrap; min-height:32px; font-size:12px; }
+.agent-cut-switch { display:flex; align-items:center; gap:5px; flex-wrap:wrap; min-height:32px; font-size:12px; font-variant-numeric:tabular-nums; }
 .agent-root .agent-cut-switch button { font-size:12px; padding:3px 6px; border:1px solid var(--frame-line); }
 .agent-cut-switch [aria-pressed=true] { background:var(--frame-soft); font-weight:600; }
+.agent-cut-hint { flex-basis:100%; color:var(--frame-muted); }
 .agent-review-footer { position:relative; flex:none; padding:0; }
 .agent-review-item .agent-work-feedback { position:relative; margin:8px var(--desk-pad) 12px; padding:9px 12px 4px; border:1px solid var(--frame-line); border-radius:6px; background:white; }
 .agent-work-feedback label { font-size:12px; color:var(--frame-muted); }
 .agent-work-feedback textarea { display:block; width:100%; height:46px; min-height:32px; max-height:85px; font-size:14px; margin:4px 0 0; padding:3px 0; resize:vertical; border:0; background:none; }
-.agent-work-feedback p { color:var(--frame-muted); font-size:11px; }
 .agent-feedback-tools,.agent-review-actions { display:flex; align-items:center; gap:8px; }
 .agent-feedback-tools { justify-content:space-between; }
 .agent-root .agent-feedback-tools button { margin:0; min-height:28px; padding:3px; font-size:12px; border:0; background:none; color:var(--frame-accent); }
 .agent-feedback-tools .agent-stage-secondary { margin-left:auto!important; }
 .agent-feedback-tools svg { width:13px; }
+/* DECISION-01 对话改稿入口：描边胶囊与纯文字的「记录意见」拉开双通道语义分量。 */
+.agent-root .agent-feedback-tools .agent-chat-revise-trigger { display:inline-flex; align-items:center; min-height:28px; padding:3px 10px; border:1px solid var(--frame-green); border-radius:999px; background:#fff; color:var(--frame-green); font-size:12px; }
+.agent-root .agent-feedback-tools .agent-chat-revise-trigger:hover:not(:disabled) { background:var(--frame-green-tint); }
+.agent-root .agent-feedback-tools .agent-chat-revise-trigger:disabled { color:var(--frame-disabled-ink); border-color:var(--frame-line); background:none; cursor:default; }
 .agent-review-actions { border-top:1px solid var(--frame-line); padding:9px var(--desk-pad); min-height:56px; margin:0; flex-wrap:nowrap; }
 .agent-review-action-status { flex:1; min-width:0; color:var(--frame-muted); font-size:12px; line-height:1.4; }
 .agent-review-actions .agent-stage-primary { flex:none; min-width:116px; min-height:38px; padding:7px 12px; border:1px solid var(--frame-accent); background:var(--frame-accent); color:white; border-radius:6px; font-size:13px; }
 .agent-root .agent-stage-primary:hover:not(:disabled),.agent-root .agent-stage-primary:focus-visible { color:white; background:#803520; }
 .agent-root .agent-stage-primary:disabled { color:#555b54; background:#e0ded7; border-color:#d4d2c9; opacity:1; }
+/* AESTH-03 四级动作权重金字塔：赤陶实心=阶段推进；深松绿实心=终局封存；绿描边印章=单事项认可；白底描边=意见入口。 */
+.agent-review-actions .agent-stage-primary.agent-stage-finalize { background:#2d5940; border-color:#2d5940; box-shadow:inset 0 1px 0 rgba(255,255,255,0.18),0 2px 6px rgba(47,93,68,0.2); }
+.agent-root .agent-stage-primary.agent-stage-finalize:hover:not(:disabled),.agent-root .agent-stage-primary.agent-stage-finalize:focus-visible { background:#254b36; color:white; }
+.agent-review-actions .agent-stage-approve { flex:none; min-width:116px; min-height:38px; padding:7px 12px; border-radius:6px; background:var(--frame-green-tint); border:1px solid var(--frame-green); color:var(--frame-green); font-size:13px; font-weight:600; }
+.agent-root .agent-stage-approve:hover:not(:disabled),.agent-root .agent-stage-approve:focus-visible { background:#e6efe9; color:#254b36; border-color:#254b36; }
+.agent-root .agent-stage-approve:disabled { color:#555b54; background:#e0ded7; border-color:#d4d2c9; }
+/* B13-POLISH-03 已认可铭牌收敛为轻量签章：小圆章不再与 38px 行动按钮等高抢形态。 */
+.agent-approval-plate { flex:none; display:inline-flex; align-items:center; gap:5px; min-height:26px; padding:2px 9px; border-radius:999px; border:1px solid #cbe0d2; background:var(--frame-green-tint); color:var(--frame-green); font-size:12px; font-weight:600; }
+.agent-approval-plate svg { width:14px; height:14px; }
+/* AESTH-05 有分量反馈：拍板按钮 80ms 按压微缩；认可落定后铭牌与索引勾选单向 180ms 显影，仅动 transform/opacity。 */
+.agent-review-actions .agent-stage-approve,.agent-review-actions .agent-stage-primary { transition:transform 80ms ease; }
+.agent-review-actions .agent-stage-approve:active:not(:disabled),.agent-review-actions .agent-stage-primary:active:not(:disabled) { transform:scale(0.98); }
+/* 与 agent.css 的 agent-fade-in 同体（from/to opacity 0→1），DECISION-04 合并只留一份定义。 */
+.agent-approval-plate,.agent-review-index .agent-delivery-card[data-state=approved] .agent-delivery-footer { animation:agent-fade-in 180ms cubic-bezier(0.22,1,0.36,1); }
+@keyframes agent-steps-in { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
 .agent-root .agent-close-note,.agent-root .agent-note-trigger { display:none; }
 .agent-last-note { color:var(--frame-muted); font-size:12px; position:relative; }
+/* B13-POLISH-03 决策栏分段：历史意见回看与阶段引导文案之间细竖线切开，不再连读误解。 */
+.agent-review-actions>.agent-last-note { padding-right:10px; margin-right:2px; border-right:1px solid var(--frame-line); }
 .agent-last-note summary { display:flex; gap:4px; align-items:center; white-space:nowrap; cursor:pointer; }
 .agent-last-note svg { width:14px; }
 .agent-last-note>div { z-index:7; position:absolute; left:0; bottom:calc(100% + 10px); width:min(300px,55vw); max-height:45vh; overflow:auto; padding:13px; border:1px solid var(--frame-line); background:white; border-radius:6px; box-shadow:0 4px 20px #15191516; color:var(--frame-ink); }
@@ -200,9 +283,11 @@
 .agent-index-empty { color:var(--frame-muted); padding:6px 4px; font-size:12px; }
 .agent-review-index .agent-delivery-card { margin-bottom:3px; }
 .agent-review-index .agent-delivery-open { padding:7px 6px; min-height:38px; }
-.agent-review-index .agent-delivery-card[data-selected] { background:#e7e5dc; }
+.agent-review-index .agent-delivery-card[data-selected] { background:#fff; border-radius:7px; box-shadow:inset 3px 0 0 var(--frame-accent),0 2px 6px rgba(0,0,0,0.04); }
 .agent-review-index .agent-delivery-title strong { font-size:13px; }
-.agent-review-index .agent-delivery-footer,.agent-review-index .agent-delivery-excerpt { font-size:11px; }
+/* B13-POLISH-07 中文辅助说明 12px 下限：索引摘句升 12px，版本徽标保持 11px 数字规格。 */
+.agent-review-index .agent-delivery-footer { font-size:11px; }
+.agent-review-index .agent-delivery-excerpt { font-size:12px; }
 .agent-review-index .agent-item-duration { display:none; }
 .agent-review-index .agent-delivery-open:has(.agent-revision-cover) { grid-template-columns:48px minmax(0,1fr); gap:2px 7px; }
 .agent-review-index .agent-revision-cover { grid-column:1; grid-row:1/span 2; align-self:center; aspect-ratio:1.5; }
@@ -213,39 +298,29 @@
 .agent-quiet-state>span { width:7px; height:7px; border:1px solid currentColor; border-radius:50%; }
 .agent-chat>.agent-quiet-state { margin:2px 15px 5px; }
 .agent-task-progress { background:none; border:0; border-block:1px solid var(--frame-line); border-radius:0; }
-.agent-execution-summary { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-execution-record>summary>span:nth-child(3),.agent-execution-record time { flex:none; }
 .agent-center-tools .agent-task-progress.compact { position:relative; margin:0; padding:0; border:0; min-width:0; max-width:min(32vw,340px); }
 .agent-center-tools .agent-task-detail { position:absolute; top:100%; right:0; z-index:9; min-width:min(300px,60vw); max-height:46vh; overflow:auto; background:white; padding:8px 12px; border:1px solid var(--frame-line); border-radius:5px; box-shadow:0 4px 18px #191b181c; }
-.agent-center-tools .agent-task-heading strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .agent-center-tools .agent-task-time>span:nth-child(n+2) { display:none; }
-.agent-settings-page { background:var(--frame-paper); }
-.agent-settings-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--frame-line); padding:12px 0 20px; margin-bottom:24px; }
-.agent-settings-heading h1 { font-size:clamp(23px,2.25vw,32px); }
-.agent-settings-page[data-page=library] .agent-settings-content { width:100%; max-width:1520px; }
-.agent-library-shelf { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:clamp(14px,2.2vw,38px); }
-.agent-root .agent-library-item { display:block; min-width:0; min-height:0; min-inline-size:0; padding:0 0 6px; border:0; background:none; border-radius:4px; }
-.agent-root .agent-library-item:hover { background:#efede6; }
-.agent-library-thumb { display:block; width:100%; height:auto; aspect-ratio:1.62; border-radius:4px; }
-.agent-library-thumb .agent-revision-cover { height:100%; background:#e6e4da; }
-.agent-library-meta { position:relative; margin-top:9px; padding-right:22px; }
-.agent-library-meta strong { font:600 clamp(18px,1.7vw,25px)/1.45 var(--frame-serif); }
-.agent-library-meta small,.agent-library-finalized { font-size:13px; color:var(--frame-muted); }
-.agent-library-meta>svg { position:absolute; right:2px; top:5px; color:var(--frame-accent); }
+/* 作品库视图覆写已随 WorkLibrary 懒加载分块迁至 work-library.css（DECISION-04）。 */
 @media (max-width:1210px) {
   .agent-root { --rail-width:66px; }
   .agent-center-tools { gap:3px; }
   .agent-work-row h4>button { gap:7px; }
 }
-.agent-root[data-compact-workspace] #agent-chat { position:fixed; z-index:10; top:0; bottom:0; left:var(--rail-width); width:min(366px,calc(100vw - var(--rail-width) - 12px))!important; visibility:hidden; pointer-events:none; }
+.agent-root[data-compact-workspace] #agent-chat { position:fixed; z-index:10; top:0; bottom:0; left:var(--rail-width); width:min(366px,calc(100vw - var(--rail-width) - 12px))!important; visibility:hidden; pointer-events:none; transform:translateX(-12px); transition:transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s 180ms; }
 .agent-root[data-compact-workspace] #agent-chat>div { width:100%; }
 .agent-root[data-compact-workspace] .agent-resizer { display:none; }
 .agent-root[data-compact-workspace] .agent-main>[id=agent-preview] { flex:1 1 100%!important; }
-.agent-root[data-chat-drawer] #agent-chat { visibility:visible; pointer-events:auto; box-shadow:7px 0 28px #171c1a30; }
+.agent-root[data-chat-drawer] #agent-chat { visibility:visible; pointer-events:auto; transform:none; transition:transform 180ms cubic-bezier(0.22,1,0.36,1), visibility 0s; box-shadow:7px 0 28px #171c1a30; }
+/* B13-POLISH-05 抽屉遮罩：压暗退后的工作台突出对话抽屉；点外收起仍由根级 onPointerDownCapture 承接。 */
+.agent-root[data-chat-drawer] .agent-main>[id=agent-preview] { position:relative; }
+.agent-root[data-chat-drawer] .agent-main>[id=agent-preview]::after { content:""; position:absolute; inset:0; z-index:8; background:rgba(36,37,34,0.18); backdrop-filter:blur(1px); pointer-events:none; }
 @media (max-width:1060px), (max-height:600px) {
   .agent-review-item:not([data-compact-feedback]) .agent-work-feedback { display:none; }
   .agent-review-item[data-compact-feedback] .agent-work-feedback { position:absolute; bottom:100%; left:8px; right:8px; z-index:6; margin:0; max-height:45vh; overflow:auto; padding:9px 12px; box-shadow:0 5px 22px #1b241b24; }
-  .agent-root .agent-note-trigger,.agent-root .agent-close-note { display:inline-flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap; color:var(--frame-accent); padding:4px; }
+  .agent-root .agent-note-trigger { display:inline-flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap; padding:6px 10px; border-radius:6px; background:#fff; border:1px solid #d4d0c5; color:var(--frame-ink); }
+  .agent-root .agent-close-note { display:inline-flex; align-items:center; gap:4px; font-size:12px; white-space:nowrap; color:var(--frame-accent); padding:4px; }
   .agent-root .agent-close-note { float:right; }
   .agent-note-trigger svg,.agent-close-note svg { width:14px; }
   .agent-center-toolbar { min-height:52px; padding-block:4px; }
@@ -261,9 +336,23 @@
   .agent-center-toolbar { min-height:48px; }
   .agent-review-actions { min-height:43px; padding-block:4px; }
   .agent-review-actions .agent-stage-primary { min-height:32px; }
+  .agent-review-actions .agent-stage-approve { min-height:32px; }
   .agent-review-index-section>header { padding-block:6px 3px; }
   .agent-board-headings { min-height:40px; }
-  .agent-composer textarea { min-height:34px; height:34px; }
+  .agent-composer textarea { font-size:13px; line-height:1.5; min-height:40px; height:40px; }
+  .agent-composer-card { padding:8px 10px; }
+}
+@media (max-height:760px) {
+  .agent-welcome { padding:12px 4px; }
+  .agent-intro-mark { width:26px; height:26px; margin-bottom:10px; }
+  .agent-root .agent-examples>button { padding:8px 11px; }
+}
+/* B13-POLISH-05 极限矮窗（≤540px）：欢迎页收起徽标与选题签间距，首屏保住主标题与前三张选题签。 */
+@media (max-height:540px) {
+  .agent-intro-mark { display:none; }
+  .agent-welcome { padding:10px 4px; }
+  .agent-welcome h2 { font-size:19px; margin:6px 0 10px; }
+  .agent-examples { margin-top:14px; gap:6px; }
 }
 @media (max-width:760px) {
   .agent-root { --desk-pad:10px; --rail-width:70px; }
@@ -272,9 +361,8 @@
   .agent-center-search { min-width:64px; width:100px; }
   .agent-review-actions { gap:5px; }
   .agent-review-action-status { font-size:11px; }
-  .agent-review-actions .agent-stage-primary { min-width:86px; padding:4px 6px; }
+  .agent-review-actions .agent-stage-primary,.agent-review-actions .agent-stage-approve { min-width:86px; padding:4px 6px; }
   .agent-work-canvas { grid-template-columns:minmax(0,1fr) 146px; }
-  .agent-library-shelf { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .agent-root .agent-work-row h4>button { grid-template-columns:1fr; }
   .agent-work-row .agent-revision-cover { max-width:90px; aspect-ratio:2; }
   .agent-center-tools .agent-task-progress.compact { max-width:185px; }
@@ -294,3 +382,12 @@
   .agent-review-index .agent-delivery-open { min-height:27px; padding-block:2px; }
 }
 @media (prefers-reduced-motion:reduce) { .agent-root button { transition:none; } }
+
+.frame-export-menu { margin-block:6px;max-width:100%; }
+.frame-export-menu>summary { display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--frame-green);font-size:13px;font-weight:600; }
+.frame-export-menu>summary::after { content:"";width:6px;height:6px;border-right:1px solid currentColor;border-bottom:1px solid currentColor;transform:rotate(45deg);margin:-3px 3px 0 2px; }
+.frame-export-menu[open]>summary::after { transform:rotate(225deg);margin-top:3px; }
+.agent-root .frame-export-menu>summary svg { width:14px;height:14px; }
+.frame-export-links { display:grid;width:fit-content;max-width:100%;padding:4px 8px;margin-top:4px;gap:0;background:var(--frame-paper);border:1px solid var(--frame-line);border-radius:5px; }
+.frame-export-links a { padding:5px 4px;color:var(--frame-green);text-underline-offset:3px; }
+.frame-export-links small { padding:4px;color:var(--frame-muted);max-width:30ch; }

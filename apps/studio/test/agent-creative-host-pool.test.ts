@@ -62,18 +62,26 @@ async function createHost(options: Record<string, unknown>, extras: CreateHostEx
   return {
     host, state, readLog,
     cleanup: async () => {
+      const warmNames = (await readLog()).filter(isWarm).map(args => args[args.indexOf("--name") + 1]!);
       await host.close();
-      // 关闭时在途的 rm/清理 docker 调用可能仍需数毫秒收束，先等它落地再删目录。
-      await new Promise(resolve => setTimeout(resolve, 50));
-      process.env.PATH = originalPath;
-      await rm(directory, { recursive: true, force: true });
+      try {
+        // 替身进程要写最后一次 rm 操作。按容器名收到记录再删除目录，避免日志在清理途中重建。
+        assert.ok(await waitFor(async () => {
+          const removed = (await readLog()).filter(args => args[0] === "rm" && args[1] === "--force").map(args => args[2]);
+          return warmNames.every(name => removed.includes(name));
+        }), "所有温热容器均已收到销毁命令");
+      } finally {
+        process.env.PATH = originalPath;
+        await rm(directory, { recursive: true, force: true });
+      }
     },
   };
 }
 
 const helperArgv = (argv: string[]): boolean => argv.at(-1) === "/opt/frame/creative-operations.py";
 const hasReadonlyMount = (argv: string[]): boolean => argv.some(arg => arg.startsWith("type=volume,") && arg.endsWith(",readonly"));
-const isInit = (argv: string[]): boolean => helperArgv(argv) && argv.includes("0:0");
+const isInit = (argv: string[]): boolean => argv[0] === "run" && argv.some(value => value.startsWith("frame-creative-init-"))
+  && argv.includes("0:0") && !argv.includes("--interactive") && argv.some(value => value.includes("/opt/frame/creative-operations.py"));
 const isWarm = (argv: string[]): boolean => helperArgv(argv) && hasReadonlyMount(argv);
 const isSync = (argv: string[]): boolean => helperArgv(argv) && !hasReadonlyMount(argv) && !isInit(argv);
 const readData = (body: string): string => Buffer.from((JSON.parse(body) as { data: string }).data, "base64").toString("utf8");
@@ -158,9 +166,10 @@ test("R11 探测答复跟随宿主成功集合：未同步 needed，确认后不
   const revision = createHash("sha256").update(JSON.stringify(files)).digest("hex");
   const probeInput = { workspaceId: workspaceA, action: "skills", revision, probe: true };
 
+  const baseline = await readLog();
   const beforeSync = await call(host.socketPath, probeInput);
   assert.equal(beforeSync.body.trim(), '{"needed":true}', "未同步过的修订应答复需要正文");
-  assert.ok((await readLog()).every(argv => argv[0] === "image" && argv[1] === "inspect"), "探测不起容器、不动卷（仅宿主启动的镜像检查）");
+  assert.deepEqual(await readLog(), baseline, "探测不产生任何 Docker 调用");
 
   const synced = await call(host.socketPath, { workspaceId: workspaceA, action: "skills", revision, files });
   assert.equal(synced.body.trim(), "{}");
@@ -317,4 +326,42 @@ test("真实 helper 循环协议：逐行请求、错误隔离、EOF 退出", as
   assert.equal(lines.length, 2, "两个请求各回复一行");
   assert.equal(JSON.parse(lines[0]!).error, "未支持的固定文件动作。");
   assert.match(JSON.parse(lines[1]!).error, /Expecting value/);
+});
+
+test("ISS-08 十二个工作区共用四个热容器名额，超出容量先归还 LRU", async t => {
+  const { host, readLog, cleanup } = await createHost({ maxPoolSize: 4 });
+  t.after(cleanup);
+  const replies = await Promise.all(Array.from({ length: 12 }, (_, index) => call(host.socketPath, {
+    workspaceId: index.toString(16).padStart(64, "0"), action: "list",
+  })));
+  for (const reply of replies) assert.deepEqual(JSON.parse(reply.body), { files: [] });
+  const live = new Set<string>();
+  let peak = 0, started = 0;
+  for (const args of await readLog()) {
+    if (isWarm(args)) { started++; live.add(args[args.indexOf("--name") + 1]!); }
+    if (args[0] === "rm" && args[1] === "--force") live.delete(args[2]!);
+    peak = Math.max(peak, live.size);
+  }
+  assert.equal(started, 12);
+  assert.equal(peak, 4);
+  assert.equal(live.size, 4);
+  t.diagnostic(`12 workspaces, warm container peak=${peak}, limit=4`);
+});
+
+test("ISS-08 已回收的工程卷重新初始化，Skill 卷丢失后重新请求文件", async t => {
+  const { host, state, readLog, cleanup } = await createHost({ warmIdleMs: 80 });
+  t.after(cleanup);
+  const { createHash } = await import("node:crypto");
+  const files = [{ path: "sound/SKILL.md", data: Buffer.from("sound").toString("base64") }];
+  const revision = createHash("sha256").update(JSON.stringify(files)).digest("hex");
+  const sync = { workspaceId: workspaceA, action: "skills", revision, files };
+  const probe = { workspaceId: workspaceA, action: "skills", revision, probe: true };
+  assert.deepEqual(JSON.parse((await call(host.socketPath, sync)).body), {});
+  assert.equal(JSON.parse((await call(host.socketPath, probe)).body).needed, false);
+  await writeFile(state, JSON.stringify({ volumes: {} }));
+  assert.equal(JSON.parse((await call(host.socketPath, probe)).body).needed, true);
+  assert.deepEqual(JSON.parse((await call(host.socketPath, sync)).body), {});
+  assert.equal(JSON.parse((await call(host.socketPath, probe)).body).needed, false);
+  assert.equal((await readLog()).filter(isInit).length, 4);
+  assert.equal((await readLog()).filter(isSync).length, 2);
 });

@@ -1,7 +1,8 @@
+import { writeStubInterpreter } from "./helpers/edge-tts-fixture.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "node:test";
@@ -10,7 +11,7 @@ import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@ear
 import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG } from "../src/server/agent/offline.js";
 import { saveEdgeTtsServiceSettings } from "../src/server/agent/free-service-settings.js";
 import type { ArtifactRevision, DeliveryReceipt, DubFreeResult, ProductionIntent, RevisionRef } from "../src/shared/agent/generated/contracts.js";
-import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
+import { finalVideoTarget, seedConfirmedWork, trimPastDelivery } from "./helpers/creative-work-fixture.js";
 import { retainedVideoMaterials } from "../src/server/agent/library-materials.js";
 
 // G4-2 跨会话作品库选材：入口验证（真实 finalize_video + 定稿当时留存清单）、
@@ -23,14 +24,14 @@ const cmd = () => `test-${++sequence}`;
 const input = (text: string) => ({ commandId: cmd(), text, target: null, skillId: null, proposalRef: null, mode: "new" as const, steerRequestId: null });
 
 type Fixture = Awaited<ReturnType<typeof setup>>;
-async function setup(signal: AbortSignal) {
+async function setup(signal: AbortSignal, kind: "script" | "prompt" = "prompt") {
   const directory = await mkdtemp(path.join(tmpdir(), "frame-lib-"));
   let time = Date.parse("2026-11-08T00:00:00Z");
   const clock = () => new Date(time).toISOString();
   const app = await assembleOfflineAgent({ dataDir: directory, uiOrigin: origin, clock, media: { autoStart: false, delayMs: 0 } });
   const conversation = app.service.createConversation("local-owner", { commandId: cmd(), title: "库验证 A" }).conversation;
-  app.faux!.setResponses([fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "山路", kind: "prompt", content: { format: "markdown", text: "清晨沿山路行进的固定镜头。" } }] })]), fauxAssistantMessage("已交付。")]);
-  await app.service.sendMessage("local-owner", conversation.id, input("给我 prompt"));
+  app.faux!.setResponses([fauxAssistantMessage([fauxToolCall("deliver_artifacts", { items: [{ mode: "create", title: "山路", kind, content: { format: "markdown", text: "清晨沿山路行进的固定镜头。" } }] })]), fauxAssistantMessage("已交付。")]);
+  await app.service.sendMessage("local-owner", conversation.id, input(kind === "script" ? "给我脚本" : "给我 prompt"));
   while (app.service.snapshot("local-owner", conversation.id).activeRequestId) await delay(20, undefined, { signal });
   const artifact = app.service.snapshot("local-owner", conversation.id).artifacts.items[0]!;
   assert.ok(artifact);
@@ -76,12 +77,10 @@ it("G4-2 跨会话库选材：定稿准确音频在 B 读原字节并再次交�
     // 真实 dub_free/交付链，外部客户端仅返回 FFmpeg 生成的固定音频与边界。
     const audioBytes = execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.8",
       "-c:a", "libmp3lame", "-f", "mp3", "pipe:1"]);
-    const pythonStub = path.join(f.directory, "dub-client.mjs");
-    await writeFile(pythonStub, `#!${process.execPath}
-process.stdin.resume();
-process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${JSON.stringify(audioBytes.toString("base64"))},
-  boundaries: [{ text: "山路", offsetMs: 0, durationMs: 300 }, { text: "晨光", offsetMs: 350, durationMs: 350 }] })));
-`, { mode: 0o755 });
+    const pythonStub = await writeStubInterpreter(f.directory, path.join(f.directory, "dub-request.json"), {
+      audioB64: audioBytes.toString("base64"),
+      boundaries: [{ text: "山路", offsetMs: 0, durationMs: 300 }, { text: "晨光", offsetMs: 350, durationMs: 350 }],
+    });
     saveEdgeTtsServiceSettings(f.app.database, f.clock, "local-owner", {
       commandId: cmd(), expectedRevision: 0, enabled: true, voice: "zh-CN-XiaoxiaoNeural",
     });
@@ -183,6 +182,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     const draftRevision = f.app.service.readRevision("local-owner", draft.artifactId, draft.revisionId);
     if (draftRevision.content.format !== "media") assert.fail("成片应为媒体修订");
     assert.equal(draftRevision.content.dub, undefined, "run_output 成片不编造源音频的 dub 坐标");
+    trimPastDelivery(f.app.database, { ownerId: "local-owner", conversationId: f.conversation.id }, f.clock(), draft.artifactId);
     await f.app.service.sendMessage("local-owner", f.conversation.id, { ...input("这版定稿"), reviewConfirmation: {
       workId: f.confirmed.workId, groupId: video.group,
       items: [{ itemId: video.item.id, source: { kind: "artifact_revision", artifactId: draft.artifactId, revisionId: draft.revisionId, digest: draftRevision.digest } }],
@@ -271,6 +271,11 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
     assert.ok(userMessage);
     assert.deepEqual(userMessage.librarySelections, selections);
     assert.equal(userMessage.references.artifacts.length, 3);
+    const assistant = page.messages.items.find(message => message.role === "assistant" && message.requestId === userMessage.requestId)!;
+    assert.deepEqual(assistant.references.artifacts, redelivery.revisions, "助手只引用正式交付的独立修订");
+    for (const ref of userMessage.references.artifacts) {
+      assert.equal(f.app.database.prepare("SELECT origin_kind FROM artifact_revisions WHERE id=?").pluck().get(ref.revisionId), "library_import");
+    }
     const reference = userMessage.references.artifacts[0]!;
     const copy = f.app.service.readRevision("local-owner", reference.artifactId, reference.revisionId);
     const copyHead = page.artifacts.items.find(item => item.id === reference.artifactId)!;
@@ -330,8 +335,60 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ audioB64: ${
       librarySelections: [{ sourceVideo: { artifactId: draft.artifactId, revisionId: draft.revisionId },
         source: { kind: "artifact_revision", artifactId: f.artifact.id, revisionId: f.revision.revisionId } }],
     }));
-    assert.match(crossOwner.message, /还没有定稿入库/);
+    assert.match(crossOwner.message, /没有找到这件作品库视频/);
+    assert.equal((crossOwner as {code?: string}).code, "NOT_FOUND");
     assert.equal(f.app.service.snapshot("local-owner", other.id).messages.items
       .filter(message => message.librarySelections?.length).length, 1, "失败发送不落消息");
+  } finally { await f.close(); }
+});
+
+it("ISS-01 作品库脚本可在新对话独立认可，并由 start_work 采用准确版本", async t => {
+  const f = await setup(t.signal, "script");
+  try {
+    const owner = "local-owner";
+    const proposal = (await f.app.service.prepareProposal(owner, f.conversation.id, { commandId: cmd(), spec: f.spec })).proposal;
+    const accepted = f.app.service.acceptProposal(owner, proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
+    for (let i = 0; i < 12 && f.app.service.getRun(owner, accepted.run.id).state !== "succeeded"; i++) {
+      await f.app.worker!.pollOnce();
+      f.advance();
+    }
+    assert.equal(f.app.service.getRun(owner, accepted.run.id).state, "succeeded");
+    const { group, item } = videoItemOf(f);
+    const { artifactId, revisionId } = item.draft ?? {};
+    assert.ok(artifactId && revisionId);
+    const video = f.app.service.readRevision(owner, artifactId, revisionId);
+    await f.app.service.sendMessage(owner, f.conversation.id, { ...input("这版定稿"), reviewConfirmation: {
+      workId: f.confirmed.workId, groupId: group, items: [{ itemId: item.id,
+        source: { kind: "artifact_revision", artifactId, revisionId, digest: video.digest } }], action: "finalize_video",
+    } });
+    const target = f.app.service.createConversation(owner, { commandId: cmd(), title: "库脚本的后续视频" }).conversation.id;
+    f.app.faux!.setResponses([fauxAssistantMessage("脚本已带入。")]);
+    const selection = { ...input("带入这版脚本"), librarySelections: [{
+      sourceVideo: { artifactId, revisionId },
+      source: { kind: "artifact_revision" as const, artifactId: f.artifact.id, revisionId: f.revision.revisionId },
+    }] };
+    const selected = await f.app.service.sendMessage(owner, target, selection);
+    while (f.app.service.snapshot(owner, target).activeRequestId) await delay(10, undefined, { signal: t.signal });
+    const message = f.app.service.snapshot(owner, target).messages.items.find(m => m.id === selected.receipt.messageId)!;
+    const copy = message.references.artifacts[0]!;
+    assert.deepEqual(f.app.service.readRevision(owner, copy.artifactId, copy.revisionId).content, f.revision.content);
+    assert.equal(f.app.service.readArtifactHead(owner, copy.artifactId).kind, "script");
+    await f.app.service.sendMessage(owner, target, selection);
+    assert.deepEqual(f.app.database.prepare("SELECT notification,entity_version FROM events WHERE conversation_id=? AND entity_id=? AND kind='artifact.delivered'").all(target, copy.artifactId),
+      [{ notification: "new_output", entity_version: 1 }], "幂等重放只产生一次交付");
+    const approved = await f.app.service.sendMessage(owner, target, { ...input("认可这版脚本"), reviewConfirmation: {
+      kind: "standalone_artifact", ...copy, action: "approve",
+    } });
+    assert.equal(approved.status, 202);
+    assert.equal(f.app.service.snapshot(owner, target).messages.items.find(m => m.id === approved.receipt.messageId)?.state, "completed");
+    assert.equal(f.app.service.readArtifactHead(owner, copy.artifactId).standaloneApproval?.revisionId, copy.revisionId);
+    const adopted = { kind: "artifact_revision" as const, ...copy, digest: f.revision.digest };
+    f.app.faux!.setResponses([fauxAssistantMessage([fauxToolCall("start_work", { title: "新山路", adoptContent: adopted })]), fauxAssistantMessage("已采用。")]);
+    const started = await f.app.service.sendMessage(owner, target, input("正式开始，用这份已认可的脚本制作新山路。"));
+    while (f.app.service.snapshot(owner, target).activeRequestId) await delay(10, undefined, { signal: t.signal });
+    const page = f.app.service.snapshot(owner, target);
+    assert.equal(page.messages.items.find(m => m.id === started.receipt.messageId)?.state, "completed");
+    assert.deepEqual(page.works[0]?.reviewGroups.flatMap(g => g.items).find(i => i.role === "content")?.approved, adopted);
+    assert.equal(f.app.service.readArtifactHead(owner, f.artifact.id).revisionId, f.revision.revisionId);
   } finally { await f.close(); }
 });

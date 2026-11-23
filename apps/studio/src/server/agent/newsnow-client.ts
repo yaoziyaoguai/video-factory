@@ -1,9 +1,10 @@
+import { orderedResults } from "./ordered-results.js";
 import type { TrendSnapshot } from "../../shared/agent/generated/contracts.js";
 import { AgentError } from "./errors.js";
 import type { CapturedNewsNowConfig } from "./free-service-settings.js";
 import { assertPublicResolvedHost, newsNowOriginAllowed, type HostResolver } from "./network-policy.js";
 
-// NewsNow 自托管实例的边界适配：固定 /api/s?id= 路径，逐个来源读取。
+// NewsNow 自托管实例的边界适配：固定 /api/s?id= 路径，按来源顺序读取。
 // 上游真实形状是 {status,id,updatedTime,items:[...]}；数值时间只按已明确的毫秒处理，
 // 条目 pubDate 只接受可明确解释的 ISO，无法确定则 null，不猜秒/毫秒。
 // 每次请求前核对 DNS 解析结果不在私网段，防止保存时是域名、之后被解析到内网或云元数据端点。
@@ -26,13 +27,9 @@ export class NewsNowClient {
     private readonly resolveHost: HostResolver | undefined = undefined,
   ) {}
 
-  /** 逐个读取选定来源；单个失败只标记该来源 unavailable，不影响其他来源。 */
+  /** 保序读取选定来源；单个失败只标记该来源 unavailable，不影响其他来源。 */
   async readSources(sourceIds: string[], limit: number, signal?: AbortSignal): Promise<TrendSnapshot[]> {
-    const snapshots: TrendSnapshot[] = [];
-    for (const sourceId of sourceIds) {
-      snapshots.push(await this.readOne(sourceId, limit, signal));
-    }
-    return snapshots;
+    return orderedResults(sourceIds, sourceIds.length, signal, (id, active) => this.readOne(id, limit, active));
   }
 
   private async readOne(sourceId: string, limit: number, signal: AbortSignal | undefined): Promise<TrendSnapshot> {

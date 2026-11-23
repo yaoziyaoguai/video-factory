@@ -1,3 +1,4 @@
+import type { NativeTextApi } from "../../shared/agent/provider-capabilities.js";
 import type {
   ModelBinding, ModelEntry, SaveUserProfile, SaveUserProfileReceipt, ThinkingLevel, UserProfile,
 } from "../../shared/agent/generated/contracts.js";
@@ -13,7 +14,7 @@ import { canonicalJson, digestOf, newAgentId, type AgentClock } from "./util.js"
 // Key 持久化只进私有库；写回执与模型目录不带 Key。
 
 export interface TextExecutionConfig {
-  protocol: "openai-responses";
+  protocol: NativeTextApi;
   baseUrl: string;
   modelId: string;
   contextWindowTokens: number;
@@ -36,6 +37,7 @@ export interface StoredTextExecutionConfig {
 }
 
 export interface TextVersionRow {
+  binding_format: 1 | 2;
   configuration_revision_id: string;
   binding_json: string;
   configuration_json: string;
@@ -55,7 +57,7 @@ export interface TextEntryRow {
 export interface PiTextRegistration {
   providerId: string;
   modelId: string;
-  protocol: "openai-responses";
+  protocol: NativeTextApi;
   baseUrl: string;
   contextWindowTokens: number;
   maxOutputTokens: number;
@@ -79,7 +81,7 @@ function readSettingsRow(db: AgentDatabase): { revision: number; default_entry_i
 }
 
 function readVersion(db: AgentDatabase, configurationRevisionId: string): TextVersionRow | undefined {
-  return db.prepare("SELECT * FROM text_model_versions WHERE configuration_revision_id=?")
+  return db.prepare("SELECT binding_format,configuration_revision_id,binding_json,configuration_json,frame_open(api_key) AS api_key,created_at FROM text_model_versions WHERE configuration_revision_id=?")
     .get(configurationRevisionId) as TextVersionRow | undefined;
 }
 
@@ -93,11 +95,11 @@ export function readTextModelView(db: AgentDatabase): TextSettingsView {
   const settings = readSettingsRow(db);
   if (!settings) throw new Error("text_model_settings 未初始化。");
   const entries = (db.prepare(
-    "SELECT e.id AS entry_id, e.name, e.features_json, e.current_configuration_revision_id, e.created_at, v.configuration_revision_id, v.binding_json, v.configuration_json, v.api_key, v.created_at AS version_created_at FROM text_model_entries e JOIN text_model_versions v ON v.configuration_revision_id = e.current_configuration_revision_id ORDER BY e.created_at ASC, e.id ASC",
+    "SELECT e.id AS entry_id, e.name, e.features_json, e.current_configuration_revision_id, e.created_at, v.binding_format, v.configuration_revision_id, v.binding_json, v.configuration_json, frame_open(v.api_key) AS api_key, v.created_at AS version_created_at FROM text_model_entries e JOIN text_model_versions v ON v.configuration_revision_id = e.current_configuration_revision_id ORDER BY e.created_at ASC, e.id ASC",
   ).all() as (TextEntryRow & TextVersionRow & { entry_id: string; version_created_at: string })[])
     .map(row => ({
       entry: { id: row.entry_id, name: row.name, features_json: row.features_json, current_configuration_revision_id: row.current_configuration_revision_id, created_at: row.created_at },
-      version: { configuration_revision_id: row.configuration_revision_id, binding_json: row.binding_json, configuration_json: row.configuration_json, api_key: row.api_key, created_at: row.version_created_at },
+      version: { binding_format: row.binding_format, configuration_revision_id: row.configuration_revision_id, binding_json: row.binding_json, configuration_json: row.configuration_json, api_key: row.api_key, created_at: row.version_created_at },
     }));
   return { revision: settings.revision, defaultEntryId: settings.default_entry_id, entries };
 }
@@ -141,20 +143,21 @@ export function defaultTextBindingOf(db: AgentDatabase): ModelBinding | null {
 }
 
 /** 冻结绑定解析：按原版本找回执行配置与原 Key；找不到说明绑定已不在本部署历史中。 */
-export function resolveTextBinding(db: AgentDatabase, binding: ModelBinding): { execution: StoredTextExecutionConfig; apiKey: string | null } | null {
+export function resolveTextBinding(db: AgentDatabase, binding: ModelBinding): { execution: StoredTextExecutionConfig; apiKey: string | null; bindingFormat: 1 | 2 } | null {
   const version = readVersion(db, binding.configurationRevisionId);
   if (!version || version.binding_json !== canonicalJson(binding)) return null;
-  return { execution: JSON.parse(version.configuration_json), apiKey: version.api_key };
+  return { execution: JSON.parse(version.configuration_json), apiKey: version.api_key, bindingFormat: version.binding_format };
 }
 
 export function textRegistrationOf(db: AgentDatabase, binding: ModelBinding): PiTextRegistration | null {
   const resolved = resolveTextBinding(db, binding);
   if (!resolved || resolved.apiKey === null) return null;
-  // 退役协议（旧 OpenAI 兼容/Anthropic 文本快照）不能在新版本执行；在途请求按原绑定
-  // 如实失败并提示重发，不静默改投 OpenAI，也不把旧档位解释成新协议能力。
-  if (resolved.execution.protocol !== "openai-responses") return null;
+  const { protocol } = resolved.execution;
+  // 旧库退役的绑定继续只供追溯。重新保存连接才能签发可执行的新绑定。
+  if (protocol !== "openai-responses" && (resolved.bindingFormat === 1
+    || (protocol !== "anthropic-messages" && protocol !== "openai-completions"))) return null;
   return {
-    protocol: "openai-responses",
+    protocol,
     baseUrl: resolved.execution.baseUrl,
     modelId: resolved.execution.modelId,
     contextWindowTokens: resolved.execution.contextWindowTokens,

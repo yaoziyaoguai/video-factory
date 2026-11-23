@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { it } from "node:test";
 import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assembly.js";
 import { FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot } from "../src/server/agent/offline.js";
-import { LocalRenderPort, localRenderAvailability } from "../src/server/agent/local-render.js";
+import { isMatchingFrameRate, LocalRenderPort, localRenderAvailability } from "../src/server/agent/local-render.js";
 import { realRenderValidator } from "../src/server/agent/media-config.js";
 import { probeVideoFile } from "../src/server/agent/media-probe.js";
 import { blobSources, recordBlobSources } from "../src/server/agent/material-store.js";
@@ -116,8 +116,12 @@ function historicalLocalProposal(runtime: AgentRuntime, conversationId: string, 
   const scope = { ownerId: "local-owner", conversationId };
   const requestSource = runtime.database.prepare("SELECT id AS requestId, message_id AS messageId FROM requests WHERE conversation_id=? ORDER BY rowid DESC LIMIT 1")
     .get(conversationId) as { requestId: string; messageId: string };
-  const freeze = (operation: ProductionIntent["operations"][number]): OperationSpec => ({ ...operation,
-    quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" });
+  const freeze = (operation: ProductionIntent["operations"][number]): OperationSpec => {
+    assert.ok(operation.kind === "render" && operation.parameters.assembly === "ordered_concat");
+    const { width, height, fps } = operation.parameters;
+    assert.ok(width && height && fps, "历史运行保存了确切的画幅");
+    return { ...operation, parameters: { ...operation.parameters, width, height, fps }, quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" };
+  };
   const [first, ...rest] = intent.operations;
   const spec: ProductionSpec = { ...intent, type: "paid_production", requestSource,
     inputSources: intent.inputSources.map(source => resolveContentSource(runtime.database, scope, source)),
@@ -322,12 +326,12 @@ it("C1-04：文件完成而业务未提交的窗口——重启后 query 发现�
     const probeRuntime = await buildRuntime(assets.directory, staticClock, (blobs, db) => new LocalRenderPort(db, blobs, staticClock, { workRoot: assets.workRoot }));
     try {
       const blobs = probeRuntime.production!.blobs;
-      const persistFromFile = blobs.persistFromFile;
+      const persistFromFile = blobs.persistFromFileAsync;
       const port = new LocalRenderPort(probeRuntime.database, blobs, staticClock, { workRoot: assets.workRoot });
-      blobs.persistFromFile = () => { throw new Error("synthetic persist failure"); };
+      blobs.persistFromFileAsync = () => { throw new Error("synthetic persist failure"); };
       try {
         await assert.rejects(port.query({ kind: "local", runId, operationId: attempt.operation_id, attemptId: attempt.id, requestIdentity: attempt.request_identity }), /synthetic persist failure/);
-      } finally { blobs.persistFromFile = persistFromFile; }
+      } finally { blobs.persistFromFileAsync = persistFromFile; }
       assert.equal((probeRuntime.database.prepare("SELECT COUNT(*) AS n FROM production_attempt_outputs").get() as { n: number }).n, 0);
     } finally { await probeRuntime.close(); }
     // 第二段装配：真实端口按“收据缺失但成品在位”路径恢复。
@@ -383,16 +387,16 @@ it("C1-04：无退出证据——稳定 unknown 且跨重启保留本地占用�
 });
 
 
-it("C1 审计：本地拼接只启用 1280×720 / 24fps / 一次尝试", async () => {
+it("C1：拒绝超出像素上限、奇数宽度及多次创建的本地拼接", async () => {
   const assets = await prepareAssets();
   const runtime = await buildRuntime(assets.directory, staticClock, (blobs, db) => new LocalRenderPort(db, blobs, staticClock, { workRoot: assets.workRoot }));
   try {
     const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "输出范围" }).conversation;
     const work = stageWork(runtime, conversation.id, "输出范围视频");
     const clip = mediaRevision(runtime, conversation.id, assets.clipA, 1200);
-    for (const parameters of [{ width: 640, height: 360 }, { fps: 30 }]) {
+    for (const [parameters, code] of [[{ width: 2160, height: 1080 }, "CAPABILITY_UNAVAILABLE"], [{ width: 641, height: 360 }, "INVALID_INPUT"]] as const) {
       await assert.rejects(() => admitLocalIntent(runtime, { ownerId: "local-owner", conversationId: conversation.id }, renderIntent(work, [clip], parameters)),
-        (error: { code?: string }) => error.code === "CAPABILITY_UNAVAILABLE");
+        (error: { code?: string }) => error.code === code);
     }
     const multipleAttempts = localRenderIntentOf(renderIntent(work, [clip]));
     const verdict = validatorFor("ToolRenderProject")({ ...multipleAttempts,
@@ -421,7 +425,7 @@ it("C1 审计：收窄能力后，旧提案不能继续受理不再支持的输�
     const work = stageWork(first, conversation.id, "旧规格视频");
     const clip = mediaRevision(first, conversation.id, assets.clipA, 1200);
     const proposal = historicalLocalProposal(first, conversation.id,
-      renderIntent(work, [clip], { width: 640, height: 360 }));
+      renderIntent(work, [clip], { width: 2160, height: 1080 }));
     assert.equal(proposal.state, "ready", "历史 ¥0 提案仍可读取");
     await first.close();
     second = await buildRuntime(assets.directory, staticClock, (blobs, db) =>
@@ -566,4 +570,13 @@ it("T3 来源回归：A/B/A 合成、成片再合成与同图依赖输出均继�
       }
     }
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
+});
+
+it("ISS-13 容许容器平均帧率微差，同时要求标称帧率与平均帧率都匹配", () => {
+  for (const value of [23.98, 23.999, 24, 24.001, 24.02]) {
+    assert.ok(isMatchingFrameRate({ nominalFrameRate: value, frameRate: value }, 24));
+  }
+  for (const avg of [23.5,24.5]) assert.ok(isMatchingFrameRate({ nominalFrameRate: 24, frameRate: avg }, 24));
+  for (const nominal of [15,23.94,24.06,30,null]) assert.equal(isMatchingFrameRate({ nominalFrameRate: nominal, frameRate: 24 }, 24), false);
+  for (const avg of [15,23.499,24.501,30,null]) assert.equal(isMatchingFrameRate({ nominalFrameRate: 24, frameRate: avg }, 24), false);
 });

@@ -27,12 +27,29 @@ export function encodeListCursor(payload: ListCursorPayload): string {
   return encode(payload);
 }
 
+const PHASE_SIZE = 2 ** 32;
+
+export function encodePhasedPos(phase: 0 | 1, rowId: number): number {
+  if (!Number.isSafeInteger(rowId) || rowId < 0 || rowId >= PHASE_SIZE) {
+    throw new AgentError("INVALID_INPUT", "作品库分页位置超出范围。");
+  }
+  return phase * PHASE_SIZE + rowId;
+}
+
+export function decodePhasedPos(position: number): { phase: 0 | 1; rowId: number } {
+  if (!Number.isSafeInteger(position) || position < 0 || position >= 2 * PHASE_SIZE) {
+    throw new AgentError("INVALID_INPUT", "作品库分页位置无效，请重新读取。");
+  }
+  return position < PHASE_SIZE ? { phase: 0, rowId: position } : { phase: 1, rowId: position - PHASE_SIZE };
+}
+
 export function decodeListCursor(cursor: string, conversationId: string, collection: CollectionKind): ListCursorPayload {
   const value = decode(cursor) as Partial<ListCursorPayload>;
   if (!value || typeof value !== "object" || value.v !== 1 || typeof value.c !== "string" || typeof value.k !== "string"
     || typeof value.p !== "number" || typeof value.w !== "number" || !Number.isSafeInteger(value.p) || !Number.isSafeInteger(value.w)) {
     throw new AgentError("INVALID_INPUT", "列表游标格式不正确，请重新获取。");
   }
+  if (collection === "library" && value.k === collection && value.c !== conversationId) throw new AgentError("NOT_FOUND", "没有找到这页作品。");
   if (value.c !== conversationId || value.k !== collection) {
     throw new AgentError("FORBIDDEN", "游标不属于这个会话或集合。");
   }

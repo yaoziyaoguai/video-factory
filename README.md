@@ -44,6 +44,8 @@ STUDIO_DEV=1 STUDIO_HOST=127.0.0.1 STUDIO_PORT=4478 npm run studio:start
 | Pi 与业务服务的职责、存储和制作流程 | [架构设计](docs/agent/architecture.md) |
 | HTTP、事件流、类型和工具边界 | [接口索引](contracts/agent/v1/IMPORT.md) · [OpenAPI](contracts/agent/v1/openapi.json) · [JSON Schema](contracts/agent/v1/contracts.schema.json) |
 | GitHub Actions、生产配置、备份与回滚 | [部署手册](docs/guides/deployment.md) |
-| 查询已退役的 Video Factory 架构 | [过期文档](docs/过期文档/README.md) |
+| 查询已退役的 Video Factory 架构 | [历史架构存档](https://github.com/yaoziyaoguai/video-factory/tree/74a4580eff12e3a62ad78f8613cfb8efa0f4ee83/docs/过期文档) |
 
 `npm run contracts:check` 离线检查接口、样例与生成类型。`npm test` 运行仓库测试；只验工作台可在构建后运行 `npm run test:agent --workspace @video-factory/studio`。这些测试不需要真实模型凭据。
+
+构建后运行 `npm run perf:frame`。同一台环回离线服务交替提供原始和 Brotli 静态资源，浏览器每次使用独立上下文并记录实际响应编码。首屏采样 10 对，发送采样 40 对。原始数据和两侧的截图在 `perf/.local/`。使用现有 Playwright 环境时，通过 `PLAYWRIGHT_MODULE_PATH` 指定模块目录，通过 `PLAYWRIGHT_EXECUTABLE_PATH` 指定 Chrome 或 Chromium 可执行文件。
