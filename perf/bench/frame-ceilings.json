@@ -3,8 +3,9 @@
   "profile": "Fast4G 20ms/4Mbps/3Mbps, CPUx1, cache off",
   "gates": {
     "open::ready_p75": 544.8,
-    "open::fontReady_p75": 2390.6,
-    "open::inputReadyMs_p75": 588.5
+    "open::fontReady_p75": 899.9,
+    "open::inputReadyMs_p75": 588.5,
+    "open::cssBytes_p75": 89999
   },
   "reference": {
     "open::jsBytes": 516157,
@@ -95,6 +96,15 @@
       "source": "perf/.local/paired-r6-v3.json",
       "n": 20,
       "method": "min(old, pct(B raw samples, 0.75))"
+    },
+    {
+      "baseline": "frame-system-cjk",
+      "gates": {
+        "open::fontReady_p75": 899.9,
+        "open::cssBytes_p75": 89999
+      },
+      "source": "OPT-05 Fast4G 验收上限",
+      "date": "2026-11-22"
     }
   ]
 }

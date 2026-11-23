@@ -1,4 +1,4 @@
-import type { ArtifactDraft, ArtifactHead, ContentSource, Conversation, FeedbackInput, LibrarySelection, MaterialBatchIndexItem, Message, Proposal, RevisionRef, Run, Work } from "../../shared/agent/generated/contracts.js";
+import type { ArtifactDraft, ArtifactHead, ContentSource, Conversation, FeedbackInput, LibrarySelection, MaterialBatchIndexItem, Message, Proposal, RevisionRef, Run, UploadAttachment, Work } from "../../shared/agent/generated/contracts.js";
 
 // 工作台状态合并规则（纯函数，可独立测试）：
 // - 一律按 id + 实体版本合并，旧版本不覆盖新版本（旧页晚到、重复乱序事件都吸收）；
@@ -15,10 +15,14 @@ export interface DraftState {
   text: string;
   targetArtifactId: string | null;
   targetRevisionId: string | null;
+  /** DECISION-01：舞台「在对话中改这版」带入的作品与片段上下文；仅预填聊天草稿，非确认动作。 */
+  targetWorkId?: string | null;
+  targetSegment?: { runId: string; segmentId: string } | null;
   proposalId?: string | null;
   proposalDigest?: string | null;
   /** G4-2：随下一条 new 请求携带的作品库选材；steer 不携带。 */
   librarySelections?: LibraryPick[];
+  uploads?: UploadAttachment[];
 }
 
 export interface OutputNotices {
@@ -133,7 +137,10 @@ export function savePanelLayout(layout: PanelLayout): void {
 
 // —— 草稿 —— 按会话持久；绑定目标随草稿一起保存，切换会话/刷新不丢（A-07）。
 
-const DRAFT_PREFIX = "vf:agent-draft:";
+export function agentStorageKey(section: string, id: string, ownerId?: string): string {
+  return ownerId === undefined ? "vf:agent-" + section + ":" + id
+    : "vf:agent:" + encodeURIComponent(ownerId) + ":" + section + ":" + id;
+}
 
 // G4-2 作品库“带入对话”可能连续触发（同一会话多次选材）：同一来源定稿下的同一素材/工程文件只保留一份。
 const libraryPickKey = ({ selection: { source, sourceVideo } }: LibraryPick) => JSON.stringify([
@@ -148,42 +155,50 @@ export function mergeLibraryPicks(existing: readonly LibraryPick[] | undefined, 
   return [...(existing ?? []), ...incoming.filter(pick => !seen.has(libraryPickKey(pick)))];
 }
 
-export function draftStorageKey(conversationId: string): string {
-  return `${DRAFT_PREFIX}${conversationId}`;
+export function draftStorageKey(conversationId: string, ownerId?: string): string {
+  return agentStorageKey("draft", conversationId, ownerId);
 }
 
-export function saveDraft(conversationId: string, draft: DraftState): void {
+export function saveDraft(conversationId: string, draft: DraftState, ownerId?: string): void {
   try {
-    window.localStorage.setItem(draftStorageKey(conversationId), JSON.stringify(draft));
+    window.localStorage.setItem(draftStorageKey(conversationId, ownerId), JSON.stringify(draft));
   } catch {
     // 隐私模式/存储被禁时草稿只留在内存里。
   }
 }
 
-export function loadDraft(conversationId: string): DraftState | null {
+export function loadDraft(conversationId: string, ownerId?: string): DraftState | null {
   try {
-    const raw = window.localStorage.getItem(draftStorageKey(conversationId));
+    const raw = window.localStorage.getItem(draftStorageKey(conversationId, ownerId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DraftState>;
     if (typeof parsed.text !== "string") return null;
     const picks = Array.isArray(parsed.librarySelections)
       ? parsed.librarySelections.filter(pick => typeof pick?.label === "string" && !!pick.selection?.source && !!pick.selection?.sourceVideo)
       : [];
+    const uploads = Array.isArray(parsed.uploads) ? parsed.uploads.filter(item => item?.source?.artifactId && item.source.revisionId
+      && typeof item.blobId === "string" && typeof item.mimeType === "string" && typeof item.facts?.fileName === "string"
+      && typeof item.facts.sizeBytes === "number" && item.facts.rights === "owned_or_licensed") : [];
     return {
       text: parsed.text,
       targetArtifactId: typeof parsed.targetArtifactId === "string" ? parsed.targetArtifactId : null,
       targetRevisionId: typeof parsed.targetRevisionId === "string" ? parsed.targetRevisionId : null,
+      targetWorkId: typeof parsed.targetWorkId === "string" ? parsed.targetWorkId : null,
+      targetSegment: parsed.targetSegment && typeof parsed.targetSegment === "object"
+        && typeof parsed.targetSegment.runId === "string" && typeof parsed.targetSegment.segmentId === "string"
+        ? { runId: parsed.targetSegment.runId, segmentId: parsed.targetSegment.segmentId } : null,
       ...(typeof parsed.proposalId === "string" && typeof parsed.proposalDigest === "string" ? { proposalId: parsed.proposalId, proposalDigest: parsed.proposalDigest } : {}),
       ...(picks.length ? { librarySelections: picks } : {}),
+      ...(uploads.length ? { uploads } : {}),
     };
   } catch {
     return null;
   }
 }
 
-export function clearDraft(conversationId: string): void {
+export function clearDraft(conversationId: string, ownerId?: string): void {
   try {
-    window.localStorage.removeItem(draftStorageKey(conversationId));
+    window.localStorage.removeItem(draftStorageKey(conversationId, ownerId));
   } catch {
     // 同上：读不到存储就跳过。
   }
@@ -205,15 +220,13 @@ export interface ReadingView {
   batchId: string | null;
 }
 
-const READING_KEY = "vf:agent-reading:";
-
-function readingStorageKey(conversationId: string): string {
-  return `${READING_KEY}${conversationId}`;
+function readingStorageKey(conversationId: string, ownerId?: string): string {
+  return agentStorageKey("reading", conversationId, ownerId);
 }
 
-export function loadReadingView(conversationId: string): ReadingView | null {
+export function loadReadingView(conversationId: string, ownerId?: string): ReadingView | null {
   try {
-    const raw = window.localStorage.getItem(readingStorageKey(conversationId));
+    const raw = window.localStorage.getItem(readingStorageKey(conversationId, ownerId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<ReadingView> & { view?: unknown };
     const artifactId = typeof parsed.artifactId === "string" ? parsed.artifactId : null;
@@ -234,17 +247,17 @@ export function loadReadingView(conversationId: string): ReadingView | null {
   }
 }
 
-export function saveReadingView(conversationId: string, view: ReadingView): void {
+export function saveReadingView(conversationId: string, view: ReadingView, ownerId?: string): void {
   try {
-    window.localStorage.setItem(readingStorageKey(conversationId), JSON.stringify(view));
+    window.localStorage.setItem(readingStorageKey(conversationId, ownerId), JSON.stringify(view));
   } catch {
     // 存储不可用时阅读位置只在本次会话生效。
   }
 }
 
-export function clearReadingView(conversationId: string): void {
+export function clearReadingView(conversationId: string, ownerId?: string): void {
   try {
-    window.localStorage.removeItem(readingStorageKey(conversationId));
+    window.localStorage.removeItem(readingStorageKey(conversationId, ownerId));
   } catch {
     // 同上。
   }
@@ -264,12 +277,10 @@ export interface StageReading {
   batchId: string | null;
 }
 
-const STAGE_READING_KEY = "vf:agent-stage-reading:";
-
-export function loadStageReading(conversationId: string): StageReading {
+export function loadStageReading(conversationId: string, ownerId?: string): StageReading {
   const empty: StageReading = { groupByWork: {}, itemByGroup: {}, revisionByItem: {}, batchId: null };
   try {
-    const raw = window.localStorage.getItem(`${STAGE_READING_KEY}${conversationId}`);
+    const raw = window.localStorage.getItem(agentStorageKey("stage-reading", conversationId, ownerId));
     if (!raw) return empty;
     const parsed = JSON.parse(raw) as Partial<StageReading>;
     const groupByWork: Record<string, string> = {};
@@ -293,9 +304,9 @@ export function loadStageReading(conversationId: string): StageReading {
   }
 }
 
-export function saveStageReading(conversationId: string, reading: StageReading): void {
+export function saveStageReading(conversationId: string, reading: StageReading, ownerId?: string): void {
   try {
-    window.localStorage.setItem(`${STAGE_READING_KEY}${conversationId}`, JSON.stringify(reading));
+    window.localStorage.setItem(agentStorageKey("stage-reading", conversationId, ownerId), JSON.stringify(reading));
   } catch {
     // 同草稿：不可写时仅本次会话生效。
   }
@@ -309,11 +320,9 @@ export interface StageFeedbackDraft {
   command: FeedbackInput;
 }
 
-const STAGE_FEEDBACK_KEY = "vf:agent-stage-feedback:";
-
-export function loadStageFeedbackDrafts(conversationId: string): Record<string, StageFeedbackDraft> {
+export function loadStageFeedbackDrafts(conversationId: string, ownerId?: string): Record<string, StageFeedbackDraft> {
   try {
-    const raw = window.localStorage.getItem(`${STAGE_FEEDBACK_KEY}${conversationId}`);
+    const raw = window.localStorage.getItem(agentStorageKey("stage-feedback", conversationId, ownerId));
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const drafts: Record<string, StageFeedbackDraft> = {};
@@ -331,11 +340,11 @@ export function loadStageFeedbackDrafts(conversationId: string): Record<string, 
   }
 }
 
-export function saveStageFeedbackDrafts(conversationId: string, drafts: Record<string, StageFeedbackDraft>): void {
+export function saveStageFeedbackDrafts(conversationId: string, drafts: Record<string, StageFeedbackDraft>, ownerId?: string): void {
   try {
     const hasContent = Object.values(drafts).some(draft => draft.text.trim());
-    if (hasContent) window.localStorage.setItem(`${STAGE_FEEDBACK_KEY}${conversationId}`, JSON.stringify(drafts));
-    else window.localStorage.removeItem(`${STAGE_FEEDBACK_KEY}${conversationId}`);
+    if (hasContent) window.localStorage.setItem(agentStorageKey("stage-feedback", conversationId, ownerId), JSON.stringify(drafts));
+    else window.localStorage.removeItem(agentStorageKey("stage-feedback", conversationId, ownerId));
   } catch {
     // 同上。
   }

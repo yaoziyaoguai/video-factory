@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, Check, ChevronRight, FileText, Search, X } from "lucide-react";
-import type { ArtifactHead, ArtifactRevision, ContentSource, ReviewGroup, ReviewItem, Work } from "../../shared/agent/generated/contracts.js";
-import { sameSource } from "./review-content.js";
+import type { ArtifactHead, ArtifactRevision, ContentSource, ReviewGroup, ReviewItem, ReviewRole, Work } from "../../shared/agent/generated/contracts.js";
+import { sameSource, useNearViewport, useStageRevision } from "./review-content.js";
 import { ReviewContentSummary } from "./ReviewContentSummary.js";
 import { RevisionCover } from "./RevisionCover.js";
 import type { ReviewNavigation } from "./WorkStagePanel.js";
@@ -12,6 +12,23 @@ const counts = (work: Work) => {
   const items = work.reviewGroups.flatMap(group => group.items);
   return { pending: items.filter(isPending).length, approved: items.filter(item => item.approved).length };
 };
+
+// UIUX-02 代表封面确定性梯子：只看事项角色，与修订是否已加载无关，异步返回不改变封面选择；
+// subtitle 的封面即字幕摘录文本，与文稿同级；other 兜底同文本档。同分依赖稳定排序按事项原顺序取胜。
+const COVER_ROLE_RANK: Record<ReviewRole, number> = {
+  video: 6, clip: 5, storyboard: 4, scene: 4, character: 4,
+  voice: 2, music: 2, plan: 1, content: 1, subtitle: 1, other: 1,
+};
+
+// 行封面自己按视口读取修订：即使代表媒体折叠在「另 N 项」里，也能拿到海报与时长，不会永久停在「读取中…」。
+function WorkRowCover({ source, revisions, onRevisionLoaded, active }: {
+  source: ContentSource | null; revisions: Record<string, ArtifactRevision>;
+  onRevisionLoaded: (revision: ArtifactRevision) => void; active: boolean;
+}) {
+  const [coverRef, visible] = useNearViewport<HTMLSpanElement>();
+  const { revision, error } = useStageRevision(visible ? source : null, revisions, onRevisionLoaded, active);
+  return <RevisionCover ref={coverRef} revision={revision} source={source} unavailable={error} />;
+}
 
 export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, revisions, onRevisionLoaded, artifacts, onOpenArtifact, hasMoreArtifacts = false, onMoreArtifacts, hasMoreWorks = false, onMoreWorks, active = true, children, toolbar }: {
   works: Work[]; selectedWorkId: string | null; onSelectWork: (id: string | null) => void;
@@ -53,9 +70,11 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
   });
   return <div className="agent-work-center" data-view={selected ? "review" : "overview"}>
     <header className="agent-center-toolbar">
-      {selected ? <><button type="button" className="agent-center-back" aria-label={`全部作品 ${works.length} 件`} onClick={() => onSelectWork(null)}><ArrowLeft />全部作品 <small>{works.length} 件</small></button><h2 tabIndex={-1} className="agent-current-work-title" title={selected.title}>{selected.title}</h2></>
+      {selected ? <><button type="button" className="agent-center-back" aria-label={`全部作品 ${works.length} 件`} onClick={() => onSelectWork(null)}><ArrowLeft />全部作品 <small>{works.length} 件</small></button>
+        <div className="agent-work-switch"><h2 tabIndex={-1} className="agent-current-work-title" title={selected.title}>{selected.title}</h2>
+          <select aria-label="切换作品" title="切换作品" value={selected.id} onChange={event => onSelectWork(event.target.value)}>{works.map(work => <option key={work.id} value={work.id}>{work.title}</option>)}</select></div></>
         : <h2>本次对话的作品 <span>{matching.length} 件{hasMoreWorks ? ` / 已载 ${works.length} 件，还有更早` : matching.length !== works.length ? ` / 共 ${works.length} 件` : ""}</span></h2>}
-      {selected ? <label className="agent-work-switch"><select aria-label="切换作品" title="切换作品" value={selected.id} onChange={event => onSelectWork(event.target.value)}>{works.map(work => <option key={work.id} value={work.id}>{work.title}</option>)}</select></label>
+      {selected ? null
         : <div className="agent-center-filters"><label className="agent-center-search"><Search /><input ref={search} aria-label="搜索作品和交付内容" placeholder="搜索作品或内容" value={query} onChange={event => { setQuery(event.target.value); setLimit(PAGE_SIZE); }} />
           {query ? <button type="button" aria-label="清除搜索" onClick={() => { setQuery(""); setLimit(PAGE_SIZE); }}><X /></button> : null}</label>
           <select aria-label="筛选作品" value={filter} onChange={event => { setFilter(event.target.value); setLimit(PAGE_SIZE); }}><option value="all">全部作品</option><option value="pending">有未确认</option><option value="approved">有已确认</option></select></div>}
@@ -71,23 +90,22 @@ export function WorkCenter({ works, selectedWorkId, onSelectWork, onOpenReview, 
       <div className="agent-board-scroll">
         {!matching.length ? <div className="agent-center-empty" role="status"><Search /><h3>{hasMoreWorks ? "已载作品里没有符合条件的" : "没有符合条件的作品"}</h3>{hasMoreWorks ? <button type="button" onClick={() => onMoreWorks?.()}>在更早的作品中搜索</button> : null}<button type="button" onClick={() => { setQuery(""); setFilter("all"); setLimit(PAGE_SIZE); }}>显示全部作品</button></div> : null}
         {visible.map(work => {
-          const candidates = work.reviewGroups.flatMap(group => group.items).map(item => {
-            const source = item.draft ?? item.approved;
-            const revision = source?.kind === "artifact_revision" ? revisions[`${source.artifactId}:${source.revisionId}`] : undefined;
-            const mime = revision?.content.format === "media" ? revision.content.mimeType : "";
-            return { source, revision, rank: mime.startsWith("video/") ? 5 : mime.startsWith("image/") ? 4 : item.role === "video" ? 3 : mime ? 2 : source ? 1 : 0 };
-          });
-          const cover = candidates.sort((a, b) => b.rank - a.rank)[0];
+          const cover = work.reviewGroups.flatMap(group => group.items)
+            .filter(item => (item.draft ?? item.approved) !== null)
+            .sort((a, b) => COVER_ROLE_RANK[b.role] - COVER_ROLE_RANK[a.role])[0] ?? null;
+          const coverSource = cover?.draft ?? cover?.approved ?? null;
+          const progress = counts(work);
           return <section key={work.id} className="agent-work-row" aria-label={work.title}>
           <h4><button type="button" aria-label={`审阅${work.title}`} onClick={() => onSelectWork(work.id)}>
-            <RevisionCover revision={cover?.revision} source={cover?.source} />
-            <span className="agent-row-title">{work.title}</span></button></h4>
+            <WorkRowCover source={coverSource} revisions={revisions} onRevisionLoaded={onRevisionLoaded} active={active} />
+            <span className="agent-row-title">{work.title}</span>
+            <span className="agent-row-progress">{progress.pending > 0 ? `${progress.pending} 项待确认` : progress.approved > 0 ? "全部已确认" : "暂无交付内容"}</span></button></h4>
           <div className="agent-work-row-content">
             {(["pending", "approved"] as const).map(kind => {
               const items = work.reviewGroups.flatMap(group => group.items.filter(item => kind === "pending" ? isPending(item) : item.approved !== null).map(item => ({ group, item })))
                 .sort((a, b) => Number(b.item.role === "video") - Number(a.item.role === "video"));
               return <section key={kind} className={`agent-work-deliveries ${kind}`} aria-label={`${work.title} · ${kind === "pending" ? "未确认" : "已确认"}`}>
-                <div className="agent-delivery-grid">{(expandedLanes[`${work.id}:${kind}`] ? items : items.slice(0, 2)).map(({ group, item }) => <ReviewContentSummary key={`${group.id}:${item.id}`} active={active} item={item} group={group} source={(kind === "pending" ? item.draft : item.approved)!} approved={kind === "approved"} revisions={revisions} onRevisionLoaded={onRevisionLoaded} onOpen={source => openItem(work, group, item, source)} />)}</div>
+                <div className="agent-delivery-grid">{(expandedLanes[`${work.id}:${kind}`] ? items : items.slice(0, 2)).map(({ group, item }) => <ReviewContentSummary key={`${group.id}:${item.id}`} active={active} item={item} group={group} source={(kind === "pending" ? item.draft : item.approved)!} approved={kind === "approved"} revisions={revisions} onRevisionLoaded={onRevisionLoaded} rowCover={coverSource} onOpen={source => openItem(work, group, item, source)} />)}</div>
                 {!items.length ? <p className="agent-lane-empty">{kind === "pending" ? "暂无待确认内容" : "认可后的内容会留在这里"}</p> : null}
                 {items.length > 2 ? <button type="button" className="agent-delivery-more" aria-expanded={!!expandedLanes[`${work.id}:${kind}`]} onClick={() => setExpandedLanes(old => ({ ...old, [`${work.id}:${kind}`]: !old[`${work.id}:${kind}`] }))}>{expandedLanes[`${work.id}:${kind}`] ? "收起" : `另 ${items.length - 2} 项`}<ChevronRight /></button> : null}
               </section>;

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { WorkCenter } from "../src/client/agent/WorkCenter.js";
 import { agentApi, subscribeEvents } from "../src/client/agent/api.js";
 import { ExecutionRecord, TaskProgress } from "../src/client/agent/TaskProgress.js";
-import type { ArtifactRevision, ContentSource, Message, RequestProgress, Work } from "../src/shared/agent/generated/contracts.js";
+import type { ArtifactRevision, ContentSource, Message, RequestProgress, UploadMime, Work } from "../src/shared/agent/generated/contracts.js";
 
 const time = "2026-11-16T10:00:00Z";
 const revision = (work: string, version: number): ArtifactRevision => ({ artifactId: work, revisionId: `${work}-v${version}`, revisionNumber: version, baseRevisionId: null, requestId: null, runId: null, digest: "a".repeat(64), content: { format: "markdown", text: `${work}第${version}版正文` }, createdAt: time });
@@ -83,6 +83,96 @@ it("总览只为进入可见范围的卡片读取修订，失败可重试且不�
   expect(fetch.mock.calls.every(([url]) => String(url).endsWith("/artifacts/lazy/revisions/lazy-v3"))).toBe(true);
 });
 
+// UIUX-02：收集全部 IntersectionObserver 回调（行封面与卡片各自注册观察者），逐一触发进入视口。
+function stubViewportObservers() {
+  const callbacks: IntersectionObserverCallback[] = [];
+  vi.stubGlobal("IntersectionObserver", class { constructor(callback: IntersectionObserverCallback) { callbacks.push(callback); } observe() {} disconnect() {} });
+  return async () => { await act(async () => { for (const callback of [...callbacks]) callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver); }); };
+}
+
+const jsonResponse = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+const mediaRevision = (id: string, version: number, mimeType: UploadMime, durationMs?: number): ArtifactRevision => ({
+  ...revision(id, version), content: { format: "media", blobId: `${id}-file-v${version}`, mimeType, durationMs: durationMs ?? null },
+});
+
+it("UIUX-02 折叠在「另 1 项」里的视频仍是作品封面：行封面独立读取海报与时长角标", async () => {
+  const intersectAll = stubViewportObservers();
+  const fetch = vi.fn(async (input: string | URL) => {
+    const url = String(input);
+    if (url.endsWith("/artifacts/short-cut/revisions/short-cut-v1")) return jsonResponse(mediaRevision("short-cut", 1, "video/mp4", 95000));
+    if (url.endsWith("/artifacts/short-doc/revisions/short-doc-v3")) return jsonResponse(revision("short-doc", 3));
+    throw new Error(`测试未模拟的请求：${url}`);
+  });
+  vi.stubGlobal("fetch", fetch);
+  const film = work("short", "折叠视频");
+  const base = film.reviewGroups[0]!.items[0]!;
+  film.reviewGroups[0]!.items = [
+    { ...base, id: "doc-1", label: "文稿一", draft: source("short-doc", 3) },
+    { ...base, id: "doc-2", label: "文稿二", draft: source("short-doc", 3) },
+    { ...base, id: "cut", label: "视频初稿", role: "video", draft: source("short-cut", 1) },
+  ];
+  render(<WorkCenter {...propsFor([film])} revisions={{}} />);
+  expect(fetch).not.toHaveBeenCalled();
+  await intersectAll();
+  const rowButton = screen.getByRole("button", { name: "审阅折叠视频" });
+  expect(await within(rowButton).findByText("1:35")).toBeVisible();
+  expect(rowButton.querySelector("img")).toHaveAttribute("src", "/api/agent/v1/blobs/short-cut-file-v1/poster");
+  expect(screen.getAllByRole("button", { name: /^另 1 项/ }).length).toBeGreaterThanOrEqual(1);
+  expect(fetch.mock.calls.filter(([url]) => String(url).includes("short-cut"))).toHaveLength(1);
+});
+
+it("UIUX-02 封面选择只看角色先验：未加载的视频胜过已加载的文稿，返回后不换封面", async () => {
+  const intersectAll = stubViewportObservers();
+  let releaseVideo!: (value: ArtifactRevision) => void;
+  const videoPending = new Promise<ArtifactRevision>(resolve => { releaseVideo = resolve; });
+  const fetch = vi.fn(async (input: string | URL) => {
+    if (String(input).endsWith("/artifacts/cut-video/revisions/cut-video-v1")) return jsonResponse(await videoPending);
+    throw new Error(`测试未模拟的请求：${String(input)}`);
+  });
+  vi.stubGlobal("fetch", fetch);
+  const film = work("stable", "不跳变");
+  const base = film.reviewGroups[0]!.items[0]!;
+  film.reviewGroups[0]!.items = [
+    { ...base, id: "doc", label: "文稿", draft: source("doc", 3) },
+    { ...base, id: "cut", label: "视频初稿", role: "video", draft: source("cut-video", 1) },
+  ];
+  render(<WorkCenter {...propsFor([film])} revisions={{ "doc:doc-v3": revision("doc", 3) }} />);
+  await intersectAll();
+  const rowButton = screen.getByRole("button", { name: "审阅不跳变" });
+  // 视频修订悬挂中：封面停在读取中，而不是先闪已加载的文稿摘录。
+  expect(within(rowButton).getByText("读取中…")).toBeVisible();
+  expect(within(rowButton).queryByText("doc第3版正文")).toBeNull();
+  await act(async () => releaseVideo(mediaRevision("cut-video", 1, "video/mp4", 8000)));
+  expect(await within(rowButton).findByText("0:08")).toBeVisible();
+  expect(within(rowButton).queryByText("doc第3版正文")).toBeNull();
+});
+
+it("UIUX-02 总览视觉事项显示缩略图，与行封面同修订的卡片不重复小图", () => {
+  const film = work("thumbs", "缩略图");
+  const base = film.reviewGroups[0]!.items[0]!;
+  film.reviewGroups[0]!.items = [
+    { ...base, id: "cut", label: "视频初稿", role: "video", draft: source("thumbs-cut", 3) },
+    { ...base, id: "board", label: "分镜图", role: "storyboard", draft: source("thumbs-board", 1) },
+  ];
+  const revisions = {
+    "thumbs-cut:thumbs-cut-v3": mediaRevision("thumbs-cut", 3, "video/mp4", 90000),
+    "thumbs-board:thumbs-board-v1": mediaRevision("thumbs-board", 1, "image/png"),
+  };
+  render(<WorkCenter {...propsFor([film])} revisions={revisions} />);
+  const boardVideo = screen.getByRole("button", { name: "审阅视频初稿 v3" });
+  expect(boardVideo.querySelector(".agent-revision-cover")).toBeNull();
+  const boardStory = screen.getByRole("button", { name: "审阅分镜图 v1" });
+  expect(boardStory.querySelector(".agent-revision-cover")).not.toBeNull();
+  expect(boardStory.querySelector("img")).toHaveAttribute("src", "/api/agent/v1/blobs/thumbs-board-file-v1/content");
+});
+
+it("UIUX-02 后台会话的总览（active=false）不发起任何封面或卡片请求", () => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  render(<WorkCenter {...propsFor([work("bg", "后台作品")])} revisions={{}} active={false} />);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
 const message: Message = { id: "message", requestId: "request", role: "user", kind: "chat", text: "继续一杯早晨", state: "running", revision: 1, target: null, feedback: null, librarySelections: [], createdAt: time, createdSequence: 1, references: { artifacts: [], proposalIds: [], runIds: [], materialBatchIds: [] } };
 const progress: RequestProgress = { requestId: "request", sequence: 3, phase: "tool_running", label: "查找素材", updatedAt: time, workId: "coffee", steps: [{ id: "read", label: "核对作品版本", state: "completed", workId: "coffee", updatedAt: time }, { id: "search", label: "查找素材", state: "running", workId: "coffee", updatedAt: time }] };
 const progressProps = () => ({ activeRequestId: "request", messages: [message], progress, runs: [], works: [work("coffee", "一杯早晨")], onStop: vi.fn(async () => true), onOpenRun: vi.fn(), onOpenWork: vi.fn() });
@@ -104,10 +194,9 @@ it.each(["completed", "failed", "stopped"] as const)("%s 的真实执行记录�
 });
 
 it.each([
-  ["finished", "已完成"],
   ["timeout", "已提前结束（超过时间上限）"],
   ["tool_limit", "已提前结束（达到工具调用上限）"],
-] as const)("终态 %s 在刷新后的零工具记录保留真实结果", async (completionReason, label) => {
+] as const)("终态 %s 的零工具记录仍可展开并如实说明", async (completionReason, label) => {
   const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time,
     completionReason, progress: { ...progress, steps: [] } } };
   const first = render(<ExecutionRecord message={saved} />);
@@ -116,6 +205,34 @@ it.each([
   render(<ExecutionRecord message={structuredClone(saved)} />);
   await userEvent.click(screen.getByLabelText(`查看本轮执行记录：${label}`));
   expect(screen.getByText("这轮没有执行工具操作。")).toBeVisible();
+});
+
+it("UIUX-09 正常完成的零工具回合是轻量静态落款：无折叠语义，短回合不报耗时，满 5 秒才显示", () => {
+  const short: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: "2026-11-16T10:00:02Z",
+    completionReason: "finished", progress: { ...progress, steps: [] } } };
+  const ui = render(<ExecutionRecord message={short} />);
+  const line = screen.getByText("已完成", { selector: "p" });
+  expect(line).toHaveClass("agent-execution-static");
+  expect(screen.queryByLabelText("查看本轮执行记录：已完成")).toBeNull();
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.queryByText("这轮没有执行工具操作。")).toBeNull();
+  expect(ui.container.querySelector("time")).toBeNull();
+  ui.unmount();
+  const longer: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: "2026-11-16T10:00:06Z",
+    completionReason: "finished", progress: { ...progress, steps: [] } } };
+  render(<ExecutionRecord message={longer} />);
+  expect(screen.getByText("00:06", { selector: "time" })).toBeVisible();
+  expect(screen.queryByLabelText("查看本轮执行记录：已完成")).toBeNull();
+});
+
+it("UIUX-09 多步回合摘要优先取可归属作品的已完成步骤，不机械取收尾核对", async () => {
+  const saved: Message = { ...message, state: "completed", execution: { startedAt: time, endedAt: time, completionReason: "finished", progress: { ...progress,
+    steps: [
+      { id: "write", label: "编写创作文件", state: "completed", workId: "coffee", updatedAt: time },
+      { id: "verify", label: "核对作品版本", state: "completed", updatedAt: time },
+    ] } } };
+  render(<ExecutionRecord message={saved} works={[work("coffee", "一杯早晨")]} />);
+  expect(screen.getByLabelText("查看本轮执行记录：已完成")).toHaveAttribute("title", "一杯早晨 · 编写创作文件 · 2 项操作");
 });
 
 it("历史执行步骤沿保存的作品归属显示，同名操作在刷新后仍能区分", async () => {

@@ -6,9 +6,10 @@ import type { ContentSource, LibraryMaterial, LibraryProjectFile, ReviewInput } 
 import type { LibraryPick } from "./workspace-state.js";
 import { MarkdownBody, MarkdownText } from "./markdown.js";
 import { AudioSummaryView } from "./AudioSummaryView.js";
-import { RevisionBody } from "./ProductionCards.js";
+import { MediaPreview, ProjectFileDisclosure, RevisionBody } from "./ProductionCards.js";
 import { RevisionCover } from "./RevisionCover.js";
 import { blobUrl, useNearViewport, useStageRevision } from "./review-content.js";
+import "./work-library.css";
 
 // 作品库（§6）：只收用户定稿的最终视频，条目身份是 video.revisionId；
 // 列表只给缩略图/标题/定稿时间，详情给播放/下载、采用的文稿与方案、回到对话。
@@ -56,6 +57,12 @@ function formatFinalized(iso: string): string {
 
 interface LoadState { phase: "loading" | "ready" | "failed"; items: LibraryVideo[]; nextCursor: string | null }
 
+function mergeLibraryPages(current: LibraryVideo[], incoming: LibraryVideo[]): LibraryVideo[] {
+  const revisions = new Map(current.map(item => [item.video.revisionId, item]));
+  for (const item of incoming) revisions.set(item.video.revisionId, item);
+  return Array.from(revisions.values());
+}
+
 export function WorkLibrary({ onBringIn, bringTarget }: { onBringIn: (picks: LibraryPick[]) => void; bringTarget: "current" | "new" }) {
   const [load, setLoad] = useState<LoadState>({ phase: "loading", items: [], nextCursor: null });
   const [loadingMore, setLoadingMore] = useState(false);
@@ -74,7 +81,7 @@ export function WorkLibrary({ onBringIn, bringTarget }: { onBringIn: (picks: Lib
     setLoadingMore(true);
     try {
       const page = await agentApi.listLibraryVideos(load.nextCursor);
-      setLoad(current => ({ phase: "ready", items: [...current.items, ...page.items], nextCursor: page.nextCursor }));
+      setLoad(current => ({ phase: "ready", items: mergeLibraryPages(current.items, page.items), nextCursor: page.nextCursor }));
     } catch { /* 下一页读取失败保留当前列表，重试由用户再次触发。 */ }
     finally { setLoadingMore(false); }
   };
@@ -156,11 +163,8 @@ function LibraryDetail({ entry, bringTarget, onBringIn, onBack }: { entry: Libra
     </header>
     <p className="agent-library-finalized">定稿于 {formatFinalized(entry.finalizedAt)}</p>
     <div className="agent-preview-body">
-      {video.revision && video.revision.content.format === "media"
-        ? <div className="agent-preview-media">
-          <video controls preload="metadata" src={blobUrl(video.revision.content.blobId)} poster={blobUrl(video.revision.content.blobId, "poster")} aria-label="定稿视频" />
-          <a href={blobUrl(video.revision.content.blobId)} download>下载文件</a>
-        </div>
+      {video.revision?.archivedAt ? <p role="status" className="agent-stage-muted">这版定稿媒体已归档。</p> : video.revision?.content.format === "media"
+        ? <MediaPreview key={video.revision.revisionId} revision={video.revision} content={video.revision.content} simulated={false} finalized mainProject={entry.project} projects={libraryFileGroups(entry).map(group => group.files[0]!.project)} />
         : video.failed ? <p className="agent-field-error" role="alert">这条定稿的视频读取失败，请刷新重试。</p>
           : <p className="agent-stage-muted">正在读取视频…</p>}
       {entry.audioSummary ? <AudioSummaryView summary={entry.audioSummary} title="定稿视频的声音" /> : null}
@@ -225,7 +229,8 @@ function LibraryPickLists({ entry, pickedKeys, onToggle }: { entry: LibraryVideo
       {fileGroups.length > 1 ? <li className="agent-library-project-group">{index === 0 && group.main ? "主工程" : `来源工程 ${index + 1}`}</li> : null}
       {group.files.map(file => {
         const key = `f:${file.project.revisionId}:${file.relativePath}`;
-        return <li key={key}><label><input type="checkbox" checked={pickedKeys.includes(key)} onChange={() => onToggle(key)} />{file.relativePath}<small>{file.mimeType}</small></label></li>;
+        return <li key={key}><label><input type="checkbox" checked={pickedKeys.includes(key)} onChange={() => onToggle(key)} />{file.relativePath}<small>{file.mimeType}</small></label>
+          <ProjectFileDisclosure file={file} label="预览与下载" /></li>;
       })}
     </ul>) : null}
   </>;
@@ -254,7 +259,7 @@ function LibraryMaterialPreview({ material }: { material: LibraryMaterial }) {
         : material.kind === "image" ? <img src={blobUrl(source.blobId)} alt={material.label} loading="lazy" />
         : material.kind === "audio" ? <audio controls preload="metadata" src={blobUrl(source.blobId)} aria-label="音频预览" /> : null}
       <a href={blobUrl(source.blobId)} download>下载文件</a>
-    </div> : read.revision ? <RevisionBody content={read.revision.content} simulated={false} />
+    </div> : read.revision ? <RevisionBody revision={read.revision} simulated={false} />
       : read.failed ? <p role="status">素材读取失败。<button type="button" onClick={() => setAttempt(value => value + 1)}>重试读取素材</button></p>
       : <p className="agent-stage-muted">正在读取…</p> : null}
   </details>;
@@ -286,7 +291,7 @@ function LibraryReviewSource({ input, ordinal }: { input: ReviewInput; ordinal: 
       ? <div className="agent-library-text"><MarkdownText text={source.text} /></div>
       : read.state === "ready" ? <div className="agent-library-text">
         {read.revision.content.format === "media" ? <p className="agent-stage-muted">真实或模拟来源未知</p> : null}
-        <RevisionBody content={read.revision.content} simulated={false} />
+        <RevisionBody revision={read.revision} simulated={false} />
       </div>
         : read.state === "failed" ? <p className="agent-field-error" role="alert">这条制作依据读取失败。</p>
           : <p className="agent-stage-muted">正在读取…</p>}
@@ -312,7 +317,7 @@ export function LibraryPickerDialog({ onClose, onConfirm }: { onClose: () => voi
     if (!load.nextCursor) return;
     try {
       const page = await agentApi.listLibraryVideos(load.nextCursor);
-      setLoad(current => ({ phase: "ready", items: [...current.items, ...page.items], nextCursor: page.nextCursor }));
+      setLoad(current => ({ phase: "ready", items: mergeLibraryPages(current.items, page.items), nextCursor: page.nextCursor }));
     } catch { /* 翻页失败保留当前列表，重试由用户再次触发。 */ }
   };
   const entry = load.items.find(item => item.video.revisionId === openRevisionId) ?? null;

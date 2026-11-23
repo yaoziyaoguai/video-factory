@@ -1,17 +1,19 @@
+import { ConversationCache, RevisionCache } from "../src/client/agent/reading-cache.js";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentWorkbench } from "../src/client/agent/AgentWorkbench.js";
+import { agentApi } from "../src/client/agent/api.js";
 import { ProposalCard } from "../src/client/agent/AgentWorkbench.js";
 import { MarkdownText } from "../src/client/agent/markdown.js";
-import { FilePreview, MediaPreview, RunCard } from "../src/client/agent/ProductionCards.js";
+import { FilePreview, MediaPreview, ProjectPreview, RunCard } from "../src/client/agent/ProductionCards.js";
 import {
   appendNotice, clearDraft, draftStorageKey, loadDraft, loadPanelLayout, mergeArtifacts, mergeLibraryPicks, mergeMessages, mergeProposals, saveDraft, savePanelLayout,
   type LibraryPick,
 } from "../src/client/agent/workspace-state.js";
 import type {
-  ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, LegacyProductionSpec, LibraryVideo, MaterialBatch, Message, MessageInput, ProductionSpec, Snapshot, Proposal, Run, SkillPackagesView, Work,
+  ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, LegacyProductionSpec, LibraryVideo, MaterialBatch, Message, MessageInput, ProductionSpec, Snapshot, Proposal, Run, SkillPackagesView, UploadAttachment, UploadReceipt, Work,
 } from "../src/shared/agent/generated/contracts.js";
 
 // 工作台纯逻辑（合并/预览策略/草稿/布局）+ 组件冒烟：API 与 SSE 全部打桩，浏览器端真实交互留给 A6 手工验证。
@@ -127,7 +129,7 @@ function libraryVideoFixture(options: Partial<LibraryVideo> = {}): LibraryVideo 
     content: null,
     originMessageId: "msg-src",
     narrationText: null,
-    projectFiles: [{ project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" }, relativePath: "main.cjs", mimeType: "text/javascript" }],
+    projectFiles: [{ project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" }, relativePath: "main.cjs", mimeType: "text/javascript", blobId: "blob-lib-code", sizeBytes: 57 }],
     project: { artifactId: "art-lib-proj", revisionId: "rev-lib-proj" },
     materials: [{ source: { artifactId: "art-lib-mat", revisionId: "rev-lib-mat" }, label: "山路", kind: "prompt", provenance: [] }],
     reviewSources: [],
@@ -183,6 +185,8 @@ it("PC 左侧导航往返设置和当前会话，保留草稿且不新建会话"
   await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "先保留这条意见");
   const navigation = within(screen.getByRole("navigation", { name: "主导航" }));
   await userEvent.click(navigation.getByRole("button", { name: "打开模型配置" }));
+  // 点击才触发设置模块的动态导入，等待该次导入完成后验证用户看到的页面。
+  await act(async () => { await vi.dynamicImportSettled(); });
   await screen.findByRole("region", { name: "模型配置" });
   await userEvent.click(navigation.getByRole("button", { name: "返回当前对话" }));
   expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("先保留这条意见");
@@ -201,7 +205,7 @@ it("Oracle P2-01 SSE 仍连接时局部补读失败不禁用停止", async () =>
   const snapshot = snapshotFixture(conversation, { messages: [request] }); snapshot.activeRequestId = request.requestId;
   let fail = false;
   const calls = installWorkbenchRoutes({ conversations: [conversation], snapshots: { [conversation.id]: snapshot }, onRequest: (url, call) => {
-    if (url.endsWith("/messages/active-user")) return { status: 200, body: request };
+    if (url.endsWith("/messages/active-user")) return fail ? {status:503,body:{code:"UNAVAILABLE",message:"实体读取失败"}} : { status: 200, body: request };
     if (fail && url.endsWith("/snapshot")) return { status: 503, body: { code: "UNAVAILABLE", message: "一次快照读取失败" } };
     if (call.method === "POST" && url.endsWith("/stop")) { fail = false; request.state = "stopped"; request.revision++; snapshot.activeRequestId = null; return { status: 202, body: { requestId: request.requestId, state: "stopped" } }; }
     return null;
@@ -232,8 +236,11 @@ it("PC 多个业务事件合并快照，流式新答复替换前文且进展只�
   await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
   const source = FakeEventSource.instances.find(item => !item.closed)!;
   const snapshotsBefore = calls.filter(call => call.url.endsWith("/snapshot")).length;
-  for (let index = 0; index < 6; index++) source.emit("business", { eventId: `change-${index}`, kind: "message.changed", entityId: message.id, entityVersion: index + 2 });
-  await waitFor(() => expect(calls.filter(call => call.url.endsWith("/snapshot")).length).toBe(snapshotsBefore + 1));
+  for (let index = 0; index < 12; index++) source.emit("business", { eventId: `change-${index}`, kind: "message.changed", entityId: message.id, entityVersion: index + 2 });
+  await waitFor(() => expect(calls.filter(call => call.url.endsWith(`/messages/${message.id}`)).length).toBe(12));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 160)); });
+  expect(snapshotsBefore).toBe(1);
+  expect(calls.filter(call => call.url.endsWith("/snapshot"))).toHaveLength(1);
   source.emit("request.progress", { requestId: message.requestId, sequence: 1, phase: "tool_running", label: "搜索素材", updatedAt: new Date().toISOString() });
   expect(await screen.findByText("正在搜索素材")).toBeInTheDocument();
   const activity = screen.getByRole("region", { name: "当前进展" });
@@ -286,6 +293,67 @@ const REVISION_FIXTURE: ArtifactRevision = {
   content: { format: "markdown", text: "# 第一版\n\n这是交付内容。" },
   createdAt: "2026-01-01T00:00:00.000Z",
 };
+
+it("同一条助手消息连续三次变更共用补读，与交付并行时每份产物只读一次", async () => {
+  const conversation = conversationFixture("three-deliveries", "一次交付三份稿件");
+  const heads = [1, 2, 3].map(i => artifactFixture(`script-${i}`, `脚本 ${i}`, `script-${i}-v1`, 1));
+  const refs = () => heads.map(head => ({ artifactId: head.id, revisionId: head.revisionId }));
+  const answer = messageFixture({ id: "three-scripts", role: "assistant", text: "本轮已交付三份稿件", revision: 3,
+    references: { artifacts: refs(), proposalIds: [], runIds: [], materialBatchIds: [] } });
+  let releaseHeads!: () => void, releaseAnswer!: () => void;
+  const headsPending = new Promise<void>(resolve => { releaseHeads = resolve; });
+  const answerPending = new Promise<void>(resolve => { releaseAnswer = resolve; });
+  const calls = installWorkbenchRoutes({ conversations: [conversation], onRequest: async url => {
+    if (url.endsWith("/messages/three-scripts")) { await answerPending; return { status: 200, body: answer }; }
+    const head = heads.find(item => url.endsWith("/artifacts/" + item.id));
+    if (head) { await headsPending; return { status: 200, body: head }; }
+    const exact = heads.find(item => url.endsWith("/revisions/" + item.revisionId));
+    if (exact) return { status: 200, body: { ...REVISION_FIXTURE, artifactId: exact.id, revisionId: exact.revisionId, revisionNumber: exact.revisionNumber } };
+    return null;
+  } });
+  renderAt("/agent/" + conversation.id);
+  await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
+  const source = FakeEventSource.instances.find(item => !item.closed)!;
+  for (const head of heads) source.emit("business", { eventId: head.id, kind: "artifact.delivered", entityId: head.id, entityVersion: 1, notification: "new_output" });
+  const change = (version: number) => source.emit("business", { eventId: "answer-" + version, kind: "message.changed", entityId: answer.id, entityVersion: version });
+  change(1); change(2); change(3);
+  await act(async () => releaseAnswer());
+  expect(calls.filter(call => call.url.endsWith("/messages/three-scripts"))).toHaveLength(1);
+  for (const head of heads) expect(calls.filter(call => call.url.endsWith("/artifacts/" + head.id))).toHaveLength(1);
+  await act(async () => releaseHeads());
+  await screen.findByText(answer.text);
+  for (const head of heads) expect(calls.filter(call => call.url.endsWith("/revisions/" + head.revisionId))).toHaveLength(1);
+
+  heads[0] = artifactFixture("script-1", "修改后的开场", "script-1-v2", 2);
+  answer.text = "开场已更新"; answer.revision = 4; answer.references.artifacts = refs();
+  change(4);
+  await screen.findByText(answer.text);
+  expect(await screen.findByText("现名：修改后的开场", { selector: ".agent-references small" })).toBeInTheDocument();
+  expect(calls.filter(call => call.url.endsWith("/messages/three-scripts"))).toHaveLength(2);
+  expect(heads.map(head => calls.filter(call => call.url.endsWith("/artifacts/" + head.id)).length)).toEqual([2, 1, 1]);
+});
+
+it("助手补读已经取到旧响应时，后到的版本会再读并显示最新正文", async () => {
+  const conversation = conversationFixture("later-message", "按消息版本追上");
+  const answer = messageFixture({ id: "still-changing", role: "assistant", text: "第一段", revision: 1 });
+  const readers: Array<(response: RouteResult) => void> = [];
+  installWorkbenchRoutes({ conversations: [conversation], onRequest: url => url.endsWith("/messages/still-changing")
+    ? new Promise<RouteResult>(resolve => { readers.push(resolve); }) : null });
+  renderAt("/agent/" + conversation.id);
+  await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
+  const source = FakeEventSource.instances.find(item => !item.closed)!;
+  const change = (version: number) => source.emit("business", { eventId: "answer-" + version, kind: "message.changed", entityId: answer.id, entityVersion: version });
+  change(1); change(2); change(3);
+  expect(readers).toHaveLength(1);
+  await act(async () => readers[0]!({ status: 200, body: answer }));
+  await screen.findByText("第一段");
+  expect(readers).toHaveLength(2);
+  await act(async () => readers[1]!({ status: 200, body: { ...answer, revision: 3, text: "完整第三段" } }));
+  await screen.findByText("完整第三段");
+  expect(readers).toHaveLength(2);
+  source.emit("business", { eventId: "late-version-two", kind: "message.changed", entityId: answer.id, entityVersion: 2 });
+  expect(readers).toHaveLength(2);
+});
 
 function productionFixture(conversation: Conversation): { proposal: Proposal; run: Run; snapshot: Snapshot; bootstrap: Bootstrap; spec: LegacyProductionSpec } {
   // 旧形状 spec 夹具：专门覆盖 LegacyProductionSpec 读取路径（ProductionSpec 见 read-tools/audit 侧测试）。
@@ -411,6 +479,10 @@ function installWorkbenchRoutes(options: {
       return options.onCreate?.(title) ?? { status: 201, body: conversationFixture("conv-new", title) };
     }
     const renameMatch = /\/api\/agent\/v1\/conversations\/([^/]+)$/.exec(url);
+    if (call.method === "GET" && renameMatch) {
+      const value = options.conversations.find(conversation => conversation.id === renameMatch[1]);
+      return value ? {status: 200, body: value} : {status: 404, body:{message:"对话不存在"}};
+    }
     if (call.method === "PATCH" && renameMatch) {
       return options.onRename?.(renameMatch[1]!, call) ?? { status: 200, body: conversationFixture(renameMatch[1]!, "已改名") };
     }
@@ -540,7 +612,7 @@ describe("workspace 状态合并与预览策略", () => {
   it("草稿持久化：文本与修改目标一起保存、可恢复、可清除，坏数据返回 null", () => {
     expect(loadDraft("c1")).toBeNull();
     saveDraft("c1", { text: "再短一点", targetArtifactId: "art-1", targetRevisionId: "rev-1" });
-    expect(loadDraft("c1")).toEqual({ text: "再短一点", targetArtifactId: "art-1", targetRevisionId: "rev-1" });
+    expect(loadDraft("c1")).toEqual({ text: "再短一点", targetArtifactId: "art-1", targetRevisionId: "rev-1", targetWorkId: null, targetSegment: null });
     window.localStorage.setItem(draftStorageKey("c2"), "{oops");
     expect(loadDraft("c2")).toBeNull();
     clearDraft("c1");
@@ -575,6 +647,7 @@ describe("workspace 状态合并与预览策略", () => {
 });
 
 // —— 组件冒烟 ——
+// UIUX-01/06 的样式契约断言（读 CSS 文件）已移至 test/agent-static-contracts.test.ts（server 侧工程）。
 
 describe("AgentWorkbench", () => {
   it("没有当前文本模型也能编辑草稿，去配置再回来不会丢失或误发", async () => {
@@ -627,6 +700,41 @@ describe("AgentWorkbench", () => {
     expect(screen.getByText("已交付第一版。")).toBeInTheDocument();
     // 分栏骨架：真实 Group + 两个 Panel + 分隔条
     expect(screen.getByRole("separator", { name: "调整对话与预览的宽度" })).toBeInTheDocument();
+  });
+
+  it("UIUX-01 上滚离底后新消息提示悬浮在滚动区内，不侵入输入区", async () => {
+    const conversation = conversationFixture("unseen", "新消息提示");
+    const first = messageFixture({ id: "m1", role: "user", text: "开头一句" });
+    const late = messageFixture({ id: "m2", role: "assistant", text: "稍后到达的答复" });
+    installWorkbenchRoutes({
+      conversations: [conversation],
+      snapshots: { unseen: snapshotFixture(conversation, { messages: [first] }) },
+      onRequest: url => url.endsWith("/messages/m2") ? { status: 200, body: late } : null,
+    });
+    renderAt("/agent/unseen");
+    await screen.findByText("开头一句");
+    await waitFor(() => expect(FakeEventSource.instances.some(item => !item.closed)).toBe(true));
+
+    // jsdom 无真实布局：直接给定滚动几何，模拟用户滚离底部（>80px 阈值），再投递新消息业务事件。
+    const scroller = document.querySelector<HTMLElement>(".agent-messages")!;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 3000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 600 });
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+
+    FakeEventSource.instances.find(item => !item.closed)!.emit("business", { eventId: "m2-event", kind: "message.changed", entityId: "m2", entityVersion: 1 });
+
+    const button = await screen.findByRole("button", { name: "回到最新消息 ↓" });
+    const anchor = button.closest(".agent-new-messages-anchor");
+    expect(anchor).not.toBeNull();
+    // 锚点紧跟消息滚动区且先于输入区：按钮只向滚动区内悬浮，输入框再高也不会被盖住。
+    expect(anchor!.previousElementSibling).toBe(scroller);
+    const composer = document.querySelector(".agent-composer")!;
+    expect(anchor!.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(composer.contains(anchor!)).toBe(false);
+
+    await userEvent.click(button);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "回到最新消息 ↓" })).toBeNull());
   });
 
   it("创建会话走变更安全头并导航到新会话；改名冲突如实报错", async () => {
@@ -1228,7 +1336,7 @@ it("A-07/32 历史引用固定版本；新 head 不改阅读；历史稿只读�
   expect(screen.queryByRole("button", { name: "提意见" })).toBeNull();
   head = artifactFixture("art-1", "脚本", "rev-3", 3);
   const source = FakeEventSource.instances.find(item => !item.closed)!;
-  source.emit("business", { eventId: "event-new", kind: "artifact.delivered", entityId: "art-1", entityVersion: 3 });
+  source.emit("business", { eventId: "event-new", kind: "artifact.delivered", notification: "new_output", entityId: "art-1", entityVersion: 3 });
   await userEvent.click(screen.getByText("脚本 v1", { selector: "summary" }));
   await screen.findByRole("button", { name: "查看最新 v3" });
   expect(screen.getByText("正文 rev-1")).toBeInTheDocument();
@@ -1367,7 +1475,7 @@ it("音乐候选保留原批次顺序，采用第二首用准确引用且重试�
   expect(commands[0]!.text).not.toContain("personal_social_ugc");
   expect(commands[0]!.text).toContain("用途不明且影响许可时请先向我澄清");
   expect(commands[0]!.reviewConfirmation).toBeUndefined();
-  const link = await screen.findByRole("link", { name: "「雨后音乐」原批次第 2 首「未标声乐的曲目」" });
+  const link = await screen.findByRole("link", { name: "「雨后音乐」原批次第 2 首音乐「未标声乐的曲目」" });
   expect(link.getAttribute("href")).toContain("/material-batches/audio-old#candidate=old-song-2");
   expect(document.querySelector('[data-message-id="music-adopt"]')).not.toHaveTextContent("old-song-2");
   expect(input).toHaveValue("下一条还没发的想法");
@@ -1564,7 +1672,7 @@ it("A-32 首屏之外的产物按事件 ID 读取；旧分页晚到不覆盖新�
   await userEvent.click(await screen.findByRole("button", { name: "产物 1" }));
   await screen.findByRole("heading", { name: "产物 1" });
   await userEvent.click(screen.getByRole("button", { name: "更多产物" }));
-  FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "old-update", kind: "artifact.delivered", entityId: "old", entityVersion: 3 });
+  FakeEventSource.instances.find(source => !source.closed)!.emit("business", { eventId: "old-update", kind: "artifact.delivered", notification: "new_output", entityId: "old", entityVersion: 3 });
   await waitFor(() => expect(calls.some(call => call.url.endsWith("/artifacts/old"))).toBe(true));
   await screen.findByRole("button", { name: /早先的产物/ });
   await act(async () => resolvePage({ status: 200, body: { items: [artifactFixture("old", "早先的产物", "old-v1", 1)], nextCursor: null, watermark: "old-page-watermark" } }));
@@ -1767,11 +1875,62 @@ it("§11.7 来源5 文件卡：文本类读回原文渲染，二进制只给事�
   installFetch(async url => ({ status: 200, body: url.includes("blob-txt") ? "console.log('hi')" : "" }));
   const textual = render(<FilePreview content={{ format: "file", blobId: "blob-txt", mimeType: "text/javascript", path: "assets/main.js" }} />);
   expect(await within(textual.container).findByText(/console\.log/)).toBeInTheDocument();
-  expect(within(textual.container).getByRole("link", { name: "下载文件" })).toHaveAttribute("href", "/api/agent/v1/blobs/blob-txt/content");
+  const sourceDownload = within(textual.container).getByRole("link", { name: "下载文件" });
+  expect(sourceDownload).toHaveAttribute("href", "/api/agent/v1/blobs/blob-txt/content?download=1");
+  expect(sourceDownload).toHaveAttribute("download", "main.js");
   const binary = render(<FilePreview content={{ format: "file", blobId: "blob-bin", mimeType: "application/octet-stream", path: "assets/model.bin" }} />);
   expect(await within(binary.container).findByText("assets/model.bin")).toBeInTheDocument();
   expect(within(binary.container).getByText(/二进制文件不在页面内解释/)).toBeInTheDocument();
-  expect(within(binary.container).getByRole("link", { name: "下载文件" })).toHaveAttribute("href", "/api/agent/v1/blobs/blob-bin/content");
+  expect(within(binary.container).getByRole("link", { name: "下载文件" })).toHaveAttribute("href", "/api/agent/v1/blobs/blob-bin/content?download=1");
+});
+
+it("ISS-06 旧工程仅在展开后取源码，按 UTF-8 字节截断即中止完整响应，标签保持原文", async () => {
+  const limit = 256 * 1024;
+  const prefix = "<script>example()</script>";
+  const source = prefix + "a".repeat(limit - prefix.length - 1) + "汉" + "不得显示";
+  const cancelled = vi.fn();
+  const fetchFile = vi.fn(async (_url: string, options: RequestInit) => {
+    expect(new Headers(options.headers).get("range")).toBe(`bytes=0-${limit}`);
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(source)); }, cancel: cancelled }));
+  });
+  vi.stubGlobal("fetch", fetchFile);
+  const project = render(<ProjectPreview content={{ format: "project", files: [{ relativePath: "src/main.cjs", blobId: "blob-old-source", digest: "a".repeat(64), purpose: "source" }],
+    entrypoint: { argv: ["node", "src/main.cjs"] }, runtimeImage: "frame", sourceRevisions: [], timelineFiles: [], dependencyLocks: [] }} />);
+  expect(fetchFile).not.toHaveBeenCalled();
+  await userEvent.click(within(project.container).getByText("src/main.cjs"));
+  await within(project.container).findByText(/仅显示前 256 KiB/);
+  expect(fetchFile).toHaveBeenCalledTimes(1);
+  expect(fetchFile.mock.calls[0]![0]).toBe("/api/agent/v1/blobs/blob-old-source/content");
+  expect(cancelled).toHaveBeenCalledOnce();
+  expect(project.container.querySelector("pre")!.textContent).toBe(source.slice(0, limit - 1));
+  expect(project.container.querySelector("script")).toBeNull();
+  const download = within(project.container).getByRole("link", { name: "下载文件" });
+  expect(download).toHaveAttribute("download", "main.cjs");
+  expect(download).toHaveAttribute("href", "/api/agent/v1/blobs/blob-old-source/content?download=1");
+  await userEvent.click(within(project.container).getByText("src/main.cjs"));
+  await waitFor(() => expect(project.container.querySelector("pre")).toBeNull());
+  expect(fetchFile.mock.calls[0]![1].signal?.aborted).toBe(true);
+});
+
+it("ISS-06 工程关闭时撤销在途源码请求，另一个路径读回自己的原文", async () => {
+  let started: AbortSignal | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
+    if (url.endsWith("/blob-next/content")) return new Response("第二个文件", { status: 206 });
+    const signal = options.signal!;
+    started = signal;
+    return new Promise<Response>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  }));
+  const project = render(<ProjectPreview content={{ format: "project", files: [
+    { relativePath: "first.py", blobId: "blob-wait", digest: "a".repeat(64), purpose: "source", mimeType: "text/x-python" },
+    { relativePath: "next.py", blobId: "blob-next", digest: "b".repeat(64), purpose: "source", mimeType: "text/x-python" },
+  ], entrypoint: { argv: ["python3", "first.py"] }, runtimeImage: "frame", sourceRevisions: [], timelineFiles: [], dependencyLocks: [] }} />);
+  const first = within(project.container).getByText("first.py");
+  await userEvent.click(first);
+  await within(project.container).findByText("正在读取…");
+  await userEvent.click(first);
+  await waitFor(() => expect(started?.aborted).toBe(true));
+  await userEvent.click(within(project.container).getByText("next.py"));
+  expect(await within(project.container).findByText("第二个文件")).toBeVisible();
 });
 
 it("Frame 三个设置入口独立，往返保留预览、目标和草稿，不打开旧资源页", async () => {
@@ -1795,6 +1954,7 @@ it("Frame 三个设置入口独立，往返保留预览、目标和草稿，不�
 });
 
 it("S1-13/14 多调用草稿和压缩结束可单独到达；clear、断线、终态后不能复活，不抢旧阅读", async () => {
+  // 本用例验证流式草稿与阅读保持，按宽屏布局断言；DECISION-05 起视口基线即 1440×900。
   const conv = conversationFixture("streaming", "边看边聊");
   const snap = snapshotFixture(conv, { artifacts: [artifactFixture("art-1", "正在看的旧稿", "rev-1", 1)], messages: [messageFixture({ id: "msg-live", role: "assistant", text: "", state: "running", requestId: "req-live" })] });
   snap.activeRequestId = "req-live";
@@ -2266,7 +2426,7 @@ it("P3c 侧栏与 skills 路由：安装后原对话立即指定，一次性复�
 it("P3c 目录按服务端状态展示零 Skill、解析诊断与只读内置，不把配置来源视为可用", async () => {
   const packages: SkillPackagesView = {
     ...BUILTIN_SKILLS,
-    packages: [...BUILTIN_SKILLS.packages,
+    packages: [...BUILTIN_SKILLS.packages, { ...BUILTIN_SKILLS.packages[0]!, id: "sound-kit", name: "配音工具", origin: "installed", runtimeStatus: "unavailable", runtimeMissing: ["python:wave"] },
       { id: "empty", source: "npm:empty-skill-package", name: "空包", origin: "installed", skillIds: [], status: "no_skills", diagnostics: ["未发现 SKILL.md"], runtimeStatus: "unchecked", runtimeMissing: [] },
       { id: "broken", source: "https://example.test/broken.git", name: "错误包", origin: "installed", skillIds: [], status: "invalid", diagnostics: ["Skill frontmatter 缺少 description"], runtimeStatus: "unchecked", runtimeMissing: [] },
     ],
@@ -2274,6 +2434,9 @@ it("P3c 目录按服务端状态展示零 Skill、解析诊断与只读内置，
   installWorkbenchRoutes({ conversations: [], onRequest: url => url.endsWith("/settings/skills") ? { status: 200, body: packages } : null });
   renderAt("/agent?page=skills");
   const empty = await screen.findByRole("article", { name: "空包" });
+  expect(screen.getByRole("article", { name: "配音工具" })).toHaveTextContent("运行依赖未就绪");
+  expect(screen.getByRole("article", { name: "配音工具" })).toHaveTextContent("python:wave");
+  expect(screen.getByRole("article", { name: "内置创作" })).toHaveTextContent("运行依赖已就绪");
   expect(empty).toHaveTextContent("npm:empty-skill-package");
   expect(within(empty).getByText("未发现 Skill", { exact: true })).toBeVisible();
   expect(empty).toHaveTextContent("未发现 SKILL.md");
@@ -2469,3 +2632,238 @@ it("状态同步断开仍可通过停止接口取消，停止失败可重试", a
   await screen.findByText("本轮已停止，已完成的内容保留。");
   expect(attempts).toBe(2);
 });
+
+it("ISS-16 分镜稿的标题、引用、斜体、嵌套链接与语言围栏以安全 React 节点排版", () => {
+  const {container} = render(<MarkdownText text={'#### 第一幕\n##### 近景\n###### 景别\n> *缓缓打开*\n---\n**[参考镜头](https://example.test/scene)** 和 _慢推_\n```json\n{"shot":1}\n```\n[不可执行](javascript:denied)'} />);
+  for (const [heading, level] of [["第一幕",4],["近景",5],["景别",6]] as const) expect(screen.getByRole("heading",{name:heading,level})).toBeInTheDocument();
+  expect(container.querySelector("blockquote em")).toHaveTextContent("缓缓打开");
+  expect(container.querySelector("strong a")).toHaveAttribute("href","https://example.test/scene");
+  expect(container.querySelectorAll("em")).toHaveLength(2);
+  expect(screen.getByRole("separator")).toBeInTheDocument();
+  expect(container.querySelector("pre code")).toHaveTextContent('{"shot":1}');
+  expect(container.querySelector("pre span")).toHaveTextContent("json");
+  expect(container.querySelectorAll("a")).toHaveLength(1);
+  expect(container.textContent).not.toMatch(/[#*\x60]/);
+});
+
+it("ISS-14 会话 LRU 保留最近十个视图，审阅中的修订与最近两百个跨会话修订可用", () => {
+  const views = new ConversationCache<string>();
+  views.set("current","当前阅读位置");
+  views.activate("current");
+  for (let i=0; i<10; i++) views.set(String(i),String(i));
+  expect(views.size).toBe(10);
+  expect(views.has("0")).toBe(false);
+  expect(views.get("current")).toBe("当前阅读位置");
+  views.activate("1");
+  views.set("10","10");
+  expect(views.has("1")).toBe(true);
+  const revisions = new RevisionCache();
+  revisions.activate("current");
+  for (let i=0; i<220; i++) {
+    const id = String(i);
+    revisions.remember("current", {["current:"+id]: {...REVISION_FIXTURE, revisionId:id}});
+    revisions.remember("other", {["other:"+id]: {...REVISION_FIXTURE, revisionId:id}});
+    if (i===180) revisions.touch("other:0");
+  }
+  expect(Object.keys(revisions.values)).toHaveLength(420);
+  expect(revisions.values["current:0"]).toBeDefined();
+  expect(revisions.values["other:0"]).toBeDefined();
+  expect(revisions.values["other:1"]).toBeUndefined();
+  revisions.activate("new");
+  expect(Object.keys(revisions.values)).toHaveLength(200);
+});
+
+describe("本地素材与冻结画面参考", () => {
+  const attachment: UploadAttachment = {
+    source: { artifactId: "art-upload", revisionId: "rev-upload" }, blobId: "blob-upload", mimeType: "video/mp4", durationMs: 3900,
+    facts: { fileName: "实拍.mp4", sizeBytes: 1400, rights: "owned_or_licensed", width: 1280, height: 720,
+      firstFrame: { blobId: "blob-first", digest: "2".repeat(64), width: 1280, height: 720 } },
+  };
+  const stage = (name = attachment.facts.fileName) => fireEvent.change(screen.getByLabelText("选择本地素材"), {
+    target: { files: [new File(["camera"], name, { type: "video/mp4" })] },
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("授权前不上传；真实进度、切换会话时的回执、仅附件发送及历史首帧", async () => {
+    const a = conversationFixture("u-a", "剪辑会话"), b = conversationFixture("u-b", "另一会话");
+    const snap = snapshotFixture(a);
+    const message = messageFixture({ id: "msg-up", role: "user", text: "", uploads: [attachment] });
+    const calls = installWorkbenchRoutes({ conversations: [a, b], snapshots: { [a.id]: snap, [b.id]: snapshotFixture(b) }, onRequest: (url, call) => {
+      if (url.endsWith("/messages") && call.method === "POST") return { status: 202, body: { messageId: message.id, requestId: "req-u" } };
+      if (url.endsWith("/messages/msg-up")) return { status: 200, body: message };
+      return null;
+    } });
+    let reply!: (receipt: UploadReceipt) => void;
+    let progress!: (value: number) => void;
+    const upload = vi.spyOn(agentApi, "uploadFile").mockImplementation((_id, _form, _signal, notify) => {
+      progress = notify; return new Promise(resolve => { reply = resolve; });
+    });
+    renderAt("/agent/u-a");
+    await screen.findByRole("heading", { name: a.title });
+    stage();
+    const consent = await screen.findByRole("button", { name: /确认拥有或获准使用/ });
+    expect(upload).not.toHaveBeenCalled(); expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    await userEvent.click(consent);
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(upload.mock.calls[0]!.slice(0, 2)).toEqual([a.id, expect.objectContaining({ expectedRevision: 1, rights: "owned_or_licensed" })]);
+    act(() => progress(.42)); expect(screen.getByRole("progressbar")).toHaveAttribute("value", "0.42");
+    act(() => progress(1)); expect(screen.getByText("已传输，正在检查素材")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: b.title }));
+    await screen.findByRole("heading", { name: b.title });
+    await userEvent.type(screen.getByRole("textbox", { name: "消息输入" }), "B 的草稿");
+    await act(async () => reply({ conversation: { ...a, revision: 2 }, attachment }));
+    expect(screen.queryByText(attachment.facts.fileName)).toBeNull();
+    expect(loadDraft(b.id)?.text).toBe("B 的草稿");
+    expect(loadDraft(a.id)?.uploads).toEqual([attachment]);
+    await userEvent.click(screen.getByRole("button", { name: a.title }));
+    await screen.findByRole("heading", { name: a.title });
+    expect(await screen.findByRole("button", { name: "移除 实拍.mp4" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    const history = await screen.findByRole("list", { name: "消息附件" });
+    expect(within(history).getByRole("button", { name: "查看附件 实拍.mp4" })).toHaveTextContent("1280×720");
+    expect(history.querySelector("img")).toHaveAttribute("src", "/api/agent/v1/blobs/blob-first/content");
+    expect(calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))?.body).toMatchObject({ mode: "new", text: "", uploads: [attachment.source] });
+    expect(loadDraft(a.id)).toBeNull();
+  });
+
+  it("补充当前请求只发文本，已上传附件继续留给下一条 new 消息", async () => {
+    const a = conversationFixture("u-steer", "补充说明"), snap = snapshotFixture(a);
+    snap.activeRequestId = "req-active";
+    saveDraft(a.id, { text: "先改一句旁白", targetArtifactId: null, targetRevisionId: null, uploads: [attachment] });
+    const msg = messageFixture({ id: "msg-steer", role: "user", text: "先改一句旁白" });
+    const calls = installWorkbenchRoutes({ conversations: [a], snapshots: { [a.id]: snap }, onRequest: (url, call) => {
+      if (url.endsWith("/messages") && call.method === "POST") return { status: 202, body: { messageId: msg.id, requestId: snap.activeRequestId } };
+      if (url.endsWith("/messages/msg-steer")) return { status: 200, body: msg };
+      return null;
+    } });
+    renderAt("/agent/u-steer");
+    await userEvent.click(await screen.findByRole("button", { name: "补充当前请求" }));
+    const body = calls.find(call => call.method === "POST" && call.url.endsWith("/messages"))?.body as MessageInput;
+    expect(body.mode).toBe("steer"); expect(body.uploads).toBeUndefined();
+    await waitFor(() => expect(loadDraft(a.id)).toMatchObject({ text: "", uploads: [attachment] }));
+    expect(screen.getByRole("button", { name: "排队发送" })).toBeEnabled();
+  });
+
+  it("空会话粘贴文件先取得授权，创建时保留最新草稿；取消会中止传输且不会留下附件", async () => {
+    const a = conversationFixture("conv-new", "新草稿");
+    const calls = installWorkbenchRoutes({ conversations: [], snapshots: { [a.id]: snapshotFixture(a) } });
+    let signal!: AbortSignal;
+    const upload = vi.spyOn(agentApi, "uploadFile").mockImplementation((_id, _form, s) => {
+      signal = s; return new Promise((_resolve, reject) => s.addEventListener("abort", () => reject(s.reason), { once: true }));
+    });
+    renderAt("/agent");
+    const text = screen.getByRole("textbox", { name: "消息输入" });
+    await userEvent.type(text, "保留这句");
+    fireEvent.paste(text, { clipboardData: { files: [new File(["sample"], "实拍.mp4", { type: "video/mp4" })] } });
+    expect(calls.some(call => call.method === "POST")).toBe(false);
+    await userEvent.click(await screen.findByRole("button", { name: /确认拥有或获准使用/ }));
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    await userEvent.click(await screen.findByRole("button", { name: "取消上传 实拍.mp4" }));
+    expect(signal.aborted).toBe(true); expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue("保留这句");
+    expect(loadDraft(a.id)?.uploads).toBeUndefined();
+    expect(calls.filter(call => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("响应丢失后拖入文件的重试复用原命令与原始版本；移除只改发送草稿", async () => {
+    const a = conversationFixture("u-retry", "上传重试");
+    installWorkbenchRoutes({ conversations: [a], snapshots: { [a.id]: snapshotFixture(a) } });
+    const upload = vi.spyOn(agentApi, "uploadFile").mockRejectedValueOnce(new Error("上传响应丢失")).mockResolvedValue({ conversation: { ...a, revision: 2 }, attachment });
+    renderAt("/agent/u-retry"); await screen.findByRole("heading", { name: a.title });
+    const target = screen.getByRole("textbox", { name: "消息输入" });
+    fireEvent.drop(target, { dataTransfer: { files: [new File(["sample"], attachment.facts.fileName, { type: "video/mp4" })] } });
+    const consent = await screen.findByRole("button", { name: /确认拥有或获准使用/ });
+    await userEvent.click(consent); await screen.findByText("上传响应丢失");
+    a.revision = 2;
+    await userEvent.click(screen.getByRole("button", { name: /确认拥有或获准使用/ }));
+    await waitFor(() => expect(loadDraft(a.id)?.uploads).toHaveLength(1));
+    expect(upload.mock.calls[0]![1]).toEqual(upload.mock.calls[1]![1]);
+    await userEvent.click(screen.getByRole("button", { name: "移除 实拍.mp4" }));
+    expect(screen.queryByRole("list", { name: "待发送附件" })).toBeNull();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("首帧和角色取自绑定的 v1，尾帧与上游生成如实展示，编辑中 v3 不替换缩略图", async () => {
+    const f = productionFixture(conversationFixture("i2v", "图片参考"));
+    const source = { kind: "artifact_revision" as const, artifactId: "art-board", revisionId: "rev-1", digest: "a".repeat(64) };
+    const video = f.spec.operations[0]!;
+    if (video.kind !== "video") throw new Error("视频提案夹具无效");
+    const image = { ...video, operationId: "op-image", kind: "image" as const, outputSlot: "image", parameters: { aspectRatio: "16:9", resolution: "1K" } } as const;
+    const spec: ProductionSpec = { workId: "work-b", title: "分镜动起来", type: "paid_production", purpose: "production", scope: "片段",
+      requestSource: { requestId: "req-1", messageId: "msg-1" }, inputSources: [source], reviewInputs: [{ groupId: "g", itemId: "i", source, confirmationId: "confirm" }], maxSpend: f.spec.maxSpend, finalOutput: f.spec.finalOutput,
+      operations: [image, { ...video, inputs: [source, { kind: "blob", blobId: "blob-tail", digest: source.digest }],
+        parameters: { ...video.parameters, firstFrameSlot: 0, lastFrameSlot: 1 } },
+        { ...video, operationId: "op-reference", inputs: [{ kind: "operation_output", producerOperationId: image.operationId, outputSlot: "image" }, source],
+          parameters: { ...video.parameters, referenceImageSlots: [0, 1] } }] };
+    const revision: ArtifactRevision = { ...REVISION_FIXTURE, artifactId: source.artifactId, content: { format: "media", blobId: "frozen-board", mimeType: "image/png", durationMs: null } };
+    const head = artifactFixture(source.artifactId, "当前角色设定", "rev-3", 3);
+    const works: Work[] = [{ id: "work-b", title: "角色测试", revision: 1, createdAt: head.updatedAt, updatedAt: head.updatedAt,
+      reviewGroups: [{ id: "g", title: "角色组", revision: 1, nextIntent: null, items: [{ id: "i", role: "character", label: "分镜 2", required: true,
+        draft: { ...source, revisionId: "rev-3" }, approved: source, finalizedSource: null, confirmationId: "confirm", approvedAt: head.updatedAt }] }] }];
+    const open = vi.fn();
+    render(<ProposalCard proposal={{ ...f.proposal, spec }} artifacts={[head]} revisions={{ "art-board:rev-1": revision }} works={works} onOpen={open} />);
+    const first = screen.getByRole("button", { name: "首帧参考：分镜 2 · v1" });
+    expect(first.querySelector("img")).toHaveAttribute("src", "/api/agent/v1/blobs/frozen-board/content");
+    expect(screen.getByRole("button", { name: "角色参考：分镜 2 · v1" })).toBeVisible();
+    const anchors = screen.getByLabelText("镜头 1 参考图");
+    expect(anchors).toHaveTextContent("尾帧参考：保留 · 已有素材 1");
+    expect(anchors.querySelector('img[src="/api/agent/v1/blobs/blob-tail/content"]')).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "镜头 2 参考图" })).toHaveTextContent("参考图：本次图片产出");
+    await userEvent.click(first);
+    expect(open).toHaveBeenCalledExactlyOnceWith(source.artifactId, source.revisionId);
+  });
+});
+
+it.each(["models", "services", "skills", "team"])("创作者从管理深链 %s 回到自己的资料且不触发管理请求", async page => {
+  const calls = installWorkbenchRoutes({ conversations: [], onRequest: url => url.endsWith("/bootstrap")
+    ? { status: 200, body: { ...BOOTSTRAP, accountRole: "creator" } } : null });
+  renderAt("/agent?page=" + page);
+  await screen.findByRole("heading", { name: "用户页" });
+  expect(await screen.findByRole("textbox", { name: "显示名称" })).toBeVisible();
+  for (const name of ["打开模型配置", "打开免费服务", "打开 Skill 管理", "成员与预算", "模型配置", "Skill 管理"]) expect(screen.queryByRole("button", { name })).toBeNull();
+  expect(calls.filter(call => call.url.includes("/settings/"))).toHaveLength(0);
+});
+
+it("UIUX-06 窄窗抽屉收起期间的新回复点亮未读：暗栏圆点与顶栏入口一键回到对话", async () => {
+  const conv = conversationFixture("conv-unread", "未读提示");
+  const work: Work = { id: "work-u", title: "城市动画", revision: 1, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    reviewGroups: [{ id: "grp-u", title: "脚本与内容", revision: 1, nextIntent: null, items: [] }] };
+  const snapshot = { ...snapshotFixture(conv), works: [work] };
+  const messages: Record<string, Message> = {};
+  installWorkbenchRoutes({ conversations: [conv], snapshots: { "conv-unread": snapshot }, onRequest: url => {
+    const match = /\/messages\/([^/?]+)$/.exec(url);
+    if (match && messages[match[1]!]) return { status: 200, body: messages[match[1]!] };
+    return null;
+  } });
+  // DECISION-05 视口基线 1440×900；本用例显式落到 960px 窄窗档：作品模式即抽屉收起态，顶栏常驻「对话」入口。
+  vi.stubGlobal("innerWidth", 960);
+  renderAt("/agent/conv-unread");
+  const openChat = await screen.findByRole("button", { name: "对话" });
+  expect(document.querySelector(".agent-root")!.hasAttribute("data-chat-drawer")).toBe(false);
+  const source = () => FakeEventSource.instances.find(item => !item.closed)!;
+  // 用户自己的回显不点亮未读。
+  messages["msg-echo"] = messageFixture({ id: "msg-echo", role: "user", text: "尽快给我初剪" });
+  source().emit("business", { eventId: "echo", kind: "message.changed", entityId: "msg-echo", entityVersion: 1 });
+  await screen.findByText("尽快给我初剪");
+  expect(screen.queryAllByRole("button", { name: "展开对话（有新回复）" })).toHaveLength(0);
+  // Frame 的新回复同时点亮暗栏圆点与顶栏入口。
+  messages["msg-reply"] = messageFixture({ id: "msg-reply", role: "assistant", text: "初剪好了，请回到对话确认。" });
+  source().emit("business", { eventId: "reply", kind: "message.changed", entityId: "msg-reply", entityVersion: 1 });
+  await screen.findByText("初剪好了，请回到对话确认。");
+  const unread = screen.getAllByRole("button", { name: "展开对话（有新回复）" });
+  expect(unread).toHaveLength(2);
+  expect(unread.some(button => button.querySelector(".agent-rail-dot") !== null)).toBe(true);
+  expect(openChat.querySelector(".agent-chat-dot")).not.toBeNull();
+  // 顶栏入口展开抽屉：圆点清零，暗栏回到「收起对话」。
+  await userEvent.click(openChat);
+  await waitFor(() => expect(document.querySelector(".agent-root")!.hasAttribute("data-chat-drawer")).toBe(true));
+  expect(screen.queryAllByRole("button", { name: "展开对话（有新回复）" })).toHaveLength(0);
+  expect(screen.getByRole("button", { name: "收起对话" })).toBeInTheDocument();
+  // 收起后同一条消息的后续修订不重复点亮。
+  fireEvent.keyDown(document.querySelector(".agent-root")!, { key: "Escape" });
+  await waitFor(() => expect(document.querySelector(".agent-root")!.hasAttribute("data-chat-drawer")).toBe(false));
+  messages["msg-reply"] = { ...messages["msg-reply"]!, revision: 2 };
+  source().emit("business", { eventId: "reply-2", kind: "message.changed", entityId: "msg-reply", entityVersion: 2 });
+  await waitFor(() => expect(screen.getByText("初剪好了，请回到对话确认。")).toBeVisible());
+  expect(screen.queryAllByRole("button", { name: "展开对话（有新回复）" })).toHaveLength(0);
+});
+

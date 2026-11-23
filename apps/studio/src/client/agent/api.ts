@@ -1,4 +1,4 @@
-import type { ProviderConnectionSettings, SaveProviderConnection, SaveProviderConnectionReceipt, AvailableProviderModels } from "../../shared/agent/generated/contracts.js";
+import type { ProviderConnectionProbe, ProviderConnectionSettings, SaveProviderConnection, SaveProviderConnectionReceipt, AvailableProviderModels } from "../../shared/agent/generated/contracts.js";
 import { notifyAuthenticationLoss } from "../auth-api.js";
 import type {
   ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, ConversationPage, FeedbackInput, FeedbackReceipt,
@@ -6,10 +6,12 @@ import type {
   Error as ContractError, BusinessEvent, TextDelta, ArtifactPage, ProposalPage, Run, RunPage, AdmissionReceipt, AcceptProposal, CancelReceipt, CancelRun,
   LibraryVideo, LibraryVideoPage,
   Work, MaterialBatch, ReviewApprovalHistoryPage, WorkPage,
-  UserProfile, SaveUserProfile, SaveUserProfileReceipt,
-  PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings,
+  UserProfile, SaveUserProfile, SaveUserProfileReceipt, StorageUsage, CleanupStorage, StorageCleanupReceipt,
+  PexelsSettings, NewsNowSettings, KeyedMaterialSettings, KeylessMaterialSettings, EdgeTtsSettings, FreeServiceSettingsDirectory,
   SavePexelsSettings, SaveNewsNowSettings, SaveKeylessServiceSettings, SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt,
-  SkillPackagesView, InstallSkillPackage, RemoveSkillPackage,
+  SkillPackagesView, InstallSkillPackage, RemoveSkillPackage, UploadForm, UploadReceipt,
+  CreateSubtitleTrack, SaveSubtitleRevision, SubtitleReceipt, RemixTimeline, RemixCommand, LocalCreationReceipt,
+  StudioAccounts, CreateStudioAccount, UpdateStudioAccount, SaveBudgetPolicy, BudgetPolicies, BudgetPolicy, BudgetSummary,
 } from "../../shared/agent/generated/contracts.js";
 
 // /api/agent/v1 的浏览器客户端：类型全部来自生成契约，不手写第二份 DTO。
@@ -61,6 +63,37 @@ function newCommandId(): string {
   return `cmd-${Date.now().toString(36)}-${random}`;
 }
 
+function uploadFile(conversationId: string, input: Omit<UploadForm, "file"> & { file: File },
+  signal: AbortSignal, onProgress: (fraction: number) => void): Promise<UploadReceipt> {
+  const url = `/api/agent/v1/conversations/${encodeURIComponent(conversationId)}/uploads`;
+  const form = new FormData();
+  form.append("commandId", input.commandId);
+  form.append("expectedRevision", String(input.expectedRevision));
+  form.append("rights", input.rights);
+  form.append("file", input.file);
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    xhr.onloadend = () => signal.removeEventListener("abort", abort);
+    xhr.upload.onprogress = event => { if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total); };
+    xhr.upload.onload = () => onProgress(1);
+    xhr.onerror = () => reject(new Error("上传连接中断，可重试这份素材。"));
+    xhr.onabort = () => reject(new DOMException("已取消上传", "AbortError"));
+    xhr.onload = () => {
+      notifyAuthenticationLoss(url, xhr.status);
+      if (xhr.status === 201) resolve(xhr.response as UploadReceipt);
+      else if (xhr.response?.message) reject(new AgentApiError({ ...xhr.response, status: xhr.status }));
+      else reject(new Error(`素材上传失败（HTTP ${xhr.status}）。`));
+    };
+    xhr.open("POST", url);
+    xhr.responseType = "json";
+    xhr.setRequestHeader("x-video-factory-request", "studio");
+    xhr.send(form);
+  });
+}
+
 // 多处预览共用同一条在途读取；成功内容仍由工作台按准确修订保存，失败后可重新请求。
 const revisionReads = new Map<string, Promise<ArtifactRevision>>();
 function readRevision(artifactId: string, revisionId: string): Promise<ArtifactRevision> {
@@ -75,8 +108,28 @@ function readRevision(artifactId: string, revisionId: string): Promise<ArtifactR
 
 export const agentApi = {
   newCommandId,
+  uploadFile,
+  createSubtitleTrack: (workId: string, input: CreateSubtitleTrack) =>
+    requestJson<SubtitleReceipt>("POST", `/api/agent/v1/works/${encodeURIComponent(workId)}/subtitle-tracks`, input),
+  saveSubtitleRevision: (artifactId: string, input: SaveSubtitleRevision) =>
+    requestJson<SubtitleReceipt>("POST", `/api/agent/v1/artifacts/${encodeURIComponent(artifactId)}/subtitle-revisions`, input),
+  remixTimeline: (runId: string, revisionId: string) =>
+    requestJson<RemixTimeline>("GET", `/api/agent/v1/runs/${encodeURIComponent(runId)}/remix-timeline?revisionId=${encodeURIComponent(revisionId)}`, undefined, "no-store"),
+  remixRun: (runId: string, input: RemixCommand) =>
+    requestJson<LocalCreationReceipt>("POST", `/api/agent/v1/runs/${encodeURIComponent(runId)}/remix-proposals`, input),
+  studioAccounts: () => requestJson<StudioAccounts>("GET", "/api/agent/v1/settings/accounts", undefined, "no-store"),
+  createStudioAccount: (input: CreateStudioAccount) => requestJson<StudioAccounts>("POST", "/api/agent/v1/settings/accounts", input),
+  updateStudioAccount: (username: string, input: UpdateStudioAccount) =>
+    requestJson<StudioAccounts>("PATCH", "/api/agent/v1/settings/accounts/" + encodeURIComponent(username), input),
+  budgetPolicies: () => requestJson<BudgetPolicies>("GET", "/api/agent/v1/settings/budgets", undefined, "no-store"),
+  saveBudgetPolicy: (input: SaveBudgetPolicy) => requestJson<BudgetPolicy>("POST", "/api/agent/v1/settings/budgets", input),
+  readBudgetSummary: (conversationId: string | null) => requestJson<BudgetSummary>(
+    "GET", "/api/agent/v1/profile/budget" + (conversationId === null ? "" : "?conversationId=" + encodeURIComponent(conversationId)),
+    undefined, "no-store",
+  ),
   readProviderConnections: () => requestJson<ProviderConnectionSettings>("GET", "/api/agent/v1/settings/model-connections"),
   saveProviderConnection: (input: SaveProviderConnection) => requestJson<SaveProviderConnectionReceipt>("POST", "/api/agent/v1/settings/model-connections", input),
+  probeProviderConnection: (id: string) => requestJson<ProviderConnectionProbe>("GET", `/api/agent/v1/settings/model-connections/${encodeURIComponent(id)}/probe`),
   listAvailableProviderModels: (id: string) => requestJson<AvailableProviderModels>("GET", `/api/agent/v1/settings/model-connections/${encodeURIComponent(id)}/models`),
 
   bootstrap: () => requestJson<Bootstrap>("GET", "/api/agent/v1/bootstrap"),
@@ -85,11 +138,17 @@ export const agentApi = {
   installSkillPackage: (input: InstallSkillPackage) => requestJson<SkillPackagesView>("POST", "/api/agent/v1/settings/skills/install", input, "no-store"),
   removeSkillPackage: (input: RemoveSkillPackage) => requestJson<SkillPackagesView>("POST", "/api/agent/v1/settings/skills/remove", input, "no-store"),
 
+  readFreeServiceSettingsDirectory: () =>
+    requestJson<FreeServiceSettingsDirectory>("GET", "/api/agent/v1/settings/services"),
+
   readFreeServiceSettings: (serviceId: FreeServiceId) =>
     requestJson<FreeServiceSettings>("GET", `/api/agent/v1/settings/services/${serviceId}`),
 
   saveFreeServiceSettings: (serviceId: FreeServiceId, input: SaveFreeServiceSettingsInput) =>
     requestJson<SaveFreeServiceSettingsReceipt>("PATCH", `/api/agent/v1/settings/services/${serviceId}`, input),
+
+  storageUsage: () => requestJson<StorageUsage>("GET", "/api/agent/v1/storage"),
+  cleanupStorage: (input: CleanupStorage) => requestJson<StorageCleanupReceipt>("POST", "/api/agent/v1/storage/cleanup", input),
 
   readUserProfile: () => requestJson<UserProfile>("GET", "/api/agent/v1/profile"),
 
@@ -107,6 +166,7 @@ export const agentApi = {
       commandId: newCommandId(), title, expectedRevision,
     }),
 
+  readConversation: (id: string) => requestJson<Conversation>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}`),
   snapshot: (conversationId: string) =>
     requestJson<Snapshot>("GET", `/api/agent/v1/conversations/${encodeURIComponent(conversationId)}/snapshot`),
 

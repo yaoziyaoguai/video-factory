@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Clock3, Square, TriangleAlert, WifiOff } from "lucide-react";
 import type { ContextStatus, Message, RequestProgress, Run, Work } from "../../shared/agent/generated/contracts.js";
 
@@ -114,16 +114,34 @@ const completedResults = {
   unknown: { label: "本轮已结束", Icon: Clock3 },
 };
 
-export function ExecutionRecord({ message, works = [] }: { message: Message; works?: Work[] }) {
+// UIUX-05 执行记录只读取各步骤归属作品的标题：works 数组换引用但用到的标题不变时跳过重渲染。
+export function areExecutionRecordPropsEqual(prev: { message: Message; works?: Work[] }, next: { message: Message; works?: Work[] }): boolean {
+  if (prev.message !== next.message) return false;
+  const ids = new Set(next.message.execution?.progress.steps?.flatMap(step => step.workId ? [step.workId] : []) ?? []);
+  if (next.message.reviewContext?.workId) ids.add(next.message.reviewContext.workId);
+  const title = (works: Work[] | undefined, id: string) => works?.find(work => work.id === id)?.title;
+  for (const id of ids) if (title(prev.works, id) !== title(next.works, id)) return false;
+  return true;
+}
+
+export const ExecutionRecord = memo(function ExecutionRecord({ message, works = [] }: { message: Message; works?: Work[] }) {
   const execution = message.execution;
   if (message.role !== "user" || !execution || message.state === "running" || message.state === "queued") return null;
   const { label, Icon } = message.state === "completed" ? completedResults[execution.completionReason ?? "unknown"]
     : message.state === "stopped" ? { label: "已停止", Icon: Square } : { label: "未完成", Icon: TriangleAlert };
   const steps = execution.progress.steps ?? [];
-  const last = steps.at(-1);
-  const owner = works.find(work => work.id === (last?.workId ?? message.reviewContext?.workId));
-  const summary = last ? [owner?.title, last.label, `${steps.length} 项操作`].filter(Boolean).join(" · ") : "执行记录";
   const duration = execution.endedAt ? elapsed(execution.startedAt, Date.parse(execution.endedAt)) : null;
+  // UIUX-09 正常完成的纯对话回合没有可展开内容：渲染轻量静态落款，不用 <summary> 假装可展开。
+  // completionReason 缺失的历史回合原因未知，仍走完整折叠，避免把旧的异常完成误标为正常完成。
+  if (steps.length === 0 && message.state === "completed" && execution.completionReason === "finished") {
+    const seconds = execution.endedAt ? Math.floor((Date.parse(execution.endedAt) - Date.parse(execution.startedAt)) / 1000) : 0;
+    return <p className="agent-execution-static"><Icon />已完成{seconds >= 5 && duration ? <time>{duration}</time> : null}</p>;
+  }
+  // 摘要优先取最后一个可归属作品的已完成步骤：收尾的只读核对步骤常无 workId，
+  // 机械取末位会让长对话扫过去全是“核对作品版本”而非真正交付动作。
+  const headline = [...steps].reverse().find(step => step.state === "completed" && step.workId) ?? steps.at(-1);
+  const owner = works.find(work => work.id === (headline?.workId ?? message.reviewContext?.workId));
+  const summary = headline ? [owner?.title, headline.label, `${steps.length} 项操作`].filter(Boolean).join(" · ") : "执行记录";
   return <details className="agent-execution-record">
     <summary aria-label={`查看本轮执行记录：${label}`} aria-description={summary} title={summary}>
       <Icon />
@@ -137,4 +155,4 @@ export function ExecutionRecord({ message, works = [] }: { message: Message; wor
     </li>)}</ol> : <p>这轮没有执行工具操作。</p>}
     {steps.length === 8 ? <p>保留最近 8 项实际操作。</p> : null}
   </details>;
-}
+}, areExecutionRecordPropsEqual);

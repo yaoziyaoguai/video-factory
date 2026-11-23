@@ -1,3 +1,4 @@
+import { providerAdapters } from "../../shared/agent/provider-capabilities.js";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AudioLines, Check, ChevronDown, Cpu, Film, Image, KeyRound, Plus, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import type { AvailableProviderModels, ConnectionModel, ProviderConnection, ProviderConnectionSettings, SaveProviderConnection, ThinkingLevel } from "../../shared/agent/generated/contracts.js";
@@ -9,8 +10,6 @@ import { agentApi, AgentApiError } from "./api.js";
 
 const kinds = [{ id: "text", label: "文本大模型", icon: Cpu }, { id: "image", label: "图片模型", icon: Image }, { id: "video", label: "视频模型", icon: Film }, { id: "speech", label: "配音模型", icon: AudioLines }] as const;
 const protocols = { openai: "OpenAI", "openai-chat-completions": "OpenAI 兼容", "anthropic-messages": "Anthropic", ark: "火山方舟", minimax: "MiniMax", wan: "万相" } as const;
-// 新建连接提供活入口：OpenAI 承载文本/图片/配音（配音另可配 MiniMax），视频走 Ark/MiniMax/万相；旧协议值仅供历史行显示。
-const NEW_CONNECTION_PROTOCOLS: ProviderConnection["protocol"][] = ["openai", "ark", "minimax", "wan"];
 // OpenAI 文本/图片/配音的工程初始输出上限（A2）；保存边界按该型号实际上限核对。
 const OPENAI_DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const thinkingLabels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
@@ -20,8 +19,7 @@ interface DirectoryState { models: AvailableProviderModels | null; loading: bool
 
 // 列表与切换用途共用承载事实；切 tab 只更新阅读选择，不写当前模型。
 function connectionSupportsKind(connection: ProviderConnection, kind: ConnectionModel["kind"]): boolean {
-  return kind === "video" ? connection.protocol !== "openai"
-    : connection.protocol === "openai" || (kind === "image" && connection.protocol === "ark") || (kind === "speech" && connection.protocol === "minimax");
+  return providerAdapters[connection.protocol].supportedKinds.includes(kind);
 }
 
 export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: () => Promise<void> }) {
@@ -47,7 +45,6 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
   useEffect(() => { void load(); }, []);
 
   const modelsOfKind = (connection: ProviderConnection): ConnectionModel[] => connection.models.filter(model => model.kind === kind);
-  // 承载矩阵（§11.2）：文本用 OpenAI，图片用 OpenAI 或火山方舟；配音 OpenAI 或 MiniMax；视频 Ark/MiniMax/万相（不含 OpenAI）。
   // Key 已不回传，可用连接按 credentialConfigured 判定。
   const kindConnections = (settings?.connections ?? []).filter(item => item.enabled && item.credentialConfigured && connectionSupportsKind(item, kind));
   const current = kindConnections.flatMap(connection => modelsOfKind(connection).map(model => ({ connection, model }))).find(item => item.model.isDefault) ?? null;
@@ -221,7 +218,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
           <p>选择供应商和具体型号后应用。</p>
         </>}
         <form className="agent-model-picker" onSubmit={event => { event.preventDefault(); if (pickConnection && pickModel) void setCurrent(pickConnection, pickModel); }}>
-          <label>{kind === "text" ? "OpenAI 连接" : "供应商连接"}
+          <label>{kind === "text" ? "文本连接" : "供应商连接"}
             <select value={pickConnection?.id ?? ""} disabled={actionsDisabled || !kindConnections.length}
               onChange={event => { setPickConnectionId(event.target.value); setPickModelId(""); setNotice(""); }}>
               {kindConnections.map(item => <option key={item.id} value={item.id}>{item.name}{item.enabled ? "" : "（已停用）"}</option>)}
@@ -301,6 +298,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
           </label>}
           <label>搜索型号<input type="search" value={modelSearch} onChange={event => setModelSearch(event.target.value)} placeholder="输入型号名称或 ID" /></label>
         </div>
+        {directoryConnection && kind === "text" && directoryConnection.protocol !== "openai" && <button type="button" disabled={actionsDisabled} onClick={event => openEditor(event.currentTarget, {mode: "model", connectionId: directoryConnection.id, modelId: null})}>手动添加文本型号</button>}
         <p className="agent-directory-note">勾选加入备选，取消勾选即可移除。更改即时保存。</p>
         {directoryConnection && (() => {
           const connection = directoryConnection;
@@ -357,12 +355,12 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
       </fieldset> : null}
       {settings.connections.length === 0 ? <div className="agent-settings-empty">
         <Cpu aria-hidden="true" /><h3>添加你的第一个模型连接</h3>
-        <p>文本使用 OpenAI，图片可选 OpenAI 或火山方舟，配音可选 OpenAI 或 MiniMax，视频可选火山方舟、MiniMax 或万相。</p>
+        <p>添加供应商连接后，即可为文本、图片、配音或视频选择型号。</p>
         <button type="button" className="agent-model-config-button" onClick={event => openEditor(event.currentTarget, { mode: "connection", connectionId: null, modelId: null })}><Plus aria-hidden="true" />添加连接</button>
       </div> : null}
       {settings.connections.length > 0 && kindConnections.length === 0 ? <div className="agent-settings-empty">
         <Cpu aria-hidden="true" /><h3>{kind === "video" ? "还没有视频供应商连接" : kind === "speech" ? "还没有配音供应商连接" : kind === "image" ? "还没有图片供应商连接" : "还没有 OpenAI 连接"}</h3>
-        <p>{kind === "video" ? "添加火山方舟、MiniMax 或万相连接。" : kind === "speech" ? "添加 OpenAI 或 MiniMax 连接。" : kind === "image" ? "配置 OpenAI 或火山方舟连接。" : "配置 OpenAI 连接。"}</p>
+        <p>{kind === "video" ? "添加火山方舟、MiniMax 或万相连接。" : kind === "speech" ? "添加 OpenAI 或 MiniMax 连接。" : kind === "image" ? "配置 OpenAI 或火山方舟连接。"  : "配置文本模型连接。"}</p>
         <button type="button" className="agent-model-config-button" onClick={event => openEditor(event.currentTarget, { mode: "connection", connectionId: null, modelId: null })}><Plus aria-hidden="true" />添加连接</button>
       </div> : null}
       <p className="agent-service-footnote">连接共用 Key。切换当前模型只影响新的请求与方案，正在制作的版本不变。</p>
@@ -382,7 +380,16 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
   settings: ProviderConnectionSettings; onSaved: () => Promise<void>; onClose: () => void; onRemoveCurrent?: (() => void) | undefined;
 }) {
   const blank = (): ProviderConnection => ({ id: `provider-${crypto.randomUUID()}`, name: "", protocol: "openai", baseUrl: "", apiKey: null, credentialConfigured: false, enabled: true, models: [] });
-  const [connection, setConnection] = useState<ProviderConnection>(() => settings.connections.find(item => item.id === connectionId) ?? blank());
+  const [manualId] = useState(() => `model-${crypto.randomUUID()}`);
+  const [connection, setConnection] = useState<ProviderConnection>(() => {
+    const saved = settings.connections.find(item => item.id === connectionId);
+    if (!saved) return blank();
+    if (mode !== "model" || modelId !== null) return saved;
+    return { ...saved, models: [...saved.models, { id: manualId, kind: "text", modelId: "", name: "", features: [],
+      enabled: true, isDefault: false, contextWindowTokens: null, maxOutputTokens: null }] };
+  });
+  const [probeResult, setProbeResult] = useState("");
+  const [probing, setProbing] = useState(false);
   const [creating, setCreating] = useState(!connectionId);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -392,17 +399,17 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
   const dialog = useRef<HTMLDivElement | null>(null);
   const active = useRef(true);
   useEffect(() => { active.current = true; dialog.current?.querySelector<HTMLInputElement>("input")?.focus(); return () => { active.current = false; }; }, []);
-  const model = mode === "model" ? connection.models.find(item => item.id === modelId) ?? null : null;
+  const model = mode === "model" ? connection.models.find(item => item.id === (modelId ?? manualId)) ?? null : null;
   const savedConnection = settings.connections.find(item => item.id === connection.id) ?? null;
   const dirty = savedConnection !== null && JSON.stringify(connection) !== JSON.stringify(savedConnection);
   // 身份（协议 + 型号级有效地址）改动后，旧 GET 能力不能继续冒充新接口已核实能力；
   // 保存仍按新身份校验，成功后由 onSaved 重读。未保存的新型号同样按未核实处理。
   const savedModel = savedConnection?.models.find(item => item.id === modelId);
   const identityChanged = mode !== "model" ? false : !savedConnection || !savedModel || connection.protocol !== savedConnection.protocol
-    || (model?.baseUrl ?? connection.baseUrl) !== (savedModel.baseUrl ?? savedConnection.baseUrl);
+    || model?.modelId !== savedModel.modelId || (model?.baseUrl ?? connection.baseUrl) !== (savedModel.baseUrl ?? savedConnection.baseUrl);
   const capability = identityChanged || !modelId ? null : settings.modelStatuses.find(item => item.modelEntryId === modelId)?.thinking ?? null;
   const thinkingLevel = model?.thinkingLevel ?? "default";
-  const change = (patch: Partial<ProviderConnection>) => { setConnection(value => ({ ...value, ...patch })); setPending(null); setNotice(""); };
+  const change = (patch: Partial<ProviderConnection>) => { setProbeResult(""); setConnection(value => ({ ...value, ...patch })); setPending(null); setNotice(""); };
   const changeModel = (patch: Partial<ConnectionModel>) => {
     if (!model) return;
     change({ models: connection.models.map(item => item.id === model.id ? { ...item, ...patch } : item) });
@@ -410,7 +417,7 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
   const switchTo = (id: string) => {
     const next = settings.connections.find(item => item.id === id);
     if (!next) return;
-    setSwitchRequest(null); setNotice(""); setCreating(false);
+    setProbeResult(""); setSwitchRequest(null); setNotice(""); setCreating(false);
     setConnection(next);
   };
   const requestSwitch = (id: string) => {
@@ -422,6 +429,15 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
     }
     if (creating || dirty) { setSwitchRequest(id); setNotice(""); return; }
     switchTo(id);
+  };
+  const probe = async () => {
+    setProbing(true); setProbeResult("");
+    try {
+      const result = await agentApi.probeProviderConnection(connection.id);
+      if (active.current) setProbeResult(`账户型号接口已响应 · ${new Date(result.checkedAt).toLocaleTimeString("zh-CN")}`);
+    } catch (error) {
+      if (active.current) setProbeResult(error instanceof Error ? error.message : "未能连接账户型号接口。");
+    } finally { if (active.current) setProbing(false); }
   };
   const close = () => { if (!busy) onClose(); };
   const keys = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -447,12 +463,12 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
     <header className="agent-modal-header"><div><h3 id="connection-editor-title">{mode === "model" ? "配置型号" : creating ? "添加连接" : "连接配置"}</h3>
       {mode === "model" ? <p>共用 {connection.name} 的 Key</p> : <p>同一连接的型号共用 Key · 保存不发起调用</p>}</div>
       <button className="agent-icon-button" aria-label="关闭配置" disabled={busy} onClick={close}><X aria-hidden="true" /></button></header>
-    <form onSubmit={event => { event.preventDefault(); void submit(); }}><fieldset disabled={busy || conflict || pending !== null} className="agent-connection-fields">
+    <form onSubmit={event => { event.preventDefault(); void submit(); }}><fieldset disabled={busy || conflict || probing || pending !== null} className="agent-connection-fields">
       {mode === "model" && model ? <>
         <label className="agent-config-field">型号名称<input required maxLength={100} value={model.name} onChange={event => changeModel({ name: event.target.value })} /></label>
-        <label className="agent-config-field">型号 ID<input value={model.modelId} readOnly /></label>
-        {model.kind === "text" ? <div className="agent-connection-capacity"><label className="agent-config-field">上下文窗口（tokens）<input type="number" min={1} value={model.contextWindowTokens ?? ""} readOnly onChange={event => changeModel({ contextWindowTokens: event.target.value ? Number(event.target.value) : null })} /></label><label className="agent-config-field">最大输出（tokens）<input type="number" min={1} value={model.maxOutputTokens ?? ""} onChange={event => changeModel({ maxOutputTokens: event.target.value ? Number(event.target.value) : null })} /></label></div> : <p className="agent-config-note">尚未接入执行参数与报价的型号可以保留为备选，暂不能设为当前。</p>}
-        {model.kind === "text" ? <p className="agent-config-note">上下文窗口来自 Pi 精确目录（同步目录勾选时自动带入），只读；最大输出可在该型号上限内调整。</p> : null}
+        <label className="agent-config-field">型号 ID<input required value={model.modelId} readOnly={modelId !== null} onChange={event => changeModel({modelId: event.target.value})} /></label>
+        {model.kind === "text" ? <div className="agent-connection-capacity"><label className="agent-config-field">上下文窗口（tokens）<input type="number" min={1} value={model.contextWindowTokens ?? ""} readOnly={connection.protocol === "openai"} onChange={event => changeModel({ contextWindowTokens: event.target.value ? Number(event.target.value) : null })} /></label><label className="agent-config-field">最大输出（tokens）<input type="number" min={1} value={model.maxOutputTokens ?? ""} onChange={event => changeModel({ maxOutputTokens: event.target.value ? Number(event.target.value) : null })} /></label></div> : <p className="agent-config-note">尚未接入执行参数与报价的型号可以保留为备选，暂不能设为当前。</p>}
+        {model.kind === "text" ? <p className="agent-config-note">{connection.protocol === "openai" ? "上下文窗口来自 Pi 精确目录，最大输出可在型号上限内调整。" : "请按实际端点的型号规格填写上下文窗口和最大输出。"}</p> : null}
         {model.kind === "text" ? (capability
           ? (capability.levels.length > 1
             ? <label className="agent-config-field">推理<select value={thinkingLevel} onChange={event => changeModel({ thinkingLevel: event.target.value as ThinkingLevel | "default" })}><option value="default">默认（{thinkingLabels[capability.defaultLevel]}）</option>{capability.levels.map(item => <option key={item} value={item}>{thinkingLabels[item]}</option>)}</select></label>
@@ -469,10 +485,12 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
           <option value={NEW_CONNECTION}>新建连接…</option>
         </select></label>
         <label className="agent-config-field">连接名称<input required maxLength={100} value={connection.name} onChange={event => change({ name: event.target.value })} placeholder="例如：通义千问、我的中转服务" /></label>
-        <label className="agent-config-field">接口协议<select value={connection.protocol} onChange={event => change({ protocol: event.target.value as ProviderConnection["protocol"] })}>{[...new Set([connection.protocol, ...NEW_CONNECTION_PROTOCOLS])].map(id => <option key={id} value={id}>{protocols[id]}</option>)}</select></label>
+        <label className="agent-config-field">接口协议<select value={connection.protocol} onChange={event => change({ protocol: event.target.value as ProviderConnection["protocol"] })}>{(Object.keys(providerAdapters) as ProviderConnection["protocol"][]).map(id => <option key={id} value={id}>{protocols[id]}</option>)}</select></label>
         <label className="agent-config-field">接口地址<input required type="url" value={connection.baseUrl} onChange={event => change({ baseUrl: event.target.value })} placeholder={connection.protocol === "openai" ? "https://api.openai.com/v1" : connection.protocol === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : connection.protocol === "minimax" ? "https://api.minimax.cn" : connection.protocol === "wan" ? "https://ws.cn-beijing.maas.aliyuncs.com" : "https://供应商地址"} /></label>
         <label className="agent-config-field">API Key<input type="text" value={connection.apiKey ?? ""} onChange={event => change({ apiKey: event.target.value || null })} autoComplete="off" spellCheck={false} placeholder={connection.credentialConfigured ? "已保存，不回显；留空保持不变" : "填写一次，所有已选型号共用"} /></label>
         {connection.protocol === "openai" ? <p className="agent-config-note">OpenAI 连接承载文本、图片、配音，三类共用这一份 Key；视频不在此连接。文本容量与推理档位来自 Pi 精确目录，不需要手填。</p> : null}
+        {!creating && connection.credentialConfigured && providerAdapters[connection.protocol].accountDirectory && <button type="button" className="agent-secondary-button" disabled={dirty || probing} onClick={() => void probe()}>{probing ? "测试中…" : "测试连接"}</button>}
+        {probeResult && <p role="status">{probeResult}</p>}
         <label className="agent-config-check"><input type="checkbox" checked={connection.enabled} onChange={event => change({ enabled: event.target.checked })} />启用此连接</label>
         {connection.models.length ? <p className="agent-config-note">关联 {connection.models.length} 个型号。修改影响后续调用，已开始的制作保留原版本。</p> : null}
       </>}

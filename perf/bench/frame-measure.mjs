@@ -1,21 +1,24 @@
 // Frame /agent 工作台测速（与 huashu-flash 口径一致）；仅允许环回隔离 QA 后端。
-// 与旧 measure.mjs（已退役旧 Studio 页面）不同，本脚本面向 /agent 唯一入口：
+// 使用 /agent 入口测量两条真实浏览器旅程。
 //   open   打开工作台到能用（rail+输入框+欢迎语），统计首屏前请求/字节/字体文件数
 //   send   Faux 触发句发送到首次反馈与首个交付草稿（SSE/流式路径）
 // 护栏：双宽度全页截图 + 可见文字哈希 + 溢出检查 + 导航冒烟。
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readlink, rename, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { lineSetHash, SCRIPT_TITLES, visibleLines } from "./frame-send-guard.mjs";
 const require = (await import("node:module")).createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH ?? "playwright");
 const args = Object.fromEntries(process.argv.slice(2).map((v, i, all) => v.startsWith("--") ? [v.slice(2), all[i + 1]] : []).filter(v => v.length));
-if (!args.a || !args.out) throw new Error("--a <url> [--b <url>] --out <json> [--runs 10] [--guards 1] [--routes open,send] [--settle 250] [--run-widths 1440,960] [--label-a <s>] [--label-b <s>]");
+if (!args.a || !args.out) throw new Error("--a <url> [--b <url>] --out <json> [--runs 10] [--send-runs 40] [--guards 1] [--routes open,send] [--settle 250] [--run-widths 1440,960] [--label-a <s>] [--label-b <s>]");
 const origins = { A: args.a, ...(args.b ? { B: args.b } : {}) };
 for (const url of Object.values(origins)) if (new URL(url).hostname !== "127.0.0.1") throw new Error("Only isolated loopback QA is allowed");
 // 构建身份：棘轮要求 builds.{A,B}.label 非空；未显式给标签时以入口 URL 兜底（正式配对务必传 --label-a/--label-b）。
 const builds = Object.fromEntries(Object.entries(origins).map(([k, u]) => [k, { label: (k === "A" ? args["label-a"] : args["label-b"]) ?? new URL("/agent", u).href, url: new URL("/agent", u).href }]));
 const counts = Number(args.runs ?? 10);
+const transferRoot = args["transfer-root"];
+if (transferRoot && await readlink(path.join(transferRoot, "client")) !== "compressed")
+  throw new Error("同服务配对需要 frame-gate 创建的临时构建入口。");
 const settleMs = Number(args.settle ?? 250);
 const runWidths = (args["run-widths"] ?? "1440").split(",").map(Number).filter(w => [960, 1440].includes(w));
 if (!runWidths.length) throw new Error("--run-widths 只支持 960/1440");
@@ -38,6 +41,17 @@ const results = {};
 const guards = [];
 const started = new Date().toISOString();
 const pct = (v, p) => { const a = [...v].sort((x, y) => x - y); const n = (a.length - 1) * p; return Math.round((a[Math.floor(n)] + (a[Math.ceil(n)] - a[Math.floor(n)]) * (n % 1)) * 10) / 10; };
+let servingSide = "B";
+
+// 上一个浏览器上下文关闭后切换临时静态目录。两组操作使用同一服务进程、Pi 与 SQLite。
+async function selectTransfer(side) {
+  if (!transferRoot || side === servingSide) return;
+  const serving = path.join(transferRoot, "client");
+  const next = path.join(transferRoot, "next");
+  await symlink(side === "A" ? "identity" : "compressed", next, "dir");
+  await rename(next, serving);
+  servingSide = side;
+}
 
 async function newCtx(browser2, width) {
   const ctx = await browser2.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
@@ -46,7 +60,8 @@ async function newCtx(browser2, width) {
   return { ctx, external };
 }
 
-async function measure(origin, route, width, guard) {
+async function measure(origin, route, width, guard, side) {
+  await selectTransfer(side);
   const { ctx, external } = await newCtx(browser, width);
   const page = await ctx.newPage();
   const errors = [];
@@ -70,6 +85,11 @@ async function measure(origin, route, width, guard) {
     requestAnimationFrame(tick);
   });
   const result = { ok: false, route, width };
+  if (transferRoot) page.on("response", response => {
+    if (/\/assets\/index-[^/]+\.css$/.test(new URL(response.url()).pathname)) {
+      result.entryCssEncoding = response.headers()["content-encoding"] ?? "identity";
+    }
+  });
   try {
     if (route === "open") {
       await page.addInitScript(ready => { window.__flash.check = () => eval(ready); }, READY_OPEN);
@@ -108,7 +128,7 @@ async function measure(origin, route, width, guard) {
         await page.evaluate(() => document.fonts.ready);
         const text = await page.locator("body").innerText();
         const shot = await page.screenshot({ fullPage: true, animations: "disabled" });
-        const file = `${args.out}.${new URL(origin).port}-${name}-${width}.png`;
+        const file = `${args.out}.${side}-${new URL(origin).port}-${name}-${width}.png`;
         await writeFile(file, shot);
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
         result.images ??= [];
@@ -191,13 +211,18 @@ async function measure(origin, route, width, guard) {
         await paper.locator(".agent-preview-body").getByText("以夜间城市天际线的延时镜头开场……（离线测试内容一）", { exact: true }).waitFor({ timeout: 10000 });
         await page.evaluate(() => document.fonts.ready);
         result.reviewed = { title, revisionNumber: 1 };
+        // 紧凑工作台把聊天收进抽屉（B12-BUG-01 修复后旅程终点是舞台）：先展开对话，引用卡才可见。
+        if (!await page.locator(".agent-message.assistant .agent-references > button:visible").count()) {
+          await page.getByRole("button", { name: /^展开对话/ }).click({ timeout: 10000 });
+          await page.locator(".agent-message.assistant .agent-references > button:visible").first().waitFor({ timeout: 10000 });
+        }
         result.referenceCards = await page.locator(".agent-message.assistant .agent-references > button:visible").evaluateAll(cards => cards.map(card => [
           card.querySelector("strong")?.innerText,
           card.querySelector("small")?.innerText,
           card.getAttribute("aria-label"),
         ]));
         result.lines = visibleLines(await page.locator("body").innerText());
-        const shotFile = `${args.out}.${new URL(origin).port}-send-${width}.png`;
+        const shotFile = `${args.out}.${side}-${new URL(origin).port}-send-${width}.png`;
         const shot = await page.screenshot({ fullPage: true, animations: "disabled" });
         await writeFile(shotFile, shot);
         result.golden = lineSetHash(result.lines);
@@ -206,6 +231,8 @@ async function measure(origin, route, width, guard) {
         result.overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       }
     }
+    if (transferRoot && result.entryCssEncoding !== (side === "A" ? "identity" : "br"))
+      throw new Error(`初始样式的响应编码与 ${side} 侧不一致：${result.entryCssEncoding}`);
     result.ok = !errors.length && !external.length && !result.overflow;
   } catch (e) { result.error = String(e).slice(0, 300); }
   result.errors = errors; result.external = external;
@@ -220,14 +247,15 @@ const metrics = {
 };
 try {
   for (const route of ["open", "send"].filter(r => routesWanted.includes(r))) {
+    const routeRuns = route === "send" ? Number(args["send-runs"] ?? counts) : counts;
     results[route] = Object.fromEntries(Object.keys(origins).map(k => [k, { url: new URL("/agent", origins[k]).href, runs: [] }]));
-    for (let i = 0; i < counts; i++) {
+    for (let i = 0; i < routeRuns; i++) {
       const order = i % 2 ? Object.keys(origins).reverse() : Object.keys(origins);
       for (const k of order) for (const width of runWidths) {
-        const r = await measure(origins[k], route, width, false);
+        const r = await measure(origins[k], route, width, false, k);
         results[route][k].runs.push(r);
         const ms = v => v == null ? "null" : `${Math.round(v)}ms`;
-        console.log(`${route} ${k} ${i + 1}/${counts} ${width} ok=${r.ok} ${r.route === "open" ? `ready=${ms(r.ready)} input=${ms(r.inputReadyMs)} fonts=${r.fontFiles}/${Math.round((r.fontBytes ?? 0) / 1024)}KB` : `first=${ms(r.firstFeedbackMs)} delivery=${ms(r.firstDeliveryMs)} done=${ms(r.turnDoneMs)}`} ${r.error ?? ""}`);
+        console.log(`${route} ${k} ${i + 1}/${routeRuns} ${width} ok=${r.ok} ${r.route === "open" ? `ready=${ms(r.ready)} input=${ms(r.inputReadyMs)} fonts=${r.fontFiles}/${Math.round((r.fontBytes ?? 0) / 1024)}KB` : `first=${ms(r.firstFeedbackMs)} delivery=${ms(r.firstDeliveryMs)} done=${ms(r.turnDoneMs)}`} ${r.error ?? ""}`);
       }
     }
     for (const set of Object.values(results[route])) {
@@ -240,10 +268,11 @@ try {
       }
     }
     if (args.guards) for (const width of [1440, 960]) for (const [version, origin] of Object.entries(origins))
-      guards.push({ version, ...await measure(origin, route, width, true) });
+      guards.push({ version, ...await measure(origin, route, width, true, version) });
   }
 } finally {
   await browser.close();
-  await writeFile(args.out, JSON.stringify({ started, finished: new Date().toISOString(), profile: `Fast4G 20ms/4Mbps/3Mbps, CPUx${cpuRate}, cache off`, nodeVersion: process.version, builds, results, guards }, null, 2));
+  await writeFile(args.out, JSON.stringify({ started, finished: new Date().toISOString(), profile: `Fast4G 20ms/4Mbps/3Mbps, CPUx${cpuRate}, cache off`, nodeVersion: process.version, builds,
+    ...(transferRoot ? { transferComparison: "shared-server" } : {}), results, guards }, null, 2));
 }
 if (Object.values(results).some(v => Object.values(v).some(s => s.runs.some(r => !r.ok))) || guards.some(g => !g.ok)) process.exitCode = 1;

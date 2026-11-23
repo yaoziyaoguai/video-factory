@@ -42,7 +42,7 @@ type RouteHandler = (call: FetchCall) => { status: number; body: unknown } | Pro
 
 interface ServiceState { settings: Record<ServiceId, AnyServiceSettings & { apiKey?: string | null }> }
 
-function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) {
+function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}, directoryHandler?: RouteHandler) {
   const calls: FetchCall[] = [];
   const state: ServiceState = { settings: {
     pexels: UNCONFIGURED_PEXELS,
@@ -65,6 +65,12 @@ function installRoutes(handlers: Partial<Record<ServiceId, RouteHandler>> = {}) 
     const url = String(input);
     const call: FetchCall = { url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? JSON.parse(init.body) as unknown : undefined };
     calls.push(call);
+    // UIUX-10 挂载目录快照：一条 GET 返回全部 15 项；缺省回当前公开事实（不回显 Key）。
+    if (url.endsWith("/settings/services") && call.method === "GET") {
+      const result = await (directoryHandler?.(call)
+        ?? { status: 200, body: { services: SERVICE_IDS.map(id => { const { apiKey: _stored, ...published } = state.settings[id]; return published; }) } });
+      return new Response(JSON.stringify(result.body), { status: result.status, headers: { "content-type": "application/json" } });
+    }
     const service = SERVICE_IDS.find(id => url.endsWith(`/settings/services/${id}`)) ?? null;
     if (service) {
       const handler = handlers[service];
@@ -116,6 +122,27 @@ afterEach(() => {
 });
 
 describe("T3 免费服务列表与配置面板", () => {
+  it("UIUX-10 挂载只发一次目录快照请求；整体失败后逐服务重试恢复单行", async () => {
+    const { calls } = installRoutes();
+    renderServicesPage();
+    expect(await screen.findByRole("switch", { name: "允许 Agent 使用 Pexels" })).toBeInTheDocument();
+    const directoryReads = calls.filter(call => call.method === "GET" && call.url.endsWith("/settings/services"));
+    const singleReads = calls.filter(call => call.method === "GET" && /\/settings\/services\/[\w-]+$/.test(call.url));
+    expect(directoryReads).toHaveLength(1);
+    expect(singleReads).toHaveLength(0);
+
+    cleanup();
+    const failed = installRoutes({}, () => ({ status: 503, body: { code: "TEMPORARILY_UNAVAILABLE", message: "暂不可用" } }));
+    renderServicesPage();
+    const retry = await screen.findAllByRole("button", { name: "重试读取" });
+    expect(retry.length).toBeGreaterThan(0);
+    await userEvent.click(retry[0]!);
+    // 单行重试走既有逐服务 GET：只恢复该行，其余行保持读取失败。
+    expect(await screen.findByRole("switch", { name: "允许 Agent 使用 Pexels" })).toBeEnabled();
+    expect(failed.calls.filter(call => call.method === "GET" && /\/settings\/services\/pexels$/.test(call.url))).toHaveLength(1);
+    expect(failed.calls.filter(call => call.method === "GET" && /\/settings\/services\/pixabay$/.test(call.url))).toHaveLength(0);
+  });
+
   it("F2 NewsNow 保存中锁定草稿，未知且未编辑时重试原命令", async () => {
     let rejectSave!: (reason: Error) => void;
     const pendingSave = new Promise<{ status: number; body: unknown }>((_resolve, reject) => { rejectSave = reject; });
@@ -167,7 +194,8 @@ describe("T3 免费服务列表与配置面板", () => {
       { commandId: expect.any(String), expectedRevision: 2, enabled: true, apiKey: null },
       { commandId: expect.any(String), expectedRevision: 3, enabled: false, apiKey: null },
     ]);
-    expect(calls.filter(call => call.method === "GET" && call.url.endsWith("/services/pexels"))).toHaveLength(1);
+    // UIUX-10 后挂载只发目录快照，不再逐服务 GET；这里断言开关路径没有产生单服务读。
+    expect(calls.filter(call => call.method === "GET" && call.url.endsWith("/services/pexels"))).toHaveLength(0);
     await userEvent.click(screen.getByRole("tab", { name: "音乐素材" }));
     expect(screen.getByRole("switch", { name: "允许 Agent 使用 FreeToUse" })).toHaveAttribute("aria-checked", "false");
     expect(screen.queryByRole("button", { name: "配置 FreeToUse" })).toBeNull();
@@ -293,8 +321,8 @@ describe("T3 免费服务列表与配置面板", () => {
     let gets = 0;
     const { calls } = installRoutes({
       pexels: call => {
-        // 页面首次 GET 成功；配置面板打开时的 GET 失败一次，重试成功。
-        if (call.method === "GET" && ++gets === 2) return { status: 503, body: { code: "TEMPORARILY_UNAVAILABLE", message: "服务暂不可用。", requestId: "r", retryAction: "wait", currentRevisionId: null } };
+        // 配置面板打开时的 GET 失败一次，重试成功（行状态由挂载目录快照提供，不再有行级 GET）。
+        if (call.method === "GET" && ++gets === 1) return { status: 503, body: { code: "TEMPORARILY_UNAVAILABLE", message: "服务暂不可用。", requestId: "r", retryAction: "wait", currentRevisionId: null } };
         return undefined as never;
       },
     });

@@ -9,7 +9,7 @@ export interface ReferenceEntities {
 
 // 一页消息及它引用的制作范围；失败隔离到单个对象，保留可重试的引用位置。
 export async function hydrateReferences(messages: Message[], known: ReferenceEntities, cachedRevisions: Record<string, ArtifactRevision> = {},
-  refresh: { artifacts?: string[]; proposals?: string[]; runs?: string[] } = {}) {
+  refresh: { artifacts?: string[]; proposals?: string[]; runs?: string[] } = {}, readHead = agentApi.readArtifactHead) {
   const artifacts = new Map(known.artifacts.map(item => [item.id, item]));
   const proposals = new Map(known.proposals.map(item => [item.id, item]));
   const runs = new Map(known.runs.map(item => [item.id, item]));
@@ -34,7 +34,7 @@ export async function hydrateReferences(messages: Message[], known: ReferenceEnt
     ...[...runs.values()].flatMap(run => run.outputRevisions)].map(ref => [`${ref.artifactId}:${ref.revisionId}`, ref]));
   await Promise.all([
     ...[...new Set([...refs.values()].map(ref => ref.artifactId).concat(refresh.artifacts ?? []))].filter(id => !artifacts.has(id) || refresh.artifacts?.includes(id))
-      .map(id => read(`artifact:${id}`, () => agentApi.readArtifactHead(id), item => { artifacts.set(id, item); })),
+      .map(id => read(`artifact:${id}`, () => readHead(id), item => { artifacts.set(id, item); })),
     ...[...refs].filter(([key]) => !cachedRevisions[key]).map(([key, ref]) => read(`revision:${key}`, () => agentApi.readRevision(ref.artifactId, ref.revisionId), item => { revisions[key] = item; })),
   ]);
   // 认可版可早于当前 head，也不一定在消息首页；始终读取投影所指的准确修订。

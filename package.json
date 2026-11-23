@@ -15,6 +15,7 @@
     "studio:test": "npm test --workspace @video-factory/studio",
     "typecheck": "npm run typecheck --workspace @video-factory/studio",
     "test": "npm run typecheck && npm run studio:test && npm run build",
+    "perf:frame": "node perf/bench/frame-gate.mjs",
     "contracts:generate": "node contracts/agent/v1/verify.mjs --generate",
     "contracts:check": "node contracts/agent/v1/verify.mjs"
   },
