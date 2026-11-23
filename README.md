@@ -131,9 +131,9 @@ flowchart TB
 | HTTP 路由 | 鉴权、载荷校验、快照与 SSE | `routes.ts` |
 | AgentService | 受理、排队、停止、命令回执 | `agent-service.ts`、`executor.ts` |
 | Pi 运行时与工具 | 把业务能力交给模型调用 | `pi-runtime.ts`、`pi-tools.ts` |
-| 领域服务 | 草稿修订、认可、提案、授权、作品库 | `artifact-store.ts`、`creative-work.ts`、`production-service.ts` |
+| 领域服务 | 草稿修订、认可<br/>提案、授权、作品库 | `artifact-store.ts`、`creative-work.ts`、<br/>`production-service.ts` |
 | 制作 Worker | 供应商请求、异步轮询、费用事实 | `production-worker.ts`、`production-store.ts` |
-| 供应商端口 | 图片、视频、配音各自的请求与解析 | `image-generation.ts`、`ark-media.ts`、`wan-video.ts`、`minimax-video.ts`、`minimax-speech.ts`、`openai-speech.ts` |
+| 供应商端口 | 图片、视频、配音各自的请求与解析 | `image-generation.ts`、`ark-media.ts`、<br/>`wan-video.ts`、`minimax-video.ts`、<br/>`minimax-speech.ts`、`openai-speech.ts` |
 | 本机处理 | FFmpeg 渲染、字幕识别 | `local-render.ts`、`subtitle-service.ts` |
 | 免费服务与素材 | 免费配音、素材、音乐、选题 | `free-service-settings.ts`、`stock-providers.ts` |
 | 隔离执行 | 经 Unix 域套接字调用创作宿主 | `creative-runner.ts` |
@@ -299,14 +299,14 @@ erDiagram
 
 | 分组 | 表 |
 | --- | --- |
-| 对话与命令 | `conversations`、`messages`、`requests`、`request_deliveries`、`events`、`command_receipts`、`tool_invocations` |
-| 作品与草稿 | `works`、`artifacts`、`artifact_revisions`、`revision_blob_links`、`work_review_confirmations`、`work_stage_confirmations` |
+| 对话与命令 | `conversations`、`messages`、`requests`、`request_deliveries`、<br/>`events`、`command_receipts`、`tool_invocations` |
+| 作品与草稿 | `works`、`artifacts`、`artifact_revisions`、<br/>`revision_blob_links`、`work_review_confirmations`、`work_stage_confirmations` |
 | 提案与授权 | `proposals`、`authorizations`、`user_actions` |
-| 制作 | `production_runs`、`production_operations`、`production_attempts`、`production_attempt_outputs`、`production_input_locks`、`production_snapshots` |
-| 媒体与素材 | `production_blobs`、`material_candidates`、`material_blob_sources`、`material_search_batches`、`library_input_preparations` |
+| 制作 | `production_runs`、`production_operations`、`production_attempts`、<br/>`production_attempt_outputs`、`production_input_locks`、`production_snapshots` |
+| 媒体与素材 | `production_blobs`、`material_candidates`、`material_blob_sources`、<br/>`material_search_batches`、`library_input_preparations` |
 | 账单与额度 | `ledger_observations`、`pending_reconciliation`、`budget_policies` |
-| 模型与服务设置 | `provider_connections`、`provider_connection_settings`、`text_model_settings`、`text_model_entries`、`text_model_versions`、`free_service_settings`、`additional_media_settings`、`additional_media_versions`、`ark_video_settings`、`ark_video_configuration_versions`、`credential_encryption_state` |
-| 账号与运维 | `studio_users`、`studio_account_settings`、`user_profiles`、`storage_cleanups`、`agent_schema_migrations` |
+| 模型与服务设置 | `provider_connections`、`provider_connection_settings`、`text_model_settings`、<br/>`text_model_entries`、`text_model_versions`、`free_service_settings`、<br/>`additional_media_settings`、`additional_media_versions`、`ark_video_settings`、<br/>`ark_video_configuration_versions`、`credential_encryption_state` |
+| 账号与运维 | `studio_users`、`studio_account_settings`、`user_profiles`、<br/>`storage_cleanups`、`agent_schema_migrations` |
 
 ### 仓库结构
 
