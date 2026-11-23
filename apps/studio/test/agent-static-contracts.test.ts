@@ -155,3 +155,28 @@ test("UIUX-12 归档导出是纯 TS 流式实现：无子进程，crc32 在进�
   assert.ok(exportSource.includes('crc32 } from "node:zlib"'), "CRC 应使用进程内 zlib.crc32");
   assert.ok(exportSource.includes("MAX_ARCHIVE_STREAMS"), "导出应有并发流上限保护");
 });
+
+test("DEPLOY-FIX-01 生产环境变量契约：example 列出的运行期变量在 prod compose 全部显式承接", () => {
+  // Compose --env-file 只解析 YAML 占位符、不自动注入容器进程环境；.env.docker.prod.example
+  // 声明的每个变量（含注释示例）都必须在 prod compose 的 environment 映射或既有改名映射中
+  // 显式承接，否则生产 .env.docker.prod 配好也会断路（如 NEWSNOW_ALLOWED_ORIGINS 403）。
+  const prodEnvExample = read("../../../.env.docker.prod.example");
+  const prodCompose = read("../../../docker/docker-compose.prod.yml");
+  const renamed: Record<string, string> = {
+    FRAME_EDGE_TTS_PYTHON: "AGENT_EDGE_TTS_PYTHON",
+    FRAME_HTTP_PROXY: "HTTP_PROXY",
+    FRAME_HTTPS_PROXY: "HTTPS_PROXY",
+    FRAME_NO_PROXY: "NO_PROXY",
+  };
+  const declared = [...prodEnvExample.matchAll(/^(?:#\s*)?([A-Z][A-Z0-9_]*)=/gm)].map(m => m[1]!);
+  // 哨兵：防止 example 被改写成别的格式后本断言静默退化为恒真。
+  assert.ok(declared.includes("FRAME_CREDENTIAL_SECRET"), "example 应声明 FRAME_CREDENTIAL_SECRET");
+  assert.ok(declared.includes("NEWSNOW_ALLOWED_ORIGINS"), "example 应声明 NEWSNOW_ALLOWED_ORIGINS");
+  for (const name of declared) {
+    const target = renamed[name] ?? name;
+    assert.ok(
+      prodCompose.includes(`${target}:`) || prodCompose.includes(`\${${target}`),
+      `${name} 未在 docker-compose.prod.yml 承接（期望键 ${target}）`,
+    );
+  }
+});

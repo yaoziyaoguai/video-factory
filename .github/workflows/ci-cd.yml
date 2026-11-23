@@ -53,6 +53,14 @@ jobs:
       - run: npm run contracts:check && python contracts/agent/v1/verify-openapi.py
       - run: npm test
       - run: bash -n scripts/deploy-frame.sh && bash -n scripts/smoke-frame-release.sh && bash -n scripts/acr-pull-frame.sh && node --check scripts/smoke-creative-container.mjs
+      - name: Free runner disk space for multi-image build
+        # GitHub 官方托管 Runner 惯例：移除预装但本流水线用不到的大目录，为首次
+        # 冷构建 3GB frame-base + 双发布镜像 + 演练旧镜像腾出 ~18GB，不影响构建工具链。
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Reuse or build the stable system-and-font base image
         env:
           ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
@@ -103,6 +111,10 @@ jobs:
       - name: Rehearse real Linux app, UDS, migration and release recovery
         run: |
           bash scripts/smoke-frame-release.sh
+      - name: Reclaim the rehearsal baseline image
+        # 演练从零构建的历史基线镜像不再需要；保留待推送的 $BASE_TAG 与两个 release-$GITHUB_SHA。
+        run: |
+          docker image rm -f "video-factory:release-c1b54c68f3fb7336496d8748d33171c67c062660" >/dev/null 2>&1 || true
       - name: Publish verified images to Alibaba ACR
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && steps.transport.outputs.mode == 'acr'
         env:

@@ -20,6 +20,9 @@ services:
       HTTPS_PROXY: ${FRAME_HTTPS_PROXY:-}
       NO_PROXY: ${FRAME_NO_PROXY:-localhost,127.0.0.1,vf-newsnow}
       NODE_USE_ENV_PROXY: "1"
+      # Compose --env-file 只解析 YAML 占位符、不注入容器进程环境；同网 NewsNow
+      # 白名单必须在此显式承接，否则 network-policy 会把私网 origin 当非法探测拦截。
+      NEWSNOW_ALLOWED_ORIGINS: ${NEWSNOW_ALLOWED_ORIGINS:-}
       # Compose 发布端口时容器内对端是网桥网关而非环回；放行默认 Docker 网段，
       # 使宿主 Nginx 追加的 X-Forwarded-For 生效（登录限流按真实客户端 IP 计数）。
       STUDIO_TRUST_PROXY: ${STUDIO_TRUST_PROXY:-172.16.0.0/12}
