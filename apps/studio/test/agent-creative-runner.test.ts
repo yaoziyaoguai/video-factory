@@ -313,3 +313,31 @@ test("G2-1 真实 Pi Operations / PNG / Chromium-FFmpeg / 缓存会话 A-B / 隔
     pngImageBlocks: 2, nativeToolCalls, durationSeconds: 3, workspaceSwitch: "A-B-A same AgentSession", results }, null, 2));
   t.diagnostic(`真实容器证据 ${directory}`);
 });
+
+test("ISS-08 工程清单保留内部链接名称，发布读取只包含工程内普通文件", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-list-links-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  // 用临时的普通样本文件代表工作区外的系统和 Skill 文件。Python 执行镜像使用的同一份 helper。
+  const script = `
+import base64, io, json, os, runpy, sys
+from pathlib import Path
+sys.stdin = io.StringIO("")
+handle = runpy.run_path(sys.argv[1])["handle"]
+base = Path(sys.argv[2]).resolve()
+work, skills = base / "workspace", base / "skills"
+work.mkdir()
+skills.mkdir()
+handle.__globals__.update(PROJECT=work, SKILLS=skills)
+main = work / "main.py"
+main.write_text("sample")
+(skills / "notes.txt").write_text("skill")
+(base / "hosts").write_text("fixture")
+(work / "skill-link").symlink_to(skills / "notes.txt")
+(work / "system-link").symlink_to(base / "hosts")
+(work / "copy.py").symlink_to(main)
+files = handle({"action":"list"})["files"]
+print(json.dumps([[f["path"], base64.b64decode(handle({"action":"read","path":str(work/f["path"])})["data"]).decode()] for f in files]))
+`;
+  const { stdout } = await promisify(execFile)("python3", ["-I", "-c", script, path.join(root, "docker/creative-operations.py"), directory]);
+  assert.deepEqual(JSON.parse(stdout), [["copy.py", "sample"], ["main.py", "sample"]]);
+});

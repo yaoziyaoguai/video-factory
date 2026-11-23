@@ -46,6 +46,12 @@ export type MaterialProvider =
 export type Time = string;
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadMime".
+ */
+export type UploadMime =
+  "video/mp4" | "video/webm" | "image/png" | "image/jpeg" | "image/webp" | "audio/mpeg" | "audio/wav";
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "SaveFreeServiceSettings".
  */
 export type SaveFreeServiceSettings =
@@ -71,7 +77,9 @@ export type ErrorCode =
   | "CURSOR_EXPIRED"
   | "REQUEST_NOT_RUNNING"
   | "TEMPORARILY_UNAVAILABLE"
-  | "TARGET_SCOPE_MISMATCH";
+  | "TARGET_SCOPE_MISMATCH"
+  | "MEDIA_ARCHIVED"
+  | "BUDGET_LIMIT_EXCEEDED";
 /**
  * 旧 work 认可形状不变；独立稿认可和预览采用由 kind 明确区分，三个分支互斥。来源消息/身份由宿主注入。
  *
@@ -136,6 +144,24 @@ export type ContentSource =
       author: "user" | "assistant";
     };
 /**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadRights".
+ */
+export type UploadRights = "owned_or_licensed";
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SubtitleStyle".
+ */
+export type SubtitleStyle = "clean_bottom" | "social_pop_center" | "cinema_bilingual";
+/**
+ * @minItems 1
+ * @maxItems 10000
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SubtitleCues".
+ */
+export type SubtitleCues = [SubtitleCue, ...SubtitleCue[]];
+/**
  * draft 为初始有范围样张，preview 为明确请求的局部试做，production 为正式范围；许可不因本字段自动成立。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -149,6 +175,11 @@ export type CreationPurpose = "draft" | "preview" | "production";
  * via the `definition` "ProviderModelId".
  */
 export type ProviderModelId = string;
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StudioRole".
+ */
+export type StudioRole = "admin" | "creator";
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "InputRef".
@@ -189,154 +220,223 @@ export type InputRef =
 export type RenderParameters =
   | {
       format: "mp4";
-      width: number;
-      height: number;
-      fps: number;
+      width: RenderDimension;
+      height: RenderDimension;
+      fps: RenderFrameRate;
       assembly: "ordered_concat";
-      audioMode?: "none" | "preserve";
-      /**
-       * 可选：与 inputs 的视觉顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
-       *
-       * @minItems 1
-       * @maxItems 24
-       */
-      segmentIds?: [Id, ...Id[]];
+      audioMode?: OrderedConcatAudioMode;
+      segmentIds?: OrderedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      visualStyles?: OrderedConcatVisualStyles;
     }
   | {
       format: "mp4";
-      width: 1280;
-      height: 720;
-      fps: 24;
+      width: RenderDimension;
+      height: RenderDimension;
+      fps: RenderFrameRate;
       assembly: "narrated_concat";
-      /**
-       * @minItems 1
-       * @maxItems 23
-       */
-      videoInputSlots: [number, ...number[]];
-      narrationInputSlot: number;
+      videoInputSlots: NarratedConcatVideoInputSlots;
+      narrationInputSlot: NarratedConcatNarrationInputSlot;
       durationPolicy: "preserve_all";
-      /**
-       * 可选：与 videoInputSlots 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
-       *
-       * @minItems 1
-       * @maxItems 24
-       */
-      segmentIds?: [Id, ...Id[]];
+      segmentIds?: NarratedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      visualStyles?: OrderedConcatVisualStyles;
     }
   | {
       format: "mp4";
-      width: 1280;
-      height: 720;
-      fps: 24;
+      width: RenderDimension;
+      height: RenderDimension;
+      fps: RenderFrameRate;
       assembly: "timed_narrated_concat";
-      /**
-       * @minItems 1
-       * @maxItems 24
-       */
-      segments: [
-        (
-          | {
-              kind: "video";
-              inputSlot: number;
-              startMs: number;
-              durationMs: number;
-            }
-          | {
-              kind: "image";
-              inputSlot: number;
-              durationMs: number;
-            }
-        ),
-        ...(
-          | {
-              kind: "video";
-              inputSlot: number;
-              startMs: number;
-              durationMs: number;
-            }
-          | {
-              kind: "image";
-              inputSlot: number;
-              durationMs: number;
-            }
-        )[]
-      ];
-      narrationInputSlot: number;
-      /**
-       * 可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
-       *
-       * @minItems 1
-       * @maxItems 24
-       */
-      segmentIds?: [Id, ...Id[]];
+      segments: TimedNarratedConcatSegments;
+      narrationInputSlot: NarratedConcatNarrationInputSlot;
+      segmentIds?: TimedNarratedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      subtitles?: RenderSubtitles;
     }
   | {
       format: "mp4";
-      width: 1280;
-      height: 720;
-      fps: 24;
+      width: RenderDimension;
+      height: RenderDimension;
+      fps: RenderFrameRate;
       assembly: "mixed_concat";
-      /**
-       * @minItems 1
-       * @maxItems 24
-       */
-      segments: [
-        (
-          | {
-              kind: "video";
-              inputSlot: number;
-              startMs: number;
-              durationMs: number;
-              originalGain?: number;
-            }
-          | {
-              kind: "image";
-              inputSlot: number;
-              durationMs: number;
-            }
-        ),
-        ...(
-          | {
-              kind: "video";
-              inputSlot: number;
-              startMs: number;
-              durationMs: number;
-              originalGain?: number;
-            }
-          | {
-              kind: "image";
-              inputSlot: number;
-              durationMs: number;
-            }
-        )[]
-      ];
-      /**
-       * 可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
-       *
-       * @minItems 1
-       * @maxItems 24
-       */
-      segmentIds: [Id, ...Id[]];
-      music?: {
-        inputSlot: number;
-        candidateId?: Id1;
-        sourceStartMs: number;
-        sourceDurationMs: number;
-        timelineStartMs: number;
-        playDurationMs: number;
-        repeat: boolean;
-        gain: number;
-        fadeInMs: number;
-        fadeOutMs: number;
-        duckUnderNarration: boolean;
-      };
-      narration?: {
-        inputSlot: number;
-        timelineStartMs: number;
-        gain: number;
-      };
+      segments: MixedConcatSegments;
+      segmentIds: TimedNarratedConcatSegmentIds;
+      music?: MixedConcatMusic;
+      narration?: MixedConcatNarration;
+      fitMode?: RenderFitMode;
+      subtitles?: RenderSubtitles;
     }
   | CodeProjectParameters;
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RenderDimension".
+ */
+export type RenderDimension = number;
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RenderFrameRate".
+ */
+export type RenderFrameRate = 24 | 25 | 30 | 60;
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "OrderedConcatAudioMode".
+ */
+export type OrderedConcatAudioMode = "none" | "preserve";
+/**
+ * 可选：与 inputs 的视觉顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
+ *
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "OrderedConcatSegmentIds".
+ */
+export type OrderedConcatSegmentIds = [Id, ...Id[]];
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RenderFitMode".
+ */
+export type RenderFitMode = "contain_pad" | "cover_crop" | "blur_backdrop";
+/**
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "OrderedConcatVisualStyles".
+ */
+export type OrderedConcatVisualStyles = [
+  {
+    inputSlot: number;
+    fitMode: RenderFitMode;
+  },
+  ...{
+    inputSlot: number;
+    fitMode: RenderFitMode;
+  }[]
+];
+/**
+ * @minItems 1
+ * @maxItems 23
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "NarratedConcatVideoInputSlots".
+ */
+export type NarratedConcatVideoInputSlots = [number, ...number[]];
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "NarratedConcatNarrationInputSlot".
+ */
+export type NarratedConcatNarrationInputSlot = number;
+/**
+ * 可选：与 videoInputSlots 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
+ *
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "NarratedConcatSegmentIds".
+ */
+export type NarratedConcatSegmentIds = [Id, ...Id[]];
+/**
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "TimedNarratedConcatSegments".
+ */
+export type TimedNarratedConcatSegments = [
+  (
+    | {
+        kind: "video";
+        inputSlot: number;
+        startMs: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+      }
+    | {
+        kind: "image";
+        inputSlot: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+        kenBurns?: StillMotion;
+      }
+  ),
+  ...(
+    | {
+        kind: "video";
+        inputSlot: number;
+        startMs: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+      }
+    | {
+        kind: "image";
+        inputSlot: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+        kenBurns?: StillMotion;
+      }
+  )[]
+];
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StillMotion".
+ */
+export type StillMotion = "none" | "zoom_in" | "zoom_out" | "pan";
+/**
+ * 可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。
+ *
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "TimedNarratedConcatSegmentIds".
+ */
+export type TimedNarratedConcatSegmentIds = [Id, ...Id[]];
+/**
+ * @minItems 1
+ * @maxItems 24
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "MixedConcatSegments".
+ */
+export type MixedConcatSegments = [
+  (
+    | {
+        kind: "video";
+        inputSlot: number;
+        startMs: number;
+        durationMs: number;
+        originalGain?: number;
+        fitMode?: RenderFitMode;
+      }
+    | {
+        kind: "image";
+        inputSlot: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+        kenBurns?: StillMotion;
+      }
+  ),
+  ...(
+    | {
+        kind: "video";
+        inputSlot: number;
+        startMs: number;
+        durationMs: number;
+        originalGain?: number;
+        fitMode?: RenderFitMode;
+      }
+    | {
+        kind: "image";
+        inputSlot: number;
+        durationMs: number;
+        fitMode?: RenderFitMode;
+        kenBurns?: StillMotion;
+      }
+  )[]
+];
 /**
  * 外部素材候选：仅在音乐来自素材库已采用文件时给出。本地已登记音频（如冻结工程渲染的程序音乐）作为音乐输入时不带本字段，也不得伪造外部候选 ID；来源事实由所引用的音频对象自身携带。
  */
@@ -389,7 +489,7 @@ export type OperationSpec =
       outputSlot: Id;
       /**
        * @minItems 1
-       * @maxItems 24
+       * @maxItems 31
        */
       inputs: [InputRef, ...InputRef[]];
       maxCreateAttempts: number;
@@ -489,7 +589,17 @@ export type ReviewItemTarget =
  * via the `definition` "ReviewRole".
  */
 export type ReviewRole =
-  "content" | "plan" | "character" | "scene" | "storyboard" | "voice" | "music" | "clip" | "video" | "other";
+  | "content"
+  | "plan"
+  | "character"
+  | "scene"
+  | "storyboard"
+  | "voice"
+  | "music"
+  | "clip"
+  | "video"
+  | "other"
+  | "subtitle";
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "OperationRequest".
@@ -500,7 +610,7 @@ export type OperationRequest =
       outputSlot: Id;
       /**
        * @minItems 1
-       * @maxItems 24
+       * @maxItems 31
        */
       inputs: [InputRef, ...InputRef[]];
       maxCreateAttempts: number;
@@ -545,8 +655,65 @@ export type OperationRequest =
       maxCreateAttempts: 1;
       kind: "render";
       model: null;
-      parameters: RenderParameters;
+      parameters: RenderInputParameters;
     };
+/**
+ * 可省略成对画幅，读取视觉素材主画幅。可省略帧率，沿用 24fps。冻结操作必含宽、高与帧率。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RenderInputParameters".
+ */
+export type RenderInputParameters =
+  | {
+      format: "mp4";
+      width?: RenderDimension;
+      height?: RenderDimension;
+      fps?: RenderFrameRate;
+      assembly: "ordered_concat";
+      audioMode?: OrderedConcatAudioMode;
+      segmentIds?: OrderedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      visualStyles?: OrderedConcatVisualStyles;
+    }
+  | {
+      format: "mp4";
+      width?: RenderDimension;
+      height?: RenderDimension;
+      fps?: RenderFrameRate;
+      assembly: "narrated_concat";
+      videoInputSlots: NarratedConcatVideoInputSlots;
+      narrationInputSlot: NarratedConcatNarrationInputSlot;
+      durationPolicy: "preserve_all";
+      segmentIds?: NarratedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      visualStyles?: OrderedConcatVisualStyles;
+    }
+  | {
+      format: "mp4";
+      width?: RenderDimension;
+      height?: RenderDimension;
+      fps?: RenderFrameRate;
+      assembly: "timed_narrated_concat";
+      segments: TimedNarratedConcatSegments;
+      narrationInputSlot: NarratedConcatNarrationInputSlot;
+      segmentIds?: TimedNarratedConcatSegmentIds;
+      fitMode?: RenderFitMode;
+      subtitles?: RenderSubtitles;
+    }
+  | {
+      format: "mp4";
+      width?: RenderDimension;
+      height?: RenderDimension;
+      fps?: RenderFrameRate;
+      assembly: "mixed_concat";
+      segments: MixedConcatSegments;
+      segmentIds: TimedNarratedConcatSegmentIds;
+      music?: MixedConcatMusic;
+      narration?: MixedConcatNarration;
+      fitMode?: RenderFitMode;
+      subtitles?: RenderSubtitles;
+    }
+  | CodeProjectParameters;
 /**
  * 历史无 type 的快照只读解释为 paid_production，保持原 JSON 与 digest；新写必须为 ProductionSpec。
  *
@@ -659,7 +826,7 @@ export type ToolOperationRequest =
       outputSlot: Id;
       /**
        * @minItems 1
-       * @maxItems 24
+       * @maxItems 31
        */
       inputs: [InputRef, ...InputRef[]];
       kind: "video";
@@ -700,7 +867,7 @@ export type ToolOperationRequest =
       inputs: InputRef[];
       kind: "render";
       model: null;
-      parameters: RenderParameters;
+      parameters: RenderInputParameters;
     };
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -843,9 +1010,72 @@ export type ExecutionSnapshotSpec = ProductionSpec | LocalCreationSpec;
  * via the `definition` "StoredExecutionSnapshot".
  */
 export type StoredExecutionSnapshot = ProductionSpec | LocalCreationSpec | LegacyProductionSpec;
+/**
+ * 下载可播放媒体。工程文件始终使用 attachment。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BlobDownloadFlag".
+ */
+export type BlobDownloadFlag = "1";
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RemixTimeline".
+ */
+export type RemixTimeline =
+  | {
+      available: false;
+    }
+  | {
+      available: true;
+      revision: number;
+      base: RevisionRef;
+      /**
+       * @minItems 1
+       * @maxItems 24
+       */
+      segments: [RemixSegment, ...RemixSegment[]];
+      narrationGain: number | null;
+      musicGain: number | null;
+      duckUnderNarration: boolean;
+      subtitles: RenderSubtitles | null;
+    };
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StatementLine".
+ */
+export type StatementLine =
+  | {
+      providerId: Id;
+      connectionId: Id;
+      providerTaskId: string;
+      requestIdentity?: Id;
+      fact: {
+        kind: "authoritative";
+        billingFactId: string;
+        sourceRevision: string;
+        netAmount: Money;
+        final: boolean;
+        evidenceId: Id;
+      };
+    }
+  | {
+      providerId: Id;
+      connectionId: Id;
+      providerTaskId?: string;
+      requestIdentity: Id;
+      fact: {
+        kind: "authoritative";
+        billingFactId: string;
+        sourceRevision: string;
+        netAmount: Money;
+        final: boolean;
+        evidenceId: Id;
+      };
+    };
 
 export interface ContractPayloads {
   FreeServiceSettings: FreeServiceSettings;
+  FreeServiceSettingsDirectory: FreeServiceSettingsDirectory;
   Id: Id;
   Digest: Digest;
   Cursor: Cursor;
@@ -1050,6 +1280,61 @@ export interface ContractPayloads {
   ReviewApprovalHistoryItem: ReviewApprovalHistoryItem;
   ReviewApprovalHistoryPage: ReviewApprovalHistoryPage;
   RequestExecution: RequestExecution;
+  BlobDownloadFlag: BlobDownloadFlag;
+  StorageUsage: StorageUsage;
+  CleanupStorage: CleanupStorage;
+  StorageCleanupReceipt: StorageCleanupReceipt;
+  FrameHealth: FrameHealth;
+  ProviderConnectionProbe: ProviderConnectionProbe;
+  RenderFitMode: RenderFitMode;
+  StillMotion: StillMotion;
+  RenderDimension: RenderDimension;
+  RenderFrameRate: RenderFrameRate;
+  RenderInputParameters: RenderInputParameters;
+  OrderedConcatAudioMode: OrderedConcatAudioMode;
+  OrderedConcatSegmentIds: OrderedConcatSegmentIds;
+  OrderedConcatVisualStyles: OrderedConcatVisualStyles;
+  NarratedConcatVideoInputSlots: NarratedConcatVideoInputSlots;
+  NarratedConcatNarrationInputSlot: NarratedConcatNarrationInputSlot;
+  NarratedConcatSegmentIds: NarratedConcatSegmentIds;
+  TimedNarratedConcatSegments: TimedNarratedConcatSegments;
+  TimedNarratedConcatSegmentIds: TimedNarratedConcatSegmentIds;
+  MixedConcatSegments: MixedConcatSegments;
+  MixedConcatMusic: MixedConcatMusic;
+  MixedConcatNarration: MixedConcatNarration;
+  UploadMime: UploadMime;
+  UploadRights: UploadRights;
+  UploadForm: UploadForm;
+  UploadFirstFrame: UploadFirstFrame;
+  UploadFacts: UploadFacts;
+  UploadAttachment: UploadAttachment;
+  UploadReceipt: UploadReceipt;
+  SubtitleStyle: SubtitleStyle;
+  SubtitleCue: SubtitleCue;
+  SubtitleCues: SubtitleCues;
+  SubtitleTrack: SubtitleTrack;
+  RenderSubtitles: RenderSubtitles;
+  ToolCreateSubtitles: ToolCreateSubtitles;
+  CreateSubtitleTrack: CreateSubtitleTrack;
+  SaveSubtitleRevision: SaveSubtitleRevision;
+  SubtitleReceipt: SubtitleReceipt;
+  RemixCut: RemixCut;
+  RemixSegment: RemixSegment;
+  RemixTimeline: RemixTimeline;
+  RemixCommand: RemixCommand;
+  StudioRole: StudioRole;
+  StudioAccount: StudioAccount;
+  StudioAccounts: StudioAccounts;
+  CreateStudioAccount: CreateStudioAccount;
+  BudgetPolicy: BudgetPolicy;
+  BudgetPolicies: BudgetPolicies;
+  SaveBudgetPolicy: SaveBudgetPolicy;
+  ProviderUsage: ProviderUsage;
+  StatementLine: StatementLine;
+  UpdateStudioAccount: UpdateStudioAccount;
+  BudgetPeriod: BudgetPeriod;
+  BudgetUsage: BudgetUsage;
+  BudgetSummary: BudgetSummary;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1124,6 +1409,36 @@ export interface EdgeTtsSettings {
   voice: string;
 }
 /**
+ * 全部免费服务（15 项）的当前配置快照；数组顺序固定为 pexels、pixabay、unsplash、coverr、wikimedia、nasa、met、cleveland、archive、freetouse、incompetech、douyin-music、tiktok-sounds、newsnow、edge-tts。单项形状与单服务读取一致，不含 Key 明文。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "FreeServiceSettingsDirectory".
+ */
+export interface FreeServiceSettingsDirectory {
+  /**
+   * @minItems 15
+   * @maxItems 15
+   */
+  services: [
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    FreeServiceSettings,
+    ...FreeServiceSettings[]
+  ];
+}
+/**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "MaterialCandidate".
  */
@@ -1172,7 +1487,7 @@ export interface MaterialSearchResult {
 export interface MaterialImportResult {
   blobId: Id;
   digest: Digest;
-  mimeType: "video/mp4" | "video/webm" | "image/png" | "image/jpeg" | "audio/mpeg" | "audio/wav";
+  mimeType: UploadMime;
   durationMs: number | null;
   provenance: MediaProvenance;
   /**
@@ -1188,12 +1503,12 @@ export interface MaterialImportResult {
  * via the `definition` "MediaProvenance".
  */
 export interface MediaProvenance {
-  provider: MaterialProvider;
+  provider: MaterialProvider | "user_upload";
   assetId: string;
   sourceUrl: string;
   creatorName: string | null;
   creatorUrl: string | null;
-  licenseUrl: string;
+  licenseUrl: string | null;
   acquiredAt: Time;
   title?: string;
   licenseName?: string;
@@ -1276,6 +1591,7 @@ export interface ToolDubFree {
    * 语速，如 +10% 或 -5%；省略为 +0%。
    */
   rate?: string;
+  workId?: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1289,6 +1605,15 @@ export interface DubFreeResult {
   boundaryCount: number;
   voice: string;
   rate: string;
+  subtitle?: RevisionRef;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RevisionRef".
+ */
+export interface RevisionRef {
+  artifactId: Id;
+  revisionId: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1326,14 +1651,6 @@ export interface SaveFreeServiceSettingsReceipt {
 export interface Money {
   currency: "CNY";
   amountMinor: number;
-}
-/**
- * This interface was referenced by `ContractPayloads`'s JSON-Schema
- * via the `definition` "RevisionRef".
- */
-export interface RevisionRef {
-  artifactId: Id;
-  revisionId: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1430,6 +1747,11 @@ export interface MessageInput {
    */
   librarySelections?: LibrarySelection[];
   reviewContext?: ReviewContext | null;
+  /**
+   * @minItems 0
+   * @maxItems 24
+   */
+  uploads?: RevisionRef[];
 }
 /**
  * 单项或整组准确版本的真实用户认可。没有组版本锁；只认可不排请求，approve_and_continue 按钮仅排一次，finalize_video 只定稿准确最终视频。来源消息/身份由宿主注入。
@@ -1483,7 +1805,7 @@ export interface AdoptPreviewConfirmation {
   action: "finalize_video";
 }
 /**
- * 持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。
+ * 持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。来源视频属于其他账号或不存在时返回 NOT_FOUND。
  *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "LibrarySelection".
@@ -1535,6 +1857,11 @@ export interface Message {
    * 该条原始用户请求的执行记录；旧消息未采集时为空或省略。
    */
   execution?: RequestExecution | null;
+  /**
+   * @minItems 0
+   * @maxItems 24
+   */
+  uploads?: UploadAttachment[];
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1542,6 +1869,8 @@ export interface Message {
  */
 export interface MessageReferences {
   /**
+   * 用户消息列出带入的准确修订。助手消息列出本轮显式交付及制作产物修订，输入克隆与工具中间产物仅保留在相应作品和工具记录中。
+   *
    * @maxItems 24
    */
   artifacts: RevisionRef[];
@@ -1613,6 +1942,42 @@ export interface RequestProgressStep {
   state: "running" | "completed" | "failed";
   workId?: Id;
   updatedAt: Time;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadAttachment".
+ */
+export interface UploadAttachment {
+  source: RevisionRef;
+  blobId: Id;
+  mimeType: UploadMime;
+  durationMs: number | null;
+  facts: UploadFacts;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadFacts".
+ */
+export interface UploadFacts {
+  fileName: string;
+  sizeBytes: number;
+  rights: UploadRights;
+  width?: number;
+  height?: number;
+  sampleRate?: number;
+  channels?: number;
+  hasAudio?: boolean;
+  firstFrame?: UploadFirstFrame;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadFirstFrame".
+ */
+export interface UploadFirstFrame {
+  blobId: Id;
+  digest: Digest;
+  width: number;
+  height: number;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1702,7 +2067,7 @@ export interface MarkdownContent {
 export interface MediaContent {
   format: "media";
   blobId: Id;
-  mimeType: "video/mp4" | "video/webm" | "image/png" | "image/jpeg" | "audio/mpeg" | "audio/wav";
+  mimeType: UploadMime;
   durationMs: number | null;
   /**
    * 按(provider,assetId)去重的素材来源；旧记录缺省视为空。
@@ -1712,6 +2077,16 @@ export interface MediaContent {
    */
   sources?: MediaProvenance[];
   dub?: DubbedSpeechMeta;
+  upload?: UploadFacts;
+  subtitles?: RenderSubtitles;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RenderSubtitles".
+ */
+export interface RenderSubtitles {
+  track: RevisionRef;
+  mode: "burn_in" | "soft";
 }
 /**
  * 作品库选材带入的二进制或未知类型文件：按原字节共享 blob，仅提供下载，不在客户端解释或执行；path 为来源工程内的原相对路径，mimeType 不限媒体枚举。
@@ -1724,6 +2099,7 @@ export interface FileContent {
   blobId: Id;
   mimeType: string;
   path: RelativeProjectPath;
+  sizeBytes?: number;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -1737,9 +2113,13 @@ export interface ArtifactRevision {
   requestId: Id | null;
   runId: Id | null;
   digest: Digest;
-  content: MarkdownContent | MediaContent | CreativeProjectContent | FileContent;
+  content: MarkdownContent | MediaContent | CreativeProjectContent | FileContent | SubtitleTrack;
   createdAt: Time;
   creationBinding?: CreationBinding | null;
+  /**
+   * 本修订引用的媒体已归档时返回。修订的文本、摘要、来源与审阅历史保留。
+   */
+  archivedAt?: string;
 }
 /**
  * 运行前已持久封存的源码、模板、字体、时间线及素材引用。runtimeImage 为宿主允许的固定镜像标识；锁文件/时间线/入口须属于此清单，定稿引用旧快照而非重采工作目录。
@@ -1781,6 +2161,8 @@ export interface ProjectFile {
   blobId: Id;
   digest: Digest;
   purpose: string;
+  sizeBytes?: number;
+  mimeType?: string;
 }
 /**
  * 保存解释器/命令及清单内入口参数；服务端只在固定隔离环境执行，不接受宿主路径或任意挂载。
@@ -1794,6 +2176,28 @@ export interface ProjectEntrypoint {
    * @maxItems 32
    */
   argv: [string, ...string[]];
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SubtitleTrack".
+ */
+export interface SubtitleTrack {
+  format: "subtitles";
+  source: RevisionRef;
+  alignment: "tts_word" | "local_asr";
+  stylePreset: SubtitleStyle;
+  cues: SubtitleCues;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SubtitleCue".
+ */
+export interface SubtitleCue {
+  id: Id;
+  startMs: number;
+  endMs: number;
+  text: string;
+  speaker?: string;
 }
 /**
  * 由服务端解析的不可变直接绑定。inputSources 是实际执行来源，reviewInputs 仅是本次必要认可依据；不从最新 head 反推历史。
@@ -1934,7 +2338,7 @@ export interface SkillPackage {
    */
   diagnostics: string[];
   /**
-   * 独立于发现 status；未知依赖为 unchecked，ready 必须有对应实际探测证据。
+   * 按 SKILL.md 的 metadata.frame.requires 声明核验创作沙箱。bins 列出命令，pythonModules 列出 Python 顶层模块。无依赖声明为 unchecked，全部实测可用为 ready，否则在 runtimeMissing 展示缺失项。
    */
   runtimeStatus: "unchecked" | "ready" | "unavailable";
   /**
@@ -1978,7 +2382,7 @@ export interface SkillPackagesView {
  */
 export interface InstallSkillPackage {
   /**
-   * Pi 原生包来源；本机目录是服务端目录。服务端拒绝 URL 内嵌凭据，SDK 负责解析来源与 manifest。
+   * 服务器本机包目录、npm 注册表包名或公共 HTTPS Git 仓库。安装前核验目录边界或远端主机，Git 禁用文件协议和重定向。SDK 负责解析包与 manifest。
    */
   source: string;
 }
@@ -2008,6 +2412,7 @@ export interface Bootstrap {
    * @maxItems 200
    */
   skills: SkillSummary[];
+  accountRole?: StudioRole;
 }
 /**
  * 搜索已启用来源的image/video/audio素材并保存原批次顺序；跨轮用read_material_batch读原批次，import_material采用后才可交付blob。音频声乐标注来自供应商，未知不猜；音乐搜索不自动开始视频事项。
@@ -2115,6 +2520,13 @@ export interface VideoParameters {
   aspectRatio: "16:9" | "9:16" | "1:1";
   resolution: string;
   audioMode: "none" | "native";
+  firstFrameSlot?: number;
+  lastFrameSlot?: number;
+  /**
+   * @minItems 1
+   * @maxItems 30
+   */
+  referenceImageSlots?: [number, ...number[]];
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2136,15 +2548,41 @@ export interface SpeechParameters {
   format: "mp3" | "wav";
 }
 /**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "MixedConcatMusic".
+ */
+export interface MixedConcatMusic {
+  inputSlot: number;
+  candidateId?: Id1;
+  sourceStartMs: number;
+  sourceDurationMs: number;
+  timelineStartMs: number;
+  playDurationMs: number;
+  repeat: boolean;
+  gain: number;
+  fadeInMs: number;
+  fadeOutMs: number;
+  duckUnderNarration: boolean;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "MixedConcatNarration".
+ */
+export interface MixedConcatNarration {
+  inputSlot: number;
+  timelineStartMs: number;
+  gain: number;
+}
+/**
  * 只读：prepare按music.candidateId与音频blob准确绑定首次采用事实，在digest前冻结；工具及OperationRequest不接受提交。
  */
 export interface MediaProvenance1 {
-  provider: MaterialProvider;
+  provider: MaterialProvider | "user_upload";
   assetId: string;
   sourceUrl: string;
   creatorName: string | null;
   creatorUrl: string | null;
-  licenseUrl: string;
+  licenseUrl: string | null;
   acquiredAt: Time;
   title?: string;
   licenseName?: string;
@@ -2474,6 +2912,7 @@ export interface Run {
   title: string;
   audioSummary?: AudioSummary;
   origin: RunOrigin;
+  remixOf?: Id;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2676,6 +3115,8 @@ export interface MaterialQuery {
   limit: number;
 }
 /**
+ * 作品库选材副本和免费配音产出也发送 artifact.delivered。裁剪通知不影响修订的认可资格。
+ *
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
  * via the `definition` "BusinessEvent".
  */
@@ -2950,7 +3391,7 @@ export interface ExecutionInput {
   operation: OperationSpec | LocalRenderOperation;
   /**
    * @minItems 0
-   * @maxItems 24
+   * @maxItems 31
    */
   resolvedInputs: {
     slot: number;
@@ -2996,12 +3437,12 @@ export interface FrozenReviewTarget {
  * 只读：服务端从实际音乐输入解析并在 digest 前冻结的来源事实，与 OperationSpec.musicSource 同义；工具及 ProjectRenderRequestOperation 不接受提交。
  */
 export interface MediaProvenance2 {
-  provider: MaterialProvider;
+  provider: MaterialProvider | "user_upload";
   assetId: string;
   sourceUrl: string;
   creatorName: string | null;
   creatorUrl: string | null;
-  licenseUrl: string;
+  licenseUrl: string | null;
   acquiredAt: Time;
   title?: string;
   licenseName?: string;
@@ -3029,6 +3470,21 @@ export interface ExecutionObservation {
    */
   message: string | null;
   billing: BillingFact | null;
+  usage?: ProviderUsage;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ProviderUsage".
+ */
+export interface ProviderUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  characters?: number;
+  mediaDurationMs?: number;
+  width?: number;
+  height?: number;
+  resolution?: string;
+  providerReceiptId?: string;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3131,7 +3587,7 @@ export interface ProviderConnection {
   id: string;
   name: string;
   /**
-   * openai 是唯一的 OpenAI 供应商连接，承载 text/image/speech 且共用 Key；minimax 承载 speech/video；ark 承载 image/video，wan 只承载 video（万相视频走其真实媒体端点，不是 OpenAI 文本兼容协议）。openai-chat-completions/anthropic-messages 是历史可读兼容串，不得重新登记退役的文本/图片/配音能力。
+   * OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。
    */
   protocol: "openai" | "openai-chat-completions" | "anthropic-messages" | "ark" | "minimax" | "wan";
   baseUrl: string;
@@ -3374,6 +3830,8 @@ export interface LibraryProjectFile {
    * 封存工程清单里该文件的登记 MIME；客户端据此区分媒体与文本文件。
    */
   mimeType: string;
+  sizeBytes: number;
+  blobId: Id;
 }
 /**
  * 该文件所属的封存工程修订；多工程合成时同名 relativePath 以此区分来源，不能指向另一个工程。
@@ -3656,7 +4114,7 @@ export interface ProjectRenderRequestOperation {
    * @maxItems 24
    */
   inputs: InputRef[];
-  parameters: RenderParameters;
+  parameters: RenderInputParameters;
   target: ReviewTarget;
   baseRevisionId?: Id;
 }
@@ -3734,4 +4192,261 @@ export interface ReviewApprovalHistoryPage {
    */
   items: ReviewApprovalHistoryItem[];
   nextCursor: Cursor | null;
+}
+/**
+ * 当前用户可见媒体按内容摘要去重。finalBytes 与 draftBytes 互斥。reclaimableBytes 为草稿中本轮可释放的物理字节。revision 是显式清理命令版本。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StorageUsage".
+ */
+export interface StorageUsage {
+  revision: number;
+  finalBytes: number;
+  draftBytes: number;
+  reclaimableBytes: number;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "CleanupStorage".
+ */
+export interface CleanupStorage {
+  commandId: Id;
+  expectedRevision: number;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StorageCleanupReceipt".
+ */
+export interface StorageCleanupReceipt {
+  usage: StorageUsage;
+  freedBytes: number;
+  freedFiles: number;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "FrameHealth".
+ */
+export interface FrameHealth {
+  status: "ok" | "degraded";
+  product: "frame";
+  runtime: "pi";
+  liveness: "ok";
+  readiness: {
+    database: "ready" | "busy" | "unavailable";
+    creativeRunner: "ready" | "unavailable" | "not_configured";
+  };
+  release?: string;
+}
+/**
+ * 主动检查已保存连接时供应商目录成功响应的时间。此操作不生成内容、不修改配置。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ProviderConnectionProbe".
+ */
+export interface ProviderConnectionProbe {
+  checkedAt: string;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadForm".
+ */
+export interface UploadForm {
+  commandId: Id;
+  expectedRevision: number;
+  rights: UploadRights;
+  /**
+   * 单个上传文件的原始字节。图片、音频、视频分别限 30、100、512 MiB。
+   */
+  file: string;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UploadReceipt".
+ */
+export interface UploadReceipt {
+  conversation: Conversation;
+  attachment: UploadAttachment;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ToolCreateSubtitles".
+ */
+export interface ToolCreateSubtitles {
+  workId: Id;
+  source: RevisionRef;
+  stylePreset?: SubtitleStyle;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "CreateSubtitleTrack".
+ */
+export interface CreateSubtitleTrack {
+  commandId: Id;
+  expectedRevision: number;
+  source: RevisionRef;
+  stylePreset: SubtitleStyle;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SaveSubtitleRevision".
+ */
+export interface SaveSubtitleRevision {
+  commandId: Id;
+  expectedRevision: number;
+  baseRevisionId: Id;
+  stylePreset: SubtitleStyle;
+  cues: SubtitleCues;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SubtitleReceipt".
+ */
+export interface SubtitleReceipt {
+  artifact: RevisionRef;
+  revisionNumber: number;
+  workId: Id | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RemixCut".
+ */
+export interface RemixCut {
+  id: Id;
+  startMs: number;
+  durationMs: number;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RemixSegment".
+ */
+export interface RemixSegment {
+  id: Id;
+  label: string;
+  kind: "video" | "image";
+  startMs: number;
+  durationMs: number;
+  sourceDurationMs: number | null;
+  originalGain: number | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RemixCommand".
+ */
+export interface RemixCommand {
+  commandId: Id;
+  expectedRevision: number;
+  baseRevisionId: Id;
+  /**
+   * @minItems 1
+   * @maxItems 24
+   */
+  segments: [RemixCut, ...RemixCut[]];
+  originalGain?: number;
+  narrationGain?: number;
+  musicGain?: number;
+  duckUnderNarration?: boolean;
+  subtitles?: RenderSubtitles | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StudioAccount".
+ */
+export interface StudioAccount {
+  id: Id;
+  username: string;
+  role: StudioRole;
+  disabledAt: string | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "StudioAccounts".
+ */
+export interface StudioAccounts {
+  revision: number;
+  accounts: StudioAccount[];
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "CreateStudioAccount".
+ */
+export interface CreateStudioAccount {
+  commandId: Id;
+  expectedRevision: number;
+  username: string;
+  password: string;
+  role: StudioRole;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BudgetPolicy".
+ */
+export interface BudgetPolicy {
+  scope: "user" | "workspace";
+  subjectId: Id;
+  revision: number;
+  conversationLimitMinor: number | null;
+  dayLimitMinor: number | null;
+  monthLimitMinor: number | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BudgetPolicies".
+ */
+export interface BudgetPolicies {
+  currency: "CNY";
+  policies: BudgetPolicy[];
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "SaveBudgetPolicy".
+ */
+export interface SaveBudgetPolicy {
+  commandId: Id;
+  expectedRevision: number;
+  scope: "user" | "workspace";
+  subjectId: Id;
+  conversationLimitMinor: number | null;
+  dayLimitMinor: number | null;
+  monthLimitMinor: number | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "UpdateStudioAccount".
+ */
+export interface UpdateStudioAccount {
+  commandId: Id;
+  expectedRevision: number;
+  role?: StudioRole;
+  disabled?: boolean;
+  password?: string;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BudgetPeriod".
+ */
+export interface BudgetPeriod {
+  limitMinor: number | null;
+  usedMinor: number;
+  remainingMinor: number | null;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BudgetUsage".
+ */
+export interface BudgetUsage {
+  conversation: BudgetPeriod | null;
+  day: BudgetPeriod;
+  month: BudgetPeriod;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "BudgetSummary".
+ */
+export interface BudgetSummary {
+  currency: "CNY";
+  timeZone: string;
+  conversationId: Id | null;
+  personal: BudgetUsage;
+  workspace: BudgetUsage;
+  effectiveRemainingMinor: number | null;
 }

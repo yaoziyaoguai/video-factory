@@ -1,11 +1,13 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { decodedMediaChunks, withAttemptFiles } from "./media-port-support.js";
+import { existsSync } from "node:fs";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
 import type { ExecutionInput, ExecutionObservation, InputRef, MarkdownContent, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
-import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
+import { attemptOutput, completedUsage, recordAttemptOutput, runRow } from "./production-store.js";
 import { InvalidImageFile, probeImageFile } from "./media-probe.js";
 import { digestOf, type AgentClock } from "./util.js";
 import { getRevisionRow } from "./artifact-store.js";
@@ -56,9 +58,15 @@ export class ImageGenerationPort implements MediaExecutionPort {
     // 输入已经过能力校验（恰好一份文字输入）；这里直接读取正文，不重复整份执行对象校验。
     const ref = input.operation.inputs[0] as Extract<InputRef, { kind: "text" | "artifact_revision" }>;
     const prompt = ref.kind === "text" ? ref.text : markdownFullText(JSON.parse(getRevisionRow(this.db, ref.artifactId, ref.revisionId)!.content_json) as MarkdownContent);
-    let bytes: Buffer;
+    let encoded: string;
     try {
-      bytes = this.parseSingleImage(await this.requestImage(resolved.apiKey, prompt, resolved.profile, signal));
+      const response=await this.requestImage(resolved.apiKey,prompt,resolved.profile,signal);
+      encoded = this.parseSingleImage(response);
+      const reported=(response as {usage?:{input_tokens?:number;output_tokens?:number}}).usage;
+      if(reported){
+        const usage={...(Number.isSafeInteger(reported.input_tokens) && reported.input_tokens!>=0?{inputTokens:reported.input_tokens!}:{}),...(Number.isSafeInteger(reported.output_tokens) && reported.output_tokens!>=0?{outputTokens:reported.output_tokens!}:{})};
+        if(Object.keys(usage).length)recordAttemptOutput(this.db,this.clock(),input.attemptId,{usage});
+      }
     } catch (error) {
       if (error instanceof ImageRejection) {
         return this.preRefusal(input.attemptId, `供应商明确拒绝创建图片：${error.message}`);
@@ -76,7 +84,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
       return this.unstableUnknown(input.attemptId,
         `图片创建请求结果未核实（${error instanceof IncompleteResponse ? error.message : signal?.aborted ? "请求已发出后本地停止" : "网络请求未完成"}）；保留原身份核对，不会重新提交。`);
     }
-    return this.settleBytes(input.attemptId, resolved.profile.image, bytes);
+    return withAttemptFiles(this.db, this.options.workRoot, input.attemptId, () => this.settleBytes(input.attemptId, resolved.profile.image, encoded));
   }
 
   // 同步接口没有可外查的任务身份：恢复只读本地证据，不要求当前 Key 可用。
@@ -98,7 +106,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
     }
     const attemptDir = path.join(this.options.workRoot, query.attemptId);
     const format = query.accountBinding.providerId === "ark" ? "jpeg" : "png";
-    if (existsSync(path.join(attemptDir, `image.${format}`))) return this.settleImage(query, format);
+    if (existsSync(path.join(attemptDir, `image.${format}`))) return withAttemptFiles(this.db, this.options.workRoot, query.attemptId, () => this.settleImage(query, format));
     if (existsSync(path.join(attemptDir, "image.part"))) {
       return this.stableUnknown(query.attemptId, "只取得部分响应文件，结果无法核实；不会重新提交。");
     }
@@ -113,19 +121,17 @@ export class ImageGenerationPort implements MediaExecutionPort {
   // —— 内部 ——
 
   /** 临时写入→探测→按冻结规格核对→原子移入完成位置；不可用如实 failed，工具暂不可用保留文件 unknown。 */
-  private async settleBytes(attemptId: string, image: ImageProfile["image"], bytes: Buffer): Promise<ExecutionObservation> {
+  private async settleBytes(attemptId: string, image: ImageProfile["image"], encoded: string): Promise<ExecutionObservation> {
     const attemptDir = path.join(this.options.workRoot, attemptId);
     const temporary = path.join(attemptDir, "image.part");
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
-    writeFileSync(temporary, bytes, { mode: 0o600 });
-    const handle = openSync(temporary, "r+");
-    try { fsyncSync(handle); } finally { closeSync(handle); }
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
+    await writeFile(temporary, decodedMediaChunks(encoded, "base64"), { mode: 0o600, flush: true });
     try {
       this.verifyImage(await probeImageFile(temporary), image.resolution, image.format);
-      renameSync(temporary, path.join(attemptDir, `image.${image.format}`));
+      await rename(temporary, path.join(attemptDir, `image.${image.format}`));
     } catch (error) {
       if (error instanceof InvalidImageFile || error instanceof BadImageOutput) {
-        rmSync(temporary, { force: true });
+        await rm(temporary, { force: true });
         return this.nonCompliant(attemptId, error.message);
       }
       return this.unstableUnknown(attemptId,
@@ -146,7 +152,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
     } catch (error) {
       if (error instanceof InvalidImageFile || error instanceof BadImageOutput) {
         // 恢复同样不放过规格不符文件：登记失败收据，不发布。
-        rmSync(finalFile, { force: true });
+        await rm(finalFile, { force: true });
         return this.nonCompliant(query.attemptId, error.message);
       }
       return this.stableUnknown(query.attemptId,
@@ -154,12 +160,13 @@ export class ImageGenerationPort implements MediaExecutionPort {
     }
   }
 
-  private publish(attemptId: string, format: ImageProfile["image"]["format"]): ExecutionObservation {
+  private async publish(attemptId: string, format: ImageProfile["image"]["format"]): Promise<ExecutionObservation> {
     const finalFile = path.join(this.options.workRoot, attemptId, `image.${format}`);
     const row = this.db.prepare("SELECT run_id FROM production_attempts WHERE id=?").get(attemptId) as { run_id: string };
     const run = runRow(this.db, row.run_id);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), `image/${format}`, null);
-    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest }))();
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, `image/${format}`, null);
+    const facts=await probeImageFile(this.blobs.filePath(blob.digest));const usage={width:facts.width,height:facts.height};
+    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest,usage }))();
     return this.deterministicSucceeded(attemptId, blob.id, blob.digest, blob.mime_type);
   }
 
@@ -224,20 +231,21 @@ export class ImageGenerationPort implements MediaExecutionPort {
     if (Number.isSafeInteger(declared) && declared > limit) throw new IncompleteResponse(`响应超过大小上限（${declared} 字节）。`);
     if (!response.body) return "";
     const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
+    const decoder = new TextDecoder();
+    const chunks: string[] = [];
     let received = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      if (received > limit) throw new IncompleteResponse("响应超过大小上限。");
-      chunks.push(value);
+      if (received > limit) { await reader.cancel(); throw new IncompleteResponse("响应超过大小上限。"); }
+      chunks.push(decoder.decode(value, { stream: true }));
     }
-    return Buffer.concat(chunks).toString("utf8");
+    return chunks.join("") + decoder.decode();
   }
 
   /** 响应里必须恰一张 b64 图：多张不悄悄选第一张冒充单图合同，缺张不当作可重试的未知。 */
-  private parseSingleImage(response: unknown): Buffer {
+  private parseSingleImage(response: unknown): string {
     const data = (response as { data?: unknown }).data;
     if (!Array.isArray(data)) throw new IncompleteResponse("响应缺少 data 数组。");
     if (data.length !== 1) throw new BadImageOutput(`供应商返回 ${data.length} 张图片，与单图合同不符。`);
@@ -245,9 +253,8 @@ export class ImageGenerationPort implements MediaExecutionPort {
     if (typeof b64 !== "string" || b64.length === 0 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
       throw new BadImageOutput("响应中的图片数据不是有效的 base64。");
     }
-    const bytes = Buffer.from(b64, "base64");
-    if (bytes.length > MAX_OUTPUT_BYTES) throw new BadImageOutput("图片输出超过 30 MiB 上限。");
-    return bytes;
+    if (Buffer.byteLength(b64, "base64") > MAX_OUTPUT_BYTES) throw new BadImageOutput("图片输出超过 30 MiB 上限。");
+    return b64;
   }
 
   // 完整响应已取得但确定不可用：failed 终态、登记效果收据、费用仍未核实，不再获取同一响应。
@@ -274,7 +281,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
     return {
       observationId: `obs-${digestOf({ attemptId, scope: "openai-image", state: "succeeded", blobId }).slice(0, 24)}`,
       attemptId, state: "succeeded", providerTaskId: null, blob: { id: blobId, digest, mimeType },
-      observedAt: this.stableTime(attemptId), message: "供应商图片已解码并核对通过。", billing: null,
+      observedAt: this.stableTime(attemptId), message: "供应商图片已解码并核对通过。", billing: null, ...completedUsage(this.db,attemptId),
     };
   }
 

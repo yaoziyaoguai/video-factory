@@ -8,6 +8,7 @@ interface DraftStream {
   toolCallId: string;
   raw: string;
   items: ArtifactDraftItem[];
+  partial: Record<string, unknown>;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -18,7 +19,8 @@ export class ArtifactDraftStream {
   private readonly blocks = new Map<number, DraftStream>();
   private readonly open = new Set<DraftStream>();
 
-  constructor(private readonly requestId: string, private readonly emit: (draft: ArtifactDraft) => void) {}
+  constructor(private readonly requestId: string, private readonly emit: (draft: ArtifactDraft) => void,
+    private readonly parse: (raw: string) => unknown = parseStreamingJson) {}
 
   accept(event: AgentSessionEvent): void {
     if (this.closed) return;
@@ -33,26 +35,27 @@ export class ArtifactDraftStream {
     if (block?.type !== "toolCall" || block.name !== "deliver_artifacts") return;
     let stream = this.blocks.get(update.contentIndex);
     if (!stream) {
-      stream = { id: newAgentId("drf"), toolCallId: block.id, raw: "", items: [] };
+      stream = { id: newAgentId("drf"), toolCallId: block.id, raw: "", items: [], partial: {} };
       this.blocks.set(update.contentIndex, stream);
       this.open.add(stream);
     }
     stream.toolCallId = block.id;
     if (update.type === "toolcall_delta") stream.raw += update.delta;
-    // Faux 的 partial.arguments 到 end 才填充；采用 SDK 自己的增量 JSON 解析。
-    // 仅用于显示，执行工具仍只用完整参数和既有事务校验。
-    const args = update.type === "toolcall_end" ? update.toolCall.arguments
-      : Object.keys(block.arguments).length ? block.arguments : parseStreamingJson(stream.raw);
-    stream.items = projectDraftItems(args);
     if (update.type === "toolcall_end") {
       clearTimeout(stream.timer); delete stream.timer;
+      stream.items = projectDraftItems(update.toolCall.arguments);
       this.snapshot(stream, "streaming");
-    } else if (!stream.timer) {
-      stream.timer = setTimeout(() => {
-        delete stream.timer;
-        if (!this.closed && this.open.has(stream)) this.snapshot(stream, "streaming");
-      }, 200);
+      return;
     }
+    stream.partial = block.arguments;
+    if (stream.timer) return;
+    stream.timer = setTimeout(() => {
+      delete stream.timer;
+      if (this.closed || !this.open.has(stream)) return;
+      const args = Object.keys(stream.partial).length ? stream.partial : this.parse(stream.raw);
+      stream.items = projectDraftItems(args);
+      this.snapshot(stream, "streaming");
+    }, 200);
   }
 
   close(): void {

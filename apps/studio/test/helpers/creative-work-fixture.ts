@@ -1,3 +1,6 @@
+import assert from "node:assert/strict";
+import { insertEvent } from "../../src/server/agent/event-log.js";
+import { trimAgentHistory } from "../../src/server/agent/history-trim.js";
 import type { AgentDatabase } from "../../src/server/agent/db.js";
 import { applyDelivery } from "../../src/server/agent/artifact-store.js";
 import {
@@ -119,4 +122,18 @@ export function ensureConfirmedWork(
     }
   }
   return seedConfirmedWork(db, now, scope, title);
+}
+
+/** 穿过真实的七天与 2,000 条保留边界，确保指定修订不能再通过传输日志找回。 */
+export function trimPastDelivery(db: AgentDatabase, scope: { ownerId: string; conversationId: string }, time: string, artifactId: string): void {
+  const hasDelivery = db.prepare("SELECT 1 FROM events WHERE conversation_id=? AND entity_id=? AND kind='artifact.delivered'");
+  assert.ok(hasDelivery.get(scope.conversationId, artifactId));
+  db.transaction(() => {
+    for (let index = 1; index <= 2001; index++) {
+      insertEvent(db, time, { ...scope, kind: "conversation.changed", entityId: scope.conversationId, entityVersion: index });
+    }
+  })();
+  const result = trimAgentHistory(db, { now: () => new Date(Date.parse(time) + 8 * 86400_000) });
+  assert.ok(result.eventsDeleted > 0);
+  assert.equal(hasDelivery.get(scope.conversationId, artifactId), undefined);
 }

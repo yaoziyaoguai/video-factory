@@ -23,6 +23,7 @@ import {
 import { ImageGenerationPort } from "./agent/image-generation.js";
 import { OpenAISpeechPort } from "./agent/openai-speech.js";
 import { CreativeRunner } from "./agent/creative-runner.js";
+import { sweepAttemptFiles } from "./agent/media-port-support.js";
 import { scheduleHistoryTrim } from "./agent/history-trim.js";
 import { validatorFor } from "./agent/validate.js";
 import type { ImportedSettings } from "../shared/agent/generated/contracts.js";
@@ -30,7 +31,6 @@ import { systemClock } from "./agent/util.js";
 import type { AgentDatabase } from "./agent/db.js";
 import type { ProductionBlobs } from "./agent/production-blobs.js";
 import { readStudioAuthEnvironment } from "./auth.js";
-import { MaintenanceGate } from "./maintenance-gate.js";
 import { EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
 
 // Pi 的网络依赖会替换 Node 启动时的 dispatcher，因此在全部导入后应用环境代理。
@@ -41,13 +41,11 @@ if (process.env.HTTP_PROXY || process.env.HTTPS_PROXY || process.env.http_proxy 
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 const development = process.env.STUDIO_DEV === "1";
+if (!development && !process.env.FRAME_CREDENTIAL_SECRET) throw new Error("生产工作台需要配置 FRAME_CREDENTIAL_SECRET。");
 const port = Number(process.env.STUDIO_PORT ?? (development ? 4318 : 4317));
 const host = process.env.STUDIO_HOST ?? "127.0.0.1";
 const workspaceRoot = path.resolve(process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace/factory"));
 const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
-const maintenanceDirectory = process.env.VIDEO_FACTORY_MAINTENANCE_DIR?.trim();
-const maintenanceGate = new MaintenanceGate(maintenanceDirectory ? { directory: maintenanceDirectory } : {});
-await maintenanceGate.announceStartup();
 // 文本连接由网页设置管理（SQLite）；旧 AGENT_TEXT_CONFIG_FILE 导入已随旧供应商退役移除，
 // 不再读取该文件。不扫描个人 Pi 目录或旧项目凭据。
 const agentDataDir = process.env.AGENT_DATA_DIR ?? path.join(workspaceRoot, "agent");
@@ -64,7 +62,7 @@ const workRoot = path.join(agentDataDir, "media-work");
 const creativeSocket = process.env.AGENT_CREATIVE_RUNNER_SOCKET?.trim();
 const creativeRunner = creativeSocket ? new CreativeRunner({ socketPath: creativeSocket }) : undefined;
 console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}；隔离创作环境${creativeSocket ? `已接入（${creativeSocket}）` : "未装配（code_project 与原生创作工具不可用）"}`);
-const runtime = await maintenanceGate.withAdmission("agent-startup", () => createAgentRuntime({
+const runtime = await createAgentRuntime({
   dataDir: agentDataDir,
   providerConnections: true,
   importedSettings: imported as ImportedSettings,
@@ -128,8 +126,8 @@ const runtime = await maintenanceGate.withAdmission("agent-startup", () => creat
       };
     },
   },
-}));
-const app = buildFrameApp({ logger: true, ...(auth ? { auth } : {}), maintenanceGate,
+});
+const app = buildFrameApp({ logger: true, ...(auth ? { auth } : {}),
   agent: {
     service: runtime.service, resolveOwner: () => "local-owner", localOwnerOnly: !auth,
     uiOrigin: process.env.AGENT_UI_ORIGIN ?? `http://127.0.0.1:${port}`,
@@ -145,7 +143,13 @@ app.addHook("onClose", async () => stopHistoryTrim());
 // 未入库草稿媒体（崩溃遗留的 tmp-* 与无行引用的 digest 文件）按天龄清扫。
 const draftBlobs = runtime.production?.blobs;
 const sweepDraftBlobs = () => {
-  void draftBlobs!.sweepOrphans().then(result => {
+  const owners = runtime.database.prepare("SELECT DISTINCT owner_id FROM production_blobs WHERE purged_at IS NULL").pluck().all() as string[];
+  void Promise.all([draftBlobs!.sweepOrphans(), draftBlobs!.sweepStaging(), sweepAttemptFiles(runtime.database, workRoot),
+    sweepAttemptFiles(runtime.database, path.join(agentDataDir, "material-work"))]).then(([result]) => {
+    for (const owner of owners) {
+      const archived = runtime.retention.sweepUnpinnedDraftBlobs(owner);
+      if (archived.freedFiles) app.log.info(`过期草稿归档 ${archived.freedFiles} 个，释放 ${archived.freedBytes} 字节。`);
+    }
     if (result.files > 0) app.log.info(`草稿媒体清扫：删除未入库文件 ${result.files} 个，释放 ${(result.bytes / 1048576).toFixed(1)} MiB。`);
   }).catch(error => app.log.warn(`草稿媒体清扫失败：${error instanceof Error ? error.message : String(error)}`));
 };

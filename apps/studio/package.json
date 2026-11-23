@@ -3,13 +3,16 @@
  "version": "0.1.0",
  "private": true,
  "type": "module",
+ "engines": {
+  "node": ">=22.2.0"
+ },
  "scripts": {
   "build": "vite build && node ../../scripts/compress-studio-assets.mjs dist/client && tsc -p tsconfig.server.build.json",
   "dev": "concurrently --kill-others --names api,web --prefix-colors blue,green \"npm:dev:server\" \"npm:dev:client\"",
   "dev:client": "vite --host 127.0.0.1",
   "dev:server": "STUDIO_DEV=1 tsx watch src/server/main.ts",
   "start": "node dist/server/server/main.js",
-  "test": "vitest run && node --import tsx --test --test-concurrency=4 --test-timeout=300000 test/auth.test.ts test/maintenance.test.ts test/maintenance-gate.test.ts && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
+  "test": "vitest run && node --import tsx --test --test-concurrency=4 --test-timeout=300000 test/auth.test.ts && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
   "test:agent": "vitest run test/agent-workbench.test.tsx test/agent-work-stage.test.tsx test/agent-work-center.test.tsx test/agent-work-library.test.tsx test/agent-settings-dialog.test.tsx test/agent-text-settings-dialog.test.tsx test/agent-services-dialog.test.tsx && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "agent:offline": "tsx src/server/agent/offline-main.ts"
@@ -17,6 +20,7 @@
  "dependencies": {
   "@earendil-works/pi-ai": "1.4.0",
   "@earendil-works/pi-coding-agent": "1.4.0",
+  "@fastify/multipart": "10.1.9",
   "@fastify/static": "^10.1.3",
   "@fontsource-variable/manrope": "^5.3.0",
   "@fontsource-variable/noto-sans-sc": "^5.3.0",

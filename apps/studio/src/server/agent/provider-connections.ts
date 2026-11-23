@@ -1,4 +1,5 @@
-import { readProviderDirectory } from "./provider-directory.js";
+import { providerAdapters, textBaseUrl } from "../../shared/agent/provider-capabilities.js";
+import { probeAccountModels, readProviderDirectory } from "./provider-directory.js";
 import type { Bootstrap, AvailableProviderModels, ConnectionModel, ImportedSettings, ModelBinding, ProviderConnection, ProviderConnectionSettings, SaveProviderConnection, SaveProviderConnectionReceipt } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
@@ -7,7 +8,7 @@ import { canonicalJson, newAgentId, systemClock, type AgentClock } from "./util.
 import { checkCommandReceipt, storeCommandReceipt } from "./conversation-store.js";
 import { insertEvent } from "./event-log.js";
 import { normalizeApiKey, normalizeBaseUrl, readTextModelView, textBindingOf, textModelsView, type TextExecutionConfig, type TextSettingsView } from "./text-model-settings.js";
-import { findOpenAIChatModel, resolveThinkingLevel, thinkingCapabilityOf } from "./text-model.js";
+import { findNativeTextModel, resolveThinkingLevel, thinkingCapabilityOf } from "./text-model.js";
 import { readArkVideoCurrent } from "./ark-video-settings.js";
 import {
   DEFAULT_ARK_VIDEO_PROFILE, mediaBinding, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS, minimaxSpeechCatalogEntry, minimaxSpeechModelView,
@@ -22,14 +23,14 @@ import type { QuoteCatalog } from "./artifact-store.js";
 // credentialConfigured 是 apiKey 的派生只读投影，读取时重算，兼容不含该字段的历史行。
 export function readProviderConnections(db: AgentDatabase): ProviderConnectionSettings {
   const row = db.prepare("SELECT revision FROM provider_connection_settings WHERE id=1").get() as { revision: number };
-  const connections = (db.prepare("SELECT configuration_json FROM provider_connections ORDER BY rowid").all() as { configuration_json: string }[])
+  const connections = (db.prepare("SELECT json_set(configuration_json,'$.apiKey',frame_open(json_extract(configuration_json,'$.apiKey'))) AS configuration_json FROM provider_connections ORDER BY rowid").all() as { configuration_json: string }[])
     .map(item => { const connection = JSON.parse(item.configuration_json) as ProviderConnection; return { ...connection, credentialConfigured: connection.apiKey != null }; });
   return { revision: row.revision, connections, modelStatuses: connections.flatMap(connection => connection.models.map(model => ({
     modelEntryId: model.id,
     unavailableReason: modelUnavailableReason(connection, model),
     // 只读能力：非文本、非 OpenAI 连接与未核实身份都是 null，不解释成“明确不支持推理”。
     thinking: model.kind === "text"
-      ? thinkingCapabilityOf(connection.protocol === "openai" ? findOpenAIChatModel(model.modelId, model.baseUrl ?? connection.baseUrl) : null)
+      ? thinkingCapabilityOf(nativeModel(connection, model))
       : null,
   }))) };
 }
@@ -43,6 +44,10 @@ function providerEndpointReason(protocol: ProviderConnection["protocol"], baseUr
     return "万相接口地址应为工作空间媒体 API 根地址，例如 https://工作空间.cn-beijing.maas.aliyuncs.com；不要附加 /v1 或完整端点。";
   }
   return null;
+}
+
+function nativeModel(connection: ProviderConnection, model: ConnectionModel) {
+  return findNativeTextModel(providerAdapters[connection.protocol].textApi, model.modelId, textBaseUrl(connection.protocol, model.baseUrl ?? connection.baseUrl));
 }
 
 function modelUnavailableReason(connection: ProviderConnection, model: ConnectionModel): string | null {
@@ -78,18 +83,19 @@ function modelUnavailableReason(connection: ProviderConnection, model: Connectio
     return MINIMAX_SPEECH_MODEL_IDS.has(model.modelId) && minimaxSpeechProfile(model.modelId, baseUrl) !== null
       ? null : "已登记；此配音型号的媒体执行参数与报价尚未接入";
   }
-  if (connection.protocol !== "openai") {
-    const kindLabel = model.kind === "text" ? "文本" : model.kind === "image" ? "图片" : "配音";
-    return `${kindLabel}型号不能配置在此连接。`;
-  }
   if (model.kind === "text") {
-    const known = findOpenAIChatModel(model.modelId, baseUrl);
-    if (!known) return "此型号在当前 Pi 目录中没有精确能力，暂不支持";
+    const known = nativeModel(connection, model);
+    if (!providerAdapters[connection.protocol].textApi) return "此连接没有文本适配器";
+    if (connection.protocol === "openai" && !known) return "此型号在当前 Pi 目录中没有精确能力，暂不支持";
     if (!model.contextWindowTokens || !model.maxOutputTokens) return "请填写型号的上下文窗口和最大输出";
     const capability = thinkingCapabilityOf(known);
     const level = resolveThinkingLevel(known, model.thinkingLevel);
     if (capability && !capability.levels.includes(level)) return `型号不支持“${level}”推理档位；请改回默认或选择支持的档位。`;
     return null;
+  }
+  if (connection.protocol !== "openai") {
+    const kindLabel = model.kind === "image" ? "图片" : "配音";
+    return `${kindLabel}型号不能配置在此连接。`;
   }
   // 图片/配音执行按冻结型号集合判定（B1）；未知新型号可登记为备选，不冒充可执行当前型号。
   if (model.kind === "image") {
@@ -114,7 +120,7 @@ export function connectedSpeechChoices(db: AgentDatabase, probeAvailable: boolea
   const catalog: QuoteCatalog = {};
   const models: Bootstrap["models"] = [];
   if (!probeAvailable) return { catalog, models };
-  const connections = (db.prepare("SELECT configuration_json FROM provider_connections ORDER BY rowid").all() as { configuration_json: string }[])
+  const connections = (db.prepare("SELECT json_set(configuration_json,'$.apiKey',frame_open(json_extract(configuration_json,'$.apiKey'))) AS configuration_json FROM provider_connections ORDER BY rowid").all() as { configuration_json: string }[])
     .map(row => JSON.parse(row.configuration_json) as ProviderConnection);
   for (const connection of connections) {
     if (connection.protocol !== "minimax" || !connection.enabled || !connection.apiKey) continue;
@@ -122,7 +128,7 @@ export function connectedSpeechChoices(db: AgentDatabase, probeAvailable: boolea
       if (model.kind !== "speech" || !model.enabled) continue;
       const profile = minimaxSpeechProfile(model.modelId, model.baseUrl ?? connection.baseUrl);
       if (!profile) continue;
-      const version = db.prepare("SELECT binding_json FROM additional_media_versions WHERE channel_id='minimax-speech' AND profile_json=? AND api_key IS ? ORDER BY created_at DESC LIMIT 1")
+      const version = db.prepare("SELECT binding_json FROM additional_media_versions WHERE channel_id='minimax-speech' AND profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
         .get(canonicalJson(profile), connection.apiKey) as { binding_json: string } | undefined;
       if (!version) continue;
       const binding = JSON.parse(version.binding_json) as ModelBinding;
@@ -194,7 +200,7 @@ export function initializeProviderConnections(db: AgentDatabase, imported: Impor
       const protocol = entry.endpoint.includes("volces.com") ? "ark" : "openai-chat-completions";
       add(protocol, entry.endpoint.replace(/\/+$/, ""), entry.apiKey, entry.name, { id: newAgentId("model"), kind: "video", name: entry.name, modelId: entry.modelId, features: entry.details, contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: false });
     }
-    for (const connection of consolidateProviderConnections(connections)) db.prepare("INSERT INTO provider_connections(id,configuration_json) VALUES(?,?)").run(connection.id, canonicalJson(connection));
+    for (const connection of consolidateProviderConnections(connections)) db.prepare("INSERT INTO provider_connections(id,configuration_json) VALUES(?,json_set(?,'$.apiKey',frame_seal(?)))").run(connection.id, canonicalJson(connection), connection.apiKey);
     db.prepare("INSERT INTO provider_connection_settings(id,revision) VALUES(1,0)").run();
   })();
 }
@@ -203,18 +209,20 @@ export function initializeProviderConnections(db: AgentDatabase, imported: Impor
 // 保存与启动归一共同使用这一段，避免归一调用会递增媒体 revision 的全量投影路径。
 function projectTextModel(db: AgentDatabase, text: TextSettingsView, connection: ProviderConnection, model: ConnectionModel, now: string): string | null {
   if (modelUnavailableReason(connection, model) !== null) return null;
-  const known = findOpenAIChatModel(model.modelId, model.baseUrl ?? connection.baseUrl)!;
+  const protocol = providerAdapters[connection.protocol].textApi;
+  if (!protocol) throw new Error("可执行的文本型号缺少协议适配器");
+  const known = nativeModel(connection, model);
   const execution: TextExecutionConfig = {
-    protocol: "openai-responses", baseUrl: model.baseUrl ?? connection.baseUrl, modelId: model.modelId,
+    protocol, baseUrl: textBaseUrl(connection.protocol, model.baseUrl ?? connection.baseUrl), modelId: model.modelId,
     contextWindowTokens: model.contextWindowTokens!, maxOutputTokens: model.maxOutputTokens!,
     thinkingLevel: resolveThinkingLevel(known, model.thinkingLevel),
   };
   const previous = text.entries.find(item => item.entry.id === model.id);
   let revisionId = previous?.version.configuration_revision_id;
-  if (!previous || previous.version.configuration_json !== canonicalJson(execution) || previous.version.api_key !== connection.apiKey) {
+  if (!previous || previous.version.configuration_json !== canonicalJson(execution) || previous.version.api_key !== connection.apiKey || (previous.version.binding_format === 1 && protocol !== "openai-responses")) {
     const binding = textBindingOf(execution, newAgentId("conn"));
     revisionId = binding.configurationRevisionId;
-    db.prepare("INSERT INTO text_model_versions(configuration_revision_id,binding_json,configuration_json,api_key,created_at) VALUES(?,?,?,?,?)").run(revisionId, canonicalJson(binding), canonicalJson(execution), connection.apiKey, now);
+    db.prepare("INSERT INTO text_model_versions(configuration_revision_id,binding_json,configuration_json,api_key,created_at,binding_format) VALUES(?,?,?,frame_seal(?),?,2)").run(revisionId, canonicalJson(binding), canonicalJson(execution), connection.apiKey, now);
   }
   db.prepare("INSERT INTO text_model_entries(id,name,features_json,current_configuration_revision_id,created_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,features_json=excluded.features_json,current_configuration_revision_id=excluded.current_configuration_revision_id").run(model.id, model.name, canonicalJson(model.features), revisionId!, now);
   return revisionId!;
@@ -247,7 +255,7 @@ function projectAdditionalMedia(db: AgentDatabase, connection: ProviderConnectio
     : channel === "wan-video" ? wanVideoProfile(model.modelId, baseUrl) : null;
   if (!profile) return; // 非已核实站点/型号组合：modelUnavailableReason 已拦截，防御不再投影。
   const profileJson = canonicalJson(profile);
-  const existing = db.prepare("SELECT configuration_revision_id, binding_json FROM additional_media_versions WHERE channel_id=? AND profile_json=? AND api_key IS ? ORDER BY created_at DESC LIMIT 1")
+  const existing = db.prepare("SELECT configuration_revision_id, binding_json FROM additional_media_versions WHERE channel_id=? AND profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
     .get(channel, profileJson, connection.apiKey) as { configuration_revision_id: string; binding_json: string } | undefined;
   const binding = existing
     ? JSON.parse(existing.binding_json) as ModelBinding
@@ -293,13 +301,13 @@ function projectExecutionVersions(db: AgentDatabase, connections: ProviderConnec
       const profile = DEFAULT_ARK_VIDEO_PROFILE;
       let revisionId = current?.version.configuration_revision_id;
       if (!current || current.version.api_key !== connection.apiKey || current.version.profile_json !== canonicalJson(profile)) {
-        const existing = db.prepare("SELECT configuration_revision_id FROM ark_video_configuration_versions WHERE profile_json=? AND api_key IS ? ORDER BY created_at DESC LIMIT 1")
+        const existing = db.prepare("SELECT configuration_revision_id FROM ark_video_configuration_versions WHERE profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
           .get(canonicalJson(profile), connection.apiKey) as { configuration_revision_id: string } | undefined;
         if (existing) revisionId = existing.configuration_revision_id;
         else {
           const binding = mediaBinding(profile, newAgentId("conn"));
           revisionId = binding.configurationRevisionId;
-          db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,?,?)").run(revisionId, canonicalJson(binding), canonicalJson(profile), connection.apiKey, now);
+          db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,frame_seal(?),?)").run(revisionId, canonicalJson(binding), canonicalJson(profile), connection.apiKey, now);
         }
       }
       // ON CONFLICT 恢复：视频默认从追加通道切回 Ark 时单行可能已被清理，纯 UPDATE 会丢当前入口。
@@ -386,11 +394,13 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
       const existing = state.connections.find(item => item.id !== connection.id && item.protocol === "openai");
       if (existing) throw new AgentError("INVALID_INPUT", `已存在 OpenAI 连接「${existing.name}」；更换 Key 请在该连接里编辑，不能新建第二个。`);
       if (connection.models.some(model => model.kind === "video")) throw new AgentError("INVALID_INPUT", "OpenAI 连接不承载视频；视频保留原供应商连接。");
-    } else if (connection.models.some(model => model.kind !== "video" && !(connection.protocol === "minimax" && model.kind === "speech") && !(connection.protocol === "ark" && model.kind === "image"))) {
-      throw new AgentError("INVALID_INPUT", connection.protocol === "minimax"
-        ? "MiniMax 连接只承载配音与视频。"
-        : connection.protocol === "ark" ? "火山方舟连接只承载图片与视频。"
-        : "文本、图片、配音型号不能配置在此视频连接。");
+    }
+    for (const model of connection.models) {
+      if (providerAdapters[connection.protocol].supportedKinds.includes(model.kind)) continue;
+      // 旧版导入的网关视频可留在目录中追溯，但不能新增或转为当前。
+      if (old?.protocol === connection.protocol && model.kind === "video" && !model.isDefault
+        && old.models.some(entry => entry.id === model.id && entry.kind === model.kind && entry.modelId === model.modelId)) continue;
+      throw new AgentError("INVALID_INPUT", "此连接尚未接入该用途的执行适配器。");
     }
     // 推理档位只对文本型号有意义：文本省略归一成明确 default，显式值必须属于该精确身份的能力列表；
     // 未知身份只接受 default，非文本带具体档位直接拒绝。不静默夹取用户选择。
@@ -402,7 +412,7 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
         delete model.thinkingLevel;
         continue;
       }
-      const known = findOpenAIChatModel(model.modelId, model.baseUrl ?? connection.baseUrl);
+      const known = nativeModel(connection, model);
       const requested = model.thinkingLevel ?? "default";
       if (requested !== "default") {
         const capability = thinkingCapabilityOf(known);
@@ -440,7 +450,7 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
     const before = currentMediaBindings(db);
     const connections = state.connections.filter(item => item.id !== connection.id).map(item => ({ ...item, models: item.models.map(model => defaults.includes(model.kind) ? { ...model, isDefault: false } : model) }));
     connections.push(connection);
-    for (const item of connections) db.prepare("INSERT INTO provider_connections(id,configuration_json) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET configuration_json=excluded.configuration_json").run(item.id, canonicalJson(item));
+    for (const item of connections) db.prepare("INSERT INTO provider_connections(id,configuration_json) VALUES(?,json_set(?,'$.apiKey',frame_seal(?))) ON CONFLICT(id) DO UPDATE SET configuration_json=excluded.configuration_json").run(item.id, canonicalJson(item), item.apiKey);
     const now = clock();
     projectExecutionVersions(db, connections, now);
     const changedConversations = invalidateRemovedMediaBindings(db, now, before);
@@ -451,9 +461,17 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
   })();
 }
 
-export async function listAvailableProviderModels(db: AgentDatabase, connectionId: string, fetcher: typeof fetch = fetch): Promise<AvailableProviderModels> {
+function requireSavedConnection(db: AgentDatabase, connectionId: string) {
   const connection = readProviderConnections(db).connections.find(item => item.id === connectionId);
   if (!connection) throw new AgentError("NOT_FOUND", "连接不存在。");
   if (!connection.apiKey) throw new AgentError("INVALID_INPUT", "请先保存 API Key。");
-  return readProviderDirectory(connection, fetcher);
+  return connection;
+}
+
+export function listAvailableProviderModels(db: AgentDatabase, connectionId: string, fetcher: typeof fetch = fetch): Promise<AvailableProviderModels> {
+  return readProviderDirectory(requireSavedConnection(db, connectionId), fetcher);
+}
+
+export function probeProviderConnection(db: AgentDatabase, connectionId: string, fetcher: typeof fetch = fetch) {
+  return probeAccountModels(requireSavedConnection(db, connectionId), fetcher);
 }

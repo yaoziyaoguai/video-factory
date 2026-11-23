@@ -3,7 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js";
+import Database from "better-sqlite3";
+import { assertReviewSourceAvailable } from "../src/server/agent/creative-work.js";
+import { MIGRATIONS, openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js";
 import { trimAgentHistory } from "../src/server/agent/history-trim.js";
 import { checkCommandReceipt, storeCommandReceipt } from "../src/server/agent/conversation-store.js";
 import { AgentError } from "../src/server/agent/errors.js";
@@ -97,4 +99,52 @@ test("裁剪推进八天后，业务回执仍保证同命令幂等", async t => 
   assert.equal(replay.kind === "replay" ? replay.receipt.conversation.id : "", "conv-a");
   assert.throws(() => checkCommandReceipt(db, key, { ...body, title: "换内容" }),
     (error: unknown) => error instanceof AgentError && error.code === "IDEMPOTENCY_CONFLICT");
+});
+
+test("ISS-01 v26 残存事件精确回填，跨过裁剪边界后同毫秒写入仍保持因果顺序", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-trim-v26-"));
+  const old = new Database(path.join(directory, "agent.db"));
+  const time = daysAgo(8);
+  old.exec("CREATE TABLE agent_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  for (const migration of MIGRATIONS.filter(m => m.version <= 26)) {
+    old.transaction(() => {
+      for (const statement of migration.statements) old.exec(statement);
+      migration.data?.(old);
+      old.prepare("INSERT INTO agent_schema_migrations VALUES (?,?)").run(migration.version, time);
+    })();
+  }
+  insertConversation(old, "legacy");
+  const artifactSql = `INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,head_revision_id,head_revision_number,created_seq,created_at,updated_at)
+    VALUES ('art','legacy','owner-1','旧稿','script','r2',2,1,?,?)`;
+  old.prepare(artifactSql).run(time, time);
+  const revSql = "INSERT INTO artifact_revisions(id,artifact_id,revision_number,digest,content_json,created_at) VALUES (?,'art',?,'d','{}',?)";
+  old.prepare(revSql).run("r1", 1, time);
+  old.prepare(revSql).run("r2", 2, time);
+  const msgSql = `INSERT INTO messages(id,conversation_id,owner_id,role,kind,state,text,references_json,created_seq,created_at,updated_at)
+    VALUES (?,'legacy','owner-1','user','chat','completed','认可','{}',?,?,?)`;
+  old.prepare(msgSql).run("old-user", 1, time, time);
+  const event = old.prepare(`INSERT INTO events(event_id,conversation_id,owner_id,kind,entity_id,entity_version,notification,created_at)
+    VALUES (?,'legacy','owner-1',?,?,?,'quiet',?)`);
+  const retainedMessage = Number(event.run("e1", "message.changed", "old-user", 1, time).lastInsertRowid);
+  const retainedRevision = Number(event.run("e2", "artifact.delivered", "art", 2, time).lastInsertRowid);
+  event.run("e3", "message.changed", "old-user", 2, time);
+  old.close();
+  const db = openAgentDatabase(directory);
+  t.after(async () => { db.close(); await rm(directory, { recursive: true, force: true }); });
+  assert.deepEqual(db.prepare("SELECT id,created_seq FROM artifact_revisions ORDER BY rowid").all(),
+    [{ id: "r1", created_seq: 0 }, { id: "r2", created_seq: retainedRevision }]);
+  assert.deepEqual(db.prepare("SELECT created_seq,causal_seq FROM messages WHERE id='old-user'").get(), { created_seq: 1, causal_seq: retainedMessage });
+  const check = (revisionId: string, messageId: string) => assertReviewSourceAvailable(db, { ownerId: "owner-1", conversationId: "legacy" },
+    { artifactId: "art", revisionId }, { kind: "user_message", messageId });
+  assert.throws(() => check("r2", "old-user"), /提前认可/);
+  const laterEvent = db.prepare("INSERT INTO events(event_id,conversation_id,owner_id,kind,entity_id,entity_version,notification,created_at) VALUES (?,'legacy','owner-1','conversation.changed','legacy',1,'quiet',?)");
+  db.transaction(() => { for (let i = 0; i < 2001; i++) laterEvent.run(`more-${i}`, time); })();
+  assert.equal(trimAgentHistory(db, { now: () => now }).eventsDeleted, 4);
+  db.prepare(msgSql).run("after", 2, time, time);
+  check("r1", "after");
+  check("r2", "after");
+  db.prepare(revSql).run("r3", 3, time);
+  assert.throws(() => check("r3", "after"), /提前认可/);
+  db.prepare(msgSql).run("last", 3, time, time);
+  check("r3", "last");
 });

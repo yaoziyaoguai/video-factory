@@ -1,4 +1,6 @@
+import { videoImageSlots } from "./video-image-inputs.js";
 import { execFile } from "node:child_process";
+import { open } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { AgentDatabase } from "./db.js";
 import { renderSlotRole } from "./render-inputs.js";
@@ -7,9 +9,13 @@ import type { RenderFileProbe } from "./artifact-store.js";
 import type { ProductionIntent, ToolRenderProject } from "../../shared/agent/generated/contracts.js";
 
 const run = promisify(execFile);
+const localMediaFormats = ["-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,image2,image2pipe,jpeg_pipe,mjpeg,png_pipe,webp_pipe,webp,mp3,wav"];
 
 // 受控 ffprobe：只以固定 argv 查询媒体元数据，不执行任意命令、不接受模型提供的参数。
 export interface VideoFileFacts {
+  /** 异形像素或容器旋转后，播放器实际显示的画幅。 */
+  displayWidth?: number;
+  displayHeight?: number;
   width: number;
   height: number;
   durationMs: number;
@@ -17,6 +23,7 @@ export interface VideoFileFacts {
   videoDurationMs: number;
   hasAudio: boolean;
   frameRate: number | null;
+  nominalFrameRate: number | null;
   mimeType: "video/mp4" | "video/webm";
 }
 
@@ -26,7 +33,7 @@ export class InvalidVideoFile extends Error {}
 export interface ImageFileFacts {
   width: number;
   height: number;
-  mimeType: "image/jpeg" | "image/png";
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
 }
 
 export class InvalidImageFile extends Error {}
@@ -65,10 +72,10 @@ export async function probeImageFile(file: string, signal?: AbortSignal): Promis
   let stdout: string;
   try {
     ({ stdout } = await run("ffprobe", [
-      "-v", "error", "-select_streams", "v:0", "-count_packets",
+      "-v", "error", ...localMediaFormats, "-select_streams", "v:0", "-count_packets",
       "-show_entries", "stream=codec_name,width,height,nb_read_packets:format=format_name", "-of", "json", file,
     ], { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) }));
-    await run("ffmpeg", ["-v", "error", "-xerror", "-i", file, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
+    await run("ffmpeg", ["-v", "error", ...localMediaFormats, "-xerror", "-i", file, "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"],
       { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) });
   } catch (error) {
     if (typeof (error as { code?: unknown }).code === "number") throw new InvalidImageFile("图片无法解码。");
@@ -76,26 +83,26 @@ export async function probeImageFile(file: string, signal?: AbortSignal): Promis
   }
   const parsed = JSON.parse(stdout) as { streams?: { codec_name?: string; width?: number; height?: number; nb_read_packets?: string }[]; format?: { format_name?: string } };
   const image = parsed.streams?.[0];
-  if (!image?.width || !image.height || (image.codec_name !== "mjpeg" && image.codec_name !== "png")) {
-    throw new InvalidImageFile("不是可解码的 JPEG 或 PNG 图片。");
+  if (!image?.width || !image.height || (image.codec_name !== "mjpeg" && image.codec_name !== "png" && image.codec_name !== "webp")) {
+    throw new InvalidImageFile("需要可解码的 JPEG、PNG 或 WebP 图片。");
   }
-  const formats = image.codec_name === "png" ? ["png_pipe", "image2"] : ["jpeg_pipe", "mjpeg", "image2"];
-  if (!formats.includes(parsed.format?.format_name ?? "")) throw new InvalidImageFile("输出不是 JPEG 或 PNG 图片封装。");
+  const formats = image.codec_name === "png" ? ["png_pipe", "image2"] : image.codec_name === "webp" ? ["webp_pipe", "webp", "image2"] : ["jpeg_pipe", "mjpeg", "image2"];
+  if (!formats.includes(parsed.format?.format_name ?? "")) throw new InvalidImageFile("输出不是 JPEG、PNG 或 WebP 图片封装。");
   if (image.nb_read_packets !== "1") {
     throw new InvalidImageFile("不是单张图片文件（含多帧视频数据）。");
   }
-  return { width: image.width, height: image.height, mimeType: image.codec_name === "png" ? "image/png" : "image/jpeg" };
+  return { width: image.width, height: image.height, mimeType: image.codec_name === "png" ? "image/png" : image.codec_name === "webp" ? "image/webp" : "image/jpeg" };
 }
 
 // read_artifact 的视频抽帧：按反馈目标毫秒位抽单帧 PNG；不执行任意命令、不接受模型参数。
 // 先在 FFmpeg 内把帧限制到 SDK 的默认缩放上限，避免原始超大 PNG 在 resizeImage 前顶满 stdout 缓冲区。
-export async function extractVideoFrames(file: string, timesMs: readonly number[], signal?: AbortSignal, format: "analysis" | "poster" = "analysis"): Promise<Buffer[]> {
-  const side = format === "poster" ? 512 : 2000;
+export async function extractVideoFrames(file: string, timesMs: readonly number[], signal?: AbortSignal, format: "analysis" | "poster" | "reference" = "analysis"): Promise<Buffer[]> {
+  const side = format === "poster" ? 512 : format === "reference" ? 1280 : 2000;
   return Promise.all(timesMs.map(async timeMs => {
     const { stdout } = await run("ffmpeg", [
       "-v", "error", "-ss", (Math.max(0, timeMs) / 1000).toFixed(3), "-i", file,
       "-vf", `scale=w='min(iw,${side})':h='min(ih,${side})':force_original_aspect_ratio=decrease`,
-      "-frames:v", "1", "-f", "image2", "-c:v", format === "poster" ? "mjpeg" : "png", "pipe:1",
+      "-frames:v", "1", "-f", "image2", "-c:v", format === "analysis" ? "png" : "mjpeg", "pipe:1",
     ], { timeout: 30_000, maxBuffer: 16 * 1024 * 1024, encoding: "buffer", ...(signal ? { signal } : {}) });
     if (!stdout.length) throw new InvalidVideoFile("指定时间点没有可抽取的画面。");
     return stdout;
@@ -108,10 +115,10 @@ export async function probeAudioFile(file: string, signal?: AbortSignal): Promis
   let stdout: string;
   try {
     ({ stdout } = await run("ffprobe", [
-      "-v", "error", "-select_streams", "a:0",
+      "-v", "error", ...localMediaFormats, "-select_streams", "a:0",
       "-show_entries", "stream=codec_name,channels,sample_rate:format=duration,format_name", "-of", "json", file,
     ], { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) }));
-    await run("ffmpeg", ["-v", "error", "-xerror", "-i", file, "-map", "0:a:0", "-f", "null", "-"],
+    await run("ffmpeg", ["-v", "error", ...localMediaFormats, "-xerror", "-i", file, "-map", "0:a:0", "-f", "null", "-"],
       { timeout: 60_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) });
   } catch (error) {
     if (typeof (error as { code?: unknown }).code === "number") throw new InvalidAudioFile("音频无法解码。");
@@ -144,10 +151,10 @@ export async function probeAudioOutputFile(file: string, signal?: AbortSignal): 
   let stdout: string;
   try {
     ({ stdout } = await run("ffprobe", [
-      "-v", "error", "-select_streams", "a:0",
+      "-v", "error", ...localMediaFormats, "-select_streams", "a:0",
       "-show_entries", "stream=codec_name,channels,sample_rate:format=duration,format_name", "-of", "json", file,
     ], { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) }));
-    await run("ffmpeg", ["-v", "error", "-xerror", "-i", file, "-map", "0:a:0", "-f", "null", "-"],
+    await run("ffmpeg", ["-v", "error", ...localMediaFormats, "-xerror", "-i", file, "-map", "0:a:0", "-f", "null", "-"],
       { timeout: 60_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) });
   } catch (error) {
     if (typeof (error as { code?: unknown }).code === "number") throw new InvalidAudioOutput("音频无法解码。");
@@ -169,12 +176,20 @@ export async function probeAudioOutputFile(file: string, signal?: AbortSignal): 
   return { durationMs: Math.round(duration * 1000), sampleRate, channels: audio.channels, mimeType: wav ? "audio/wav" : "audio/mpeg" };
 }
 
+function parseFrameRate(value: string | undefined): number | null {
+  if (!value) return null;
+  const parts = value.split("/");
+  if (parts.length !== 2 || Number(parts[1]) <= 0) return null;
+  const fps = Number(parts[0]) / Number(parts[1]);
+  return Number.isFinite(fps) && fps > 0 ? fps : null;
+}
+
 export async function probeVideoFile(file: string, ffprobePath = "ffprobe", signal?: AbortSignal): Promise<VideoFileFacts> {
   let stdout: string;
   try {
     ({ stdout } = await run(ffprobePath, [
-      "-v", "error", "-show_entries",
-      "format=duration,format_name:stream=codec_type,width,height,avg_frame_rate,duration:stream_tags=DURATION",
+      "-v", "error", ...localMediaFormats, "-show_entries",
+      "format=duration,format_name:stream=codec_type,width,height,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_side_data=rotation:stream_tags=DURATION",
       "-of", "json", file,
     ], { timeout: 30_000, maxBuffer: 1024 * 1024, ...(signal ? { signal } : {}) }));
   } catch (error) {
@@ -182,7 +197,7 @@ export async function probeVideoFile(file: string, ffprobePath = "ffprobe", sign
     throw error;
   }
   const parsed = JSON.parse(stdout) as {
-    streams?: { codec_type?: string; width?: number; height?: number; avg_frame_rate?: string; duration?: string; tags?: { DURATION?: string } }[];
+    streams?: { codec_type?: string; width?: number; height?: number; sample_aspect_ratio?: string; side_data_list?: { rotation?: number }[]; avg_frame_rate?: string; r_frame_rate?: string; duration?: string; tags?: { DURATION?: string } }[];
     format?: { duration?: string; format_name?: string };
   };
   const video = parsed.streams?.find(stream => stream.codec_type === "video");
@@ -206,15 +221,77 @@ export async function probeVideoFile(file: string, ffprobePath = "ffprobe", sign
   // 无声文件没有音轨可比，容器时长就是画面时长，保留这个回退。
   if (!(videoDuration > 0) && !hasAudio) videoDuration = duration;
   if (!(videoDuration > 0)) throw new InvalidVideoFile("视频轨时长不可读。");
-  const fraction = video.avg_frame_rate?.split("/") ?? [];
-  const frameRate = fraction.length === 2 && Number(fraction[1]) > 0 ? Number(fraction[0]) / Number(fraction[1]) : null;
+  const sar = video.sample_aspect_ratio?.split(":").map(Number);
+  const pixelWidth = sar && sar[0]! > 0 && sar[1]! > 0 ? video.width * sar[0]! / sar[1]! : video.width;
+  const quarterTurn = video.side_data_list?.some(side => side.rotation !== undefined && Math.abs(side.rotation) % 180 === 90);
+  const [displayWidth, displayHeight] = quarterTurn ? [video.height, pixelWidth] : [pixelWidth, video.height];
   return {
     width: video.width, height: video.height,
+    ...(displayWidth !== video.width || displayHeight !== video.height ? { displayWidth, displayHeight } : {}),
     durationMs: Math.round(duration * 1000), videoDurationMs: Math.round(videoDuration * 1000),
     hasAudio,
-    frameRate: frameRate && Number.isFinite(frameRate) && frameRate > 0 ? frameRate : null,
+    frameRate: parseFrameRate(video.avg_frame_rate), nominalFrameRate: parseFrameRate(video.r_frame_rate),
     mimeType,
   };
+}
+
+export async function decodeUploadedVideo(
+  file: string,
+  mime: VideoFileFacts["mimeType"],
+  signal: AbortSignal,
+): Promise<void> {
+  // ffprobe 为 Matroska/WebM 共报一个解复用器。EBML 的 DocType 才能区分真正的 WebM。
+  const handle = await open(file, "r");
+  try {
+    const head = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    const bytes = head.subarray(0, bytesRead);
+    if (
+      mime === "video/webm" &&
+      (!bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) ||
+        !bytes.includes(Buffer.from([0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d])))
+    )
+      throw new InvalidVideoFile("文件未声明 WebM 容器。");
+    if (
+      mime === "video/mp4" &&
+      bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
+      bytes.subarray(8, 12).toString("ascii").trim() === "qt"
+    )
+      throw new InvalidVideoFile("文件是 QuickTime MOV，请导出为 MP4。");
+  } finally {
+    await handle.close();
+  }
+  try {
+    await run(
+      "ffmpeg",
+      [
+        "-nostdin",
+        "-v",
+        "error",
+        "-xerror",
+        "-format_whitelist",
+        "mov,matroska,webm",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-threads",
+        "2",
+        "-i",
+        file,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-f",
+        "null",
+        "-",
+      ],
+      { signal, timeout: 300000, maxBuffer: 256 * 1024 },
+    );
+  } catch (error) {
+    if (typeof (error as NodeJS.ErrnoException).code === "number")
+      throw new InvalidVideoFile("视频或音轨无法完整解码。");
+    throw error;
+  }
 }
 
 // 制作受理前探测已有渲染输入文件：付费批次与纯本地 render 的 blob/媒体修订共用 ffprobe；
@@ -231,9 +308,10 @@ export async function probeRenderInputs(
     (db.prepare("SELECT digest FROM production_blobs WHERE id=? AND owner_id=? AND conversation_id=?")
       .get(blobId, scope.ownerId, scope.conversationId) as { digest: string } | undefined)?.digest;
   for (const op of intent.operations) {
-    if ("kind" in op && op.kind !== "render") continue;
+    if ("kind" in op && op.kind !== "render" && op.kind !== "video") continue;
+    const imageSlots = "kind" in op && op.kind === "video" ? new Set(videoImageSlots(op.parameters).map(entry => entry.slot)) : null;
     for (const [slot, input] of op.inputs.entries()) {
-      const role = renderSlotRole(op.parameters, slot);
+      const role = "kind" in op && op.kind === "video" ? (imageSlots!.has(slot) ? "image" : "none") : renderSlotRole(op.parameters, slot);
       if (role === "none") continue;
       if (input.kind === "blob") {
         const digest = blobDigest(input.blobId);
@@ -255,10 +333,13 @@ export async function probeRenderInputs(
       // 按槽位角色探测：音频槽（供应商旁白 MP3 与本地登记 WAV 音乐）按文件本身核对解码事实，
       // 哪种槽位接受哪种封装由 prepare 的 MIME 边界决定；图片槽核实实际解码，视频槽是视频事实
       // （timed/narrated 画面允许自带原声，执行时明确丢弃）。
-      if (role === "audio") probes.set(blobId, { ok: true, kind: "audio", durationMs: (await probeAudioOutputFile(blobs.filePath(digest))).durationMs });
+      if (role === "audio") {
+        const { durationMs, mimeType } = await probeAudioOutputFile(blobs.filePath(digest));
+        probes.set(blobId, { ok: true, kind: "audio", durationMs, mimeType });
+      }
       else if (role === "image") {
         const facts = await probeImageFile(blobs.filePath(digest));
-        probes.set(blobId, { ok: true, kind: "image", width: facts.width, height: facts.height });
+        probes.set(blobId, { ok: true, kind: "image", width: facts.width, height: facts.height, sizeBytes: blobs.get(scope.ownerId,blobId).size_bytes });
       } else {
         const facts = await probeVideoFile(blobs.filePath(digest), ffprobePath);
         probes.set(blobId, { ok: true, kind: "video", ...facts });

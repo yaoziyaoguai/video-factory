@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
+import {pipeline} from "node:stream/promises";
+import {createWriteStream} from "node:fs";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAgentRuntime, type AgentRuntime } from "../src/server/agent/assembly.js";
-import { CreativeRunner, editingWorkspace } from "../src/server/agent/creative-runner.js";
+import { CreativeRunner, creativeWorkspaceId, editingWorkspace } from "../src/server/agent/creative-runner.js";
+import { sizedMp4 } from "./helpers/sized-mp4.js";
 import { LocalRenderPort } from "../src/server/agent/local-render.js";
 import { probeImageFile, probeVideoFile } from "../src/server/agent/media-probe.js";
 import type { ProductionService } from "../src/server/agent/production-service.js";
@@ -89,10 +94,10 @@ interface World {
   close(): Promise<void>;
 }
 
-async function setupReal(directory: string): Promise<{ world: World; broker: { close(): Promise<void>; imageId: string; socketPath: string } }> {
+async function setupReal(directory: string): Promise<{ world: World; broker: { close(): Promise<void>; imageId: string; socketPath: string; volumeNamespace: string } }> {
   const { createCreativeRunnerHost } = await import(new URL("../../../scripts/creative-runner-host.mjs", import.meta.url).href);
   const broker = await createCreativeRunnerHost({ socketPath: path.join(directory, "runtime", "s"),
-    workspaceRoot: path.join(directory, "workspaces"), dockerSocket });
+    workspaceRoot: path.join(directory, "workspaces"), transferRoot: path.join(directory, "app", "creative-transfer"), dockerSocket });
   const runner = new CreativeRunner({ socketPath: broker.socketPath });
   await mkdir(path.join(directory, "skills"), { recursive: true });
   const runtime = await createAgentRuntime({
@@ -162,6 +167,72 @@ const lastToolText = (context: TranscriptContext): { isError: boolean; text: str
   const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
   return { isError: result.isError, text: result.content.filter(part => part.type === "text").map(part => part.text).join("") };
 };
+
+async function measureFrozenInputs(world: World, workId: string, base: string, namespace: string) {
+  const owner = "local-owner";
+  const inputs: { kind: "blob"; blobId: string; digest: string }[] = [];
+  for (let slot = 0; slot < 5; slot++) {
+    const file = path.join(world.directory, `clip-${slot}.mp4`);
+    await sizedMp4(base, file, 100 * 1024 ** 2, slot);
+    const blob = await world.blobs.persistFromFileAsync(owner, world.conversationId, file, "video/mp4", 2000);
+    inputs.push({ kind: "blob", blobId: blob.id, digest: blob.digest });
+    await unlink(file);
+  }
+  assert.equal(new Set(inputs.map(input => input.digest)).size, 5);
+  const entrypoint = { argv: ["python3", "-I", "join.py"] };
+  const source = `import os, subprocess
+from pathlib import Path
+files = [Path("/inputs") / (str(i) + ".mp4") for i in range(5)]
+assert os.statvfs("/inputs").f_flag & os.ST_RDONLY
+assert all(f.stat().st_size == 104857600 for f in files)
+Path("list.txt").write_text("".join("file '" + str(f) + "'\\n" for f in files))
+subprocess.run(["ffmpeg","-v","error","-y","-f","concat","-safe","0","-i","list.txt","-c","copy","joined.mp4"], check=True)
+`;
+  await send(world, [fauxAssistantMessage([fauxToolCall("write", { path: "join.py", content: source })]),
+    fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "五段素材合成", files: ["join.py"],
+      entrypoint, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+    context => { assert.equal(lastToolText(context).isError, false, lastToolText(context).text); return fauxAssistantMessage("工程已冻结。"); }]);
+  const projectRevision = world.runtime.database.prepare("SELECT r.artifact_id AS artifactId, r.id AS revisionId FROM artifact_revisions r JOIN artifacts a ON a.id=r.artifact_id WHERE a.kind='project' ORDER BY r.rowid DESC LIMIT 1").get() as { artifactId: string; revisionId: string };
+  const durations: number[] = [];
+  const prepare = world.runner.prepareInputs;
+  world.runner.prepareInputs = async function(workspace, selected, root) {
+    const started = performance.now();
+    await prepare.call(this, workspace, selected, root);
+    durations.push(performance.now() - started);
+    assert.equal(selected.length, 5);
+    for (const input of selected) {
+      const [from, to] = await Promise.all([stat(input.file), stat(path.join(root, creativeWorkspaceId(workspace) + "-inputs", input.alias))]);
+      assert.deepEqual([to.dev, to.ino, to.size, to.blocks], [from.dev, from.ino, 100 * 1024 ** 2, from.blocks]);
+    }
+  };
+  try {
+    for (let turn = 0; turn < 10; turn++) {
+      const operationId = "join-" + turn;
+      await send(world, [fauxAssistantMessage([fauxToolCall("render_project", { workId, title: "素材拼接", scope: "拼接五个镜头", purpose: "draft",
+        inputSources: [], reviewInputs: [], operations: [{ operationId, outputSlot: "final", inputs,
+          parameters: { assembly: "code_project", projectRevision, entrypoint, outputPath: "joined.mp4", expectedMediaKind: "video", format: "mp4", width: 320, height: 180, fps: 4 },
+          target: { group: { mode: "create", key: operationId, title: "样片", nextIntent: null },
+            item: { mode: "create", key: "clip", label: "拼接样片", role: "clip", required: true } } }] })]),
+        context => { const result = lastToolText(context); assert.equal(result.isError, false, result.text); return fauxAssistantMessage("已受理。"); }], "制作拼接样片 " + turn);
+      const row = world.runtime.database.prepare("SELECT id FROM production_runs ORDER BY rowid DESC LIMIT 1").get() as { id: string };
+      const result = await drive(world, row.id);
+      assert.equal(result.state, "succeeded", JSON.stringify(result.operations));
+      const ref = result.outputRevisions[0]!;
+      const media = world.runtime.service.readRevision(owner, ref.artifactId, ref.revisionId).content;
+      assert.ok(media.format === "media");
+      const facts = await probeVideoFile(world.blobs.filePath(world.blobs.get(owner, media.blobId).digest));
+      assert.equal(facts.width, 320);
+      assert.equal(facts.frameRate, 4);
+      assert.ok(Math.abs(facts.durationMs - 10000) < 100);
+      assert.deepEqual(await readdir(path.join(world.directory, "media-work")), []);
+    }
+  } finally { world.runner.prepareInputs = prepare; }
+  const volumes = execFileSync("docker", ["--host", "unix://" + dockerSocket, "volume", "ls", "-q", "--filter", "label=frame.scope=execution", "--filter", "label=frame.namespace=" + namespace], { encoding: "utf8" }).trim();
+  assert.equal(volumes, "");
+  assert.equal(durations.length, 10);
+  console.log("ISS-04 OPT-01", JSON.stringify({ renders: durations.length, inputCount: 5, inputSizeMiB: 100, extraPayloadBytes: 0, executionVolumes: 0, attemptDirs: 0, prepareMs: durations }));
+  assert.ok(Math.max(...durations) < 30);
+}
 
 it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改可见、在途可聊、文件留存", { skip: !dockerSocket, timeout: 300_000 }, async () => {
   await mkdir(evidence, { recursive: true });
@@ -292,13 +363,31 @@ it("G2-3 阶段退出：真实 Skill 经隔离容器产出动画草稿，修改�
     assert.notEqual(secondBlob.digest, firstBlob.digest, "修改后产出字节不同");
     await writeFile(path.join(directory, "animation-revised.mp4"), readFileSync(world.blobs.filePath(secondBlob.digest)));
 
-    // 容器结束后文件仍在：每次执行都是独立 docker run --rm，成品与工作区文件落在宿主持久位置。
+    // 成品走内容寻址存储，编辑工程可继续；一次性执行卷应已销毁。
     world.blobs.verify(firstBlob); world.blobs.verify(secondBlob);
-    const runOutput = await world.runner
-      .readFile({ conversationId: world.conversationId, workId, executionId: `${runRow.id}:anim-1` }, "output.mp4");
-    assert.ok(runOutput.length > 1000, "run+operation 工作区的成品文件在容器退出后仍可读");
+    assert.ok(readFileSync(world.blobs.filePath(firstBlob.digest)).length > 1000);
+    assert.equal(execFileSync("docker", ["--host", "unix://" + dockerSocket, "volume", "ls", "-q", "--filter", "label=frame.scope=execution",
+      "--filter", "label=frame.namespace=" + broker.volumeNamespace], { encoding: "utf8" }).trim(), "");
     const editingAnim = await world.runner.readFile(editingWorkspace(world.conversationId, workId), "anim.py");
     assert.match(editingAnim.toString(), /#efe8db/, "修改保留在编辑工作区");
+
+    const editor = editingWorkspace(world.conversationId, workId);
+    const links = 'from pathlib import Path; p=Path("/workspace"); (p/"alias.py").symlink_to(p/"anim.py"); (p/"skill-link").symlink_to("/skills"); (p/"system-link").symlink_to("/etc/hosts")';
+    assert.equal((await world.runner.executeArgv(editor, ["python3", "-I", "-c", links])).exitCode, 0);
+    const listed = (await world.runner.listFiles(editor)).map(file => file.path);
+    assert.equal(new Set(listed).size, listed.length);
+    assert.ok(listed.includes("anim.py") && listed.includes("alias.py"));
+    assert.ok(!listed.includes("skill-link") && !listed.includes("system-link"));
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId, title: "链接清单", files: ["anim.py", "alias.py"],
+        entrypoint: { argv: ["python3", "-I", "alias.py"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+      context => { const result = lastToolText(context); assert.equal(result.isError, false, result.text); return fauxAssistantMessage("已封存两份工程路径。"); },
+    ], "按已列出的工程路径封存源码与别名");
+    const linked = jsonField(world, "SELECT r.content_json FROM artifact_revisions r JOIN artifacts a ON a.id=r.artifact_id WHERE a.kind='project' ORDER BY r.rowid DESC LIMIT 1", "content_json") as CreativeProjectContent;
+    assert.deepEqual(linked.files.map(file => file.relativePath).sort(), ["alias.py", "anim.py"]);
+    assert.equal(linked.files[0]!.digest, linked.files[1]!.digest);
+
+    await measureFrozenInputs(world, workId, world.blobs.filePath(firstBlob.digest), broker.volumeNamespace);
 
     await writeFile(path.join(directory, "evidence.json"), JSON.stringify({
       imageId: broker.imageId, socketPath: broker.socketPath, skill: SKILL_NAME,
@@ -503,6 +592,21 @@ else:
     assert.equal(chained.outputRevisions.length, 2, "两操作各自产出");
     assert.equal(digestOf(chained.outputRevisions[0]!.revisionId), firstDigest, "链源产出与首渲同字节");
     assert.equal(digestOf(chained.outputRevisions[1]!.revisionId), firstDigest, "第二操作真实消费了第一操作的物化产物");
+    for(const [projectRef,runId,output] of [[animRef,firstRunId,"output.mp4"],[passRef,chained.id,"out2.mp4"]] as const){
+      const dest=path.join(directory,"zip-"+projectRef.revisionId);await mkdir(dest);
+      const archive=path.join(dest,"Frame.zip");
+      await pipeline(world.runtime.service.frozenArchive("local-owner",projectRef.artifactId,projectRef.revisionId,runId),createWriteStream(archive));
+      const names=execFileSync("unzip",["-Z1",archive],{encoding:"utf8"}).trim().split("\n");
+      assert.ok(names.includes("README-RUN.md")&&names.includes("ATTRIBUTION.txt"));
+      assert.ok(names.every(name=>!name.startsWith("/")&&!name.split("/").includes("..")));
+      execFileSync("unzip",["-q",archive],{cwd:dest});
+      const reproduction=readFileSync(path.join(dest,"README-RUN.md"),"utf8").split("\n").find(line=>line.startsWith("docker run "))!;
+      assert.ok(reproduction.includes(broker.imageId));
+      execFileSync("sh",["-ec",reproduction],{cwd:dest,env:{...process.env,DOCKER_HOST:"unix://"+dockerSocket},timeout:90_000});
+      const reproduced=createHash("sha256").update(readFileSync(path.join(dest,"project",output))).digest("hex");
+      assert.equal(reproduced,firstDigest);
+      console.log("CAP-06 冻结镜像重现",JSON.stringify({project:projectRef.revisionId,runId,entries:names,digest:reproduced}));
+    }
 
     await writeFile(path.join(directory, "evidence.json"), JSON.stringify({
       imageId: broker.imageId, socketPath: broker.socketPath,

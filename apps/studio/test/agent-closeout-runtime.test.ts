@@ -1,3 +1,5 @@
+import { buildFrameApp } from "../src/server/agent/app.js";
+import { createPasswordHash } from "../src/server/auth.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -558,4 +560,70 @@ test("视频封面返回 JPEG、按不可变媒体重验证且权限先于缓存
   const other = app.service.createConversation("other-owner", { commandId: "other-start", title: "独立测试会话" }).conversation;
   const sameBytes = blobs.persist("other-owner", other.id, bytes, "video/mp4", 6000);
   assert.equal((await app.app.inject({ url: endpoint(sameBytes.id), headers })).statusCode, 404);
+});
+
+test("ISS-03 受控媒体支持私有强缓存、鉴权条件请求、单段 Range 和显式下载", async t => {
+  const { app, id } = await fixture(t, { media: { autoStart: false } });
+  const data = Buffer.from("0123456789");
+  const blobs = app.production!.blobs;
+  const other = app.service.createConversation("other-owner", { commandId: "foreign", title: "其他作品" }).conversation.id;
+  for (const mime of ["video/mp4","video/webm","audio/mpeg","audio/wav","image/png","image/jpeg","image/webp"]) {
+    const content = Buffer.concat([data, Buffer.from(mime)]);
+    const blob = blobs.persist("local-owner", id, content, mime, null);
+    const url = "/api/agent/v1/blobs/" + blob.id + "/content";
+    const full = await app.app.inject({ url });
+    assert.equal(full.statusCode, 200);
+    assert.deepEqual(full.rawPayload, content);
+    assert.match(String(full.headers["content-disposition"]), /^inline/);
+    assert.equal(full.headers.etag, '"' + blob.digest + '"');
+    assert.equal(full.headers["cache-control"], "private, max-age=86400, immutable");
+    assert.equal(full.headers.vary, "Cookie");
+    const conditional = await app.app.inject({ url, headers: { "if-none-match": "W/" + full.headers.etag } });
+    assert.equal(conditional.statusCode, 304);
+    assert.equal(conditional.rawPayload.length, 0);
+    const partial = await app.app.inject({ url, headers: { range: "bytes=2-4", "if-range": String(full.headers.etag) } });
+    assert.equal(partial.statusCode, 206); assert.equal(partial.body, "234");
+    assert.equal(partial.headers["content-range"], "bytes 2-4/" + content.length);
+    assert.equal((await app.app.inject({ url, headers: { range: "bytes=-2" } })).body, mime.slice(-2));
+    assert.equal((await app.app.inject({ url, headers: { range: "bytes=2-", "if-range": '"another"' } })).statusCode, 200);
+    assert.equal((await app.app.inject({ url: url + "?download=1" })).headers["content-disposition"], "attachment");
+    const invalid = await app.app.inject({ url, headers: { range: "bytes=999999-" } });
+    assert.equal(invalid.statusCode, 416);
+    const foreign = blobs.persist("other-owner", other, content, mime, null);
+    const denied = await app.app.inject({ url: "/api/agent/v1/blobs/" + foreign.id + "/content", headers: { "if-none-match": String(full.headers.etag) } });
+    assert.equal(denied.statusCode, 404);
+    for (const response of [full, partial, conditional, invalid, denied]) {
+      assert.equal(response.headers["x-content-type-options"], "nosniff");
+      assert.equal(response.headers["content-security-policy"], "default-src 'none'; sandbox");
+    }
+  }
+});
+
+test("ISS-10 登录与登出校验页面源和请求头，拒绝时保存现有会话与限流额度", async t => {
+  const runtime = await fixture(t);
+  const origin = "https://frame.example";
+  const app = buildFrameApp({ agent: { service: runtime.app.service, resolveOwner: () => undefined, uiOrigin: origin }, auth: {
+    username: "owner", passwordHash: createPasswordHash("fixture-password", Buffer.from("fixture-salt")),
+    sessionSecret: "fixture-only-session-secret-at-least-32-characters", secureCookie: true, loginAttemptLimit: 1,
+  } });
+  t.after(() => app.close());
+  const valid = { host: "frame.example", origin, "x-video-factory-request": "studio" };
+  const post = (route: string, headers: Record<string, string>) => app.inject({ method: "POST", url: "/api/auth/" + route,
+    headers, payload: route === "login" ? { username: "owner", password: "fixture-password" } : {} });
+  const denied = [{ host: valid.host, origin }, { host: valid.host, "x-video-factory-request": "studio" },
+    { ...valid, origin: "https://other.example" }, { ...valid, host: "other.example" }];
+  for (const headers of denied) {
+    const response = await post("login", headers);
+    assert.equal(response.statusCode, 403); assert.equal(response.json().code, "FORBIDDEN");
+  }
+  const ok = await post("login", valid);
+  assert.equal(ok.statusCode, 200);
+  const cookie = ok.cookies.map(entry => entry.name + "=" + entry.value).join("; ");
+  for (const headers of denied) {
+    const response = await post("logout", { ...headers, cookie });
+    assert.equal(response.statusCode, 403); assert.equal(response.json().code, "FORBIDDEN");
+    assert.equal((await app.inject({ url: "/api/auth/session", headers: { cookie } })).json().authenticated, true);
+  }
+  assert.equal((await post("logout", { ...valid, cookie })).statusCode, 204);
+  assert.equal((await app.inject({ url: "/api/auth/session", headers: { cookie } })).json().authenticated, false);
 });

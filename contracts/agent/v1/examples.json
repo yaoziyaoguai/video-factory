@@ -4344,6 +4344,119 @@
     }
   },
   {
+    "name": "free service settings directory full snapshot",
+    "schema": "FreeServiceSettingsDirectory",
+    "valid": true,
+    "value": {
+      "services": [
+        {
+          "serviceId": "pexels",
+          "revision": 2,
+          "enabled": true,
+          "credentialConfigured": true,
+          "endpoint": "https://api.pexels.com/v1",
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "pixabay",
+          "revision": 0,
+          "enabled": false,
+          "credentialConfigured": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "unsplash",
+          "revision": 0,
+          "enabled": false,
+          "credentialConfigured": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "coverr",
+          "revision": 0,
+          "enabled": false,
+          "credentialConfigured": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "wikimedia",
+          "revision": 1,
+          "enabled": true,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "nasa",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "met",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "cleveland",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "archive",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "freetouse",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "incompetech",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "douyin-music",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "tiktok-sounds",
+          "revision": 0,
+          "enabled": false,
+          "writeUnavailableReason": null
+        },
+        {
+          "serviceId": "newsnow",
+          "revision": 3,
+          "enabled": true,
+          "endpoint": "https://news.example-selfhost.dev",
+          "sourceIds": [
+            "github",
+            "hackernews",
+            "weibo"
+          ],
+          "topics": [
+            "AI",
+            "独立开发"
+          ]
+        },
+        {
+          "serviceId": "edge-tts",
+          "revision": 0,
+          "enabled": false,
+          "voice": "zh-CN-XiaoxiaoNeural"
+        }
+      ]
+    }
+  },
+  {
     "name": "save pexels settings first enable",
     "schema": "SaveFreeServiceSettings",
     "valid": true,
@@ -10010,7 +10123,9 @@
           "project": {
             "artifactId": "project_1",
             "revisionId": "project_v1"
-          }
+          },
+          "blobId": "blob-example-script",
+          "sizeBytes": 64
         },
         {
           "relativePath": "out.mp4",
@@ -10018,7 +10133,9 @@
           "project": {
             "artifactId": "project_1",
             "revisionId": "project_v1"
-          }
+          },
+          "blobId": "blob-example-script",
+          "sizeBytes": 64
         }
       ]
     }
@@ -10845,6 +10962,497 @@
         }
       ],
       "nextCursor": null
+    }
+  },
+  {
+    "name": "storage totals",
+    "schema": "StorageUsage",
+    "valid": true,
+    "value": {
+      "revision": 0,
+      "finalBytes": 100,
+      "draftBytes": 50,
+      "reclaimableBytes": 10
+    }
+  },
+  {
+    "name": "archive expired media",
+    "schema": "CleanupStorage",
+    "valid": true,
+    "value": {
+      "expectedRevision": 0,
+      "commandId": "cmd-clean"
+    }
+  },
+  {
+    "name": "archive receipt",
+    "schema": "StorageCleanupReceipt",
+    "valid": true,
+    "value": {
+      "usage": {
+        "revision": 1,
+        "finalBytes": 100,
+        "draftBytes": 40,
+        "reclaimableBytes": 0
+      },
+      "freedBytes": 10,
+      "freedFiles": 1
+    }
+  },
+  {
+    "name": "health without optional host",
+    "schema": "FrameHealth",
+    "valid": true,
+    "value": {
+      "status": "ok",
+      "product": "frame",
+      "runtime": "pi",
+      "liveness": "ok",
+      "readiness": {
+        "database": "ready",
+        "creativeRunner": "not_configured"
+      }
+    }
+  },
+  {
+    "name": "explicit read-only connection probe",
+    "schema": "ProviderConnectionProbe",
+    "valid": true,
+    "value": {
+      "checkedAt": "2026-11-22T00:00:00Z"
+    }
+  },
+  {
+    "name": "inherit visual canvas at admission",
+    "schema": "RenderInputParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "assembly": "ordered_concat",
+      "fitMode": "cover_crop"
+    }
+  },
+  {
+    "name": "frozen operation requires concrete canvas",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "assembly": "ordered_concat",
+      "fitMode": "cover_crop"
+    }
+  },
+  {
+    "name": "paired canvas required",
+    "schema": "RenderInputParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "assembly": "ordered_concat",
+      "fitMode": "cover_crop",
+      "width": 720
+    }
+  },
+  {
+    "name": "portrait output at 30 fps",
+    "schema": "RenderParameters",
+    "valid": true,
+    "value": {
+      "format": "mp4",
+      "assembly": "ordered_concat",
+      "fitMode": "cover_crop",
+      "width": 1080,
+      "height": 1920,
+      "fps": 30
+    }
+  },
+  {
+    "name": "odd chroma width",
+    "schema": "RenderParameters",
+    "valid": false,
+    "value": {
+      "format": "mp4",
+      "assembly": "ordered_concat",
+      "fitMode": "cover_crop",
+      "width": 719,
+      "height": 1280,
+      "fps": 30
+    }
+  },
+  {
+    "name": "upload form",
+    "schema": "UploadForm",
+    "valid": true,
+    "value": {
+      "commandId": "command_upload",
+      "expectedRevision": 1,
+      "rights": "owned_or_licensed",
+      "file": "actual bytes from the file part"
+    }
+  },
+  {
+    "name": "uploaded PNG receipt",
+    "schema": "UploadReceipt",
+    "valid": true,
+    "value": {
+      "conversation": {
+        "id": "conversation_1",
+        "title": "今天的对话",
+        "revision": 1,
+        "updatedAt": "2026-10-25T08:00:00Z"
+      },
+      "attachment": {
+        "source": {
+          "artifactId": "art_upload",
+          "revisionId": "rev_upload"
+        },
+        "blobId": "blob_upload",
+        "mimeType": "image/png",
+        "durationMs": null,
+        "facts": {
+          "fileName": "纸样.png",
+          "sizeBytes": 325,
+          "rights": "owned_or_licensed",
+          "width": 128,
+          "height": 128
+        }
+      }
+    }
+  },
+  {
+    "name": "first and last frame slots",
+    "schema": "VideoParameters",
+    "valid": true,
+    "value": {
+      "durationSeconds": 5,
+      "aspectRatio": "9:16",
+      "resolution": "720p",
+      "audioMode": "none",
+      "firstFrameSlot": 1,
+      "lastFrameSlot": 2
+    }
+  },
+  {
+    "name": "separate reference and keyframe modes",
+    "schema": "VideoParameters",
+    "valid": false,
+    "value": {
+      "durationSeconds": 5,
+      "aspectRatio": "9:16",
+      "resolution": "720p",
+      "audioMode": "none",
+      "firstFrameSlot": 1,
+      "referenceImageSlots": [
+        2
+      ]
+    }
+  },
+  {
+    "name": "thirty reference images occupy distinct video slots",
+    "schema": "VideoParameters",
+    "valid": true,
+    "value": {
+      "durationSeconds": 5,
+      "aspectRatio": "9:16",
+      "resolution": "720p",
+      "audioMode": "none",
+      "referenceImageSlots": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ]
+    }
+  },
+  {
+    "name": "词时间轴保留原稿标点",
+    "schema": "SubtitleTrack",
+    "valid": true,
+    "value": {
+      "format": "subtitles",
+      "source": {
+        "artifactId": "voice",
+        "revisionId": "recording-v1"
+      },
+      "alignment": "tts_word",
+      "stylePreset": "clean_bottom",
+      "cues": [
+        {
+          "id": "line-1",
+          "startMs": 100,
+          "endMs": 960,
+          "text": "欢迎来到 Frame。"
+        }
+      ]
+    }
+  },
+  {
+    "name": "作品音轨创建字幕",
+    "schema": "CreateSubtitleTrack",
+    "valid": true,
+    "value": {
+      "commandId": "create-sub",
+      "expectedRevision": 1,
+      "source": {
+        "artifactId": "voice",
+        "revisionId": "recording-v1"
+      },
+      "stylePreset": "social_pop_center"
+    }
+  },
+  {
+    "name": "校对时冻结父版本",
+    "schema": "SaveSubtitleRevision",
+    "valid": true,
+    "value": {
+      "commandId": "edit-sub",
+      "expectedRevision": 1,
+      "baseRevisionId": "sub-v1",
+      "stylePreset": "cinema_bilingual",
+      "cues": [
+        {
+          "id": "line-1",
+          "startMs": 100,
+          "endMs": 960,
+          "text": "欢迎来到 Frame。"
+        }
+      ]
+    }
+  },
+  {
+    "name": "字幕回执",
+    "schema": "SubtitleReceipt",
+    "valid": true,
+    "value": {
+      "artifact": {
+        "artifactId": "captions",
+        "revisionId": "sub-v1"
+      },
+      "revisionNumber": 1,
+      "workId": "work-1"
+    }
+  },
+  {
+    "name": "不可微调的旧成片",
+    "schema": "RemixTimeline",
+    "valid": true,
+    "value": {
+      "available": false
+    }
+  },
+  {
+    "name": "裁切并调音",
+    "schema": "RemixCommand",
+    "valid": true,
+    "value": {
+      "commandId": "remix-command",
+      "expectedRevision": 1,
+      "baseRevisionId": "video-v1",
+      "segments": [
+        {
+          "id": "seg-a",
+          "startMs": 50,
+          "durationMs": 5000
+        }
+      ],
+      "originalGain": 0,
+      "musicGain": 0.18
+    }
+  },
+  {
+    "name": "独立创作者账号",
+    "schema": "StudioAccount",
+    "valid": true,
+    "value": {
+      "id": "user-a",
+      "username": "creator-a",
+      "role": "creator",
+      "disabledAt": null
+    }
+  },
+  {
+    "name": "工作空间月预算",
+    "schema": "SaveBudgetPolicy",
+    "valid": true,
+    "value": {
+      "commandId": "cap",
+      "expectedRevision": 0,
+      "scope": "workspace",
+      "subjectId": "default",
+      "conversationLimitMinor": null,
+      "dayLimitMinor": null,
+      "monthLimitMinor": 1000
+    }
+  },
+  {
+    "name": "供应商实际用量",
+    "schema": "ProviderUsage",
+    "valid": true,
+    "value": {
+      "outputTokens": 320,
+      "mediaDurationMs": 5000
+    }
+  },
+  {
+    "name": "来源可核对的逐笔账单",
+    "schema": "StatementLine",
+    "valid": true,
+    "value": {
+      "providerId": "ark",
+      "connectionId": "team",
+      "providerTaskId": "provider-job",
+      "fact": {
+        "kind": "authoritative",
+        "billingFactId": "bill-1",
+        "sourceRevision": "1",
+        "netAmount": {
+          "currency": "CNY",
+          "amountMinor": 51
+        },
+        "final": true,
+        "evidenceId": "statement-1"
+      }
+    }
+  },
+  {
+    "name": "账号管理读取",
+    "schema": "StudioAccounts",
+    "valid": true,
+    "value": {
+      "revision": 1,
+      "accounts": [
+        {
+          "id": "user-a",
+          "username": "creator-a",
+          "role": "creator",
+          "disabledAt": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "团队新增创作者",
+    "schema": "CreateStudioAccount",
+    "valid": true,
+    "value": {
+      "commandId": "create-a",
+      "expectedRevision": 1,
+      "username": "creator-a",
+      "password": "public-sample-password",
+      "role": "creator"
+    }
+  },
+  {
+    "name": "团队额度清单",
+    "schema": "BudgetPolicies",
+    "valid": true,
+    "value": {
+      "currency": "CNY",
+      "policies": [
+        {
+          "scope": "workspace",
+          "subjectId": "default",
+          "revision": 1,
+          "dayLimitMinor": null,
+          "monthLimitMinor": 500,
+          "conversationLimitMinor": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "额度设置回执",
+    "schema": "BudgetPolicy",
+    "valid": true,
+    "value": {
+      "scope": "workspace",
+      "subjectId": "default",
+      "revision": 1,
+      "dayLimitMinor": null,
+      "monthLimitMinor": 500,
+      "conversationLimitMinor": null
+    }
+  },
+  {
+    "name": "disable one studio account",
+    "schema": "UpdateStudioAccount",
+    "valid": true,
+    "value": {
+      "commandId": "pause-member",
+      "expectedRevision": 4,
+      "disabled": true
+    }
+  },
+  {
+    "name": "account update must include a change",
+    "schema": "UpdateStudioAccount",
+    "valid": false,
+    "value": {
+      "commandId": "empty-change",
+      "expectedRevision": 4
+    }
+  },
+  {
+    "name": "own budget before choosing a conversation",
+    "schema": "BudgetSummary",
+    "valid": true,
+    "value": {
+      "currency": "CNY",
+      "timeZone": "Asia/Shanghai",
+      "conversationId": null,
+      "personal": {
+        "conversation": null,
+        "day": {
+          "limitMinor": null,
+          "usedMinor": 0,
+          "remainingMinor": null
+        },
+        "month": {
+          "limitMinor": null,
+          "usedMinor": 0,
+          "remainingMinor": null
+        }
+      },
+      "workspace": {
+        "conversation": null,
+        "day": {
+          "limitMinor": null,
+          "usedMinor": 0,
+          "remainingMinor": null
+        },
+        "month": {
+          "limitMinor": null,
+          "usedMinor": 0,
+          "remainingMinor": null
+        }
+      },
+      "effectiveRemainingMinor": null
     }
   }
 ]

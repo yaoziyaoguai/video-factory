@@ -1,14 +1,18 @@
+import { videoImageSlots } from "./video-image-inputs.js";
+import { projectMimeForExtension } from "../../shared/agent/project-files.js";
 import { VIDEO_TOPIC_CHARTS } from "../../shared/agent/video-topics.js";
 import { formatDimensionNote, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { resizeImageForModel } from "./image-projection.js";
+import { readModelImage, resizeImageForModel } from "./image-projection.js";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { contractsSchema } from "../../shared/agent/generated/contracts-schema.js";
+import { registerSubtitle, createSubtitle, reviewedNarration } from "./subtitle-service.js";
+import { speechCues } from "./subtitle-track.js";
+import type { ToolCreateSubtitles, SubtitleReceipt } from "../../shared/agent/generated/contracts.js";
 import type {
   ArtifactRevision, ContentSource, DeliveryReceipt, MaterialBatch, MaterialImportResult, MaterialSearchResult, MediaContent, OperationRequest,
   ProductionIntent, Proposal, Target, ToolConfirmReview, ToolDelivery, ToolImportMaterial, ToolPrepareProposal,
@@ -22,7 +26,7 @@ import type { PiBusinessTools, RequestContext, ReviewConfirmationResult, WorkFee
 import type { AgentDatabase } from "./db.js";
 import { AgentError, AgentToolError } from "./errors.js";
 import {
-  applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getArtifactRow, getInvocation, getRevisionRow,
+  bindReviewedVideoImages, applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getArtifactRow, getInvocation, getRevisionRow,
   insertRevision, registerInvocation, rowToArtifactHead, rowToArtifactRevision, rowToProposal, hasProductionLock, requirePaidProduction,
   NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type ArtifactRow, type ProposalRow, type QuoteCatalog, type RenderFileProbe,
@@ -432,9 +436,9 @@ export class BusinessTools implements PiBusinessTools {
 
     // 付费前探测：真实 render 目录（任一 assembly 分支）要求已有输入文件可读（事务外执行，结果随校验上下文进入事务）。
     const catalog = this.catalog();
-    const intent = expandToolIntent(input.spec, catalog);
+    const intent = bindReviewedVideoImages(this.db, {ownerId:context.actorId, conversationId:context.conversationId}, expandToolIntent(input.spec, catalog));
     let probes: Map<string, RenderFileProbe> | undefined;
-    if (catalog[RENDER_CATALOG_KEY]?.probeRenderInputs || catalog[NARRATED_CATALOG_KEY]?.probeRenderInputs
+    if (intent.operations.some(op => op.kind === "video" && videoImageSlots(op.parameters).length) || catalog[RENDER_CATALOG_KEY]?.probeRenderInputs || catalog[NARRATED_CATALOG_KEY]?.probeRenderInputs
       || catalog[TIMED_NARRATED_CATALOG_KEY]?.probeRenderInputs || catalog["render:mixed_concat"]?.probeRenderInputs) {
       if (!this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "本地渲染能力未正确装配，不能准备这份提案。");
       probes = await probeRenderInputs(this.db, this.blobs, { ownerId: context.actorId, conversationId: context.conversationId }, intent);
@@ -464,9 +468,6 @@ export class BusinessTools implements PiBusinessTools {
   // 工程封存（publish_project）：把当前工程选定文件与入口冻结为 project 修订。
   // 只封存，不认可、不受理制作、不自动交付；在途制作也不阻塞保存后继工程（§4.2.1）。
   async publishProject(context: RequestContext, input: ToolPublishProject): Promise<ArtifactRevision> {
-    const request = this.requireRunningRequest(context);
-    if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再封存工程。");
-    requireWork(this.db, context.actorId, context.conversationId, input.workId);
     if (!this.creative || !this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "工程封存通道未装配。");
     const manifest = new Set(input.files);
     if (manifest.size !== input.files.length) throw new AgentToolError("INVALID_INPUT", "工程文件清单里有重复路径。");
@@ -483,33 +484,16 @@ export class BusinessTools implements PiBusinessTools {
       throw new AgentToolError("INVALID_INPUT", "entrypoint 不能引用 /skills/ 临时资源；请把用到的 Skill 模板/字体/脚本复制进工程清单并以相对路径引用。");
     }
 
-    // 事务外读取工程文件与宿主镜像标识；读取结果进入事务前不再变化（容器内文件由本轮原生工具写定）。
-    const runner = this.creative.runner;
-    const workspace = this.creative.workspace(context.conversationId, input.workId);
-    const runtimeImage = await runner.imageId(workspace);
-    const fileBytes = await Promise.all(input.files.map(file => runner.readFile(workspace, file)));
-    // input.files 契约至少一项；map 后恢复非空元组类型。
-    const files = input.files.map((file, index): ProjectFile => {
-      const blob = this.blobs!.persist(context.actorId, context.conversationId, fileBytes[index]!, projectFileMime(file), null);
-      return { relativePath: file, blobId: blob.id, digest: blob.digest, purpose: "source" };
-    }) as [ProjectFile, ...ProjectFile[]];
-
-    const content: CreativeProjectContent = {
-      format: "project", files, entrypoint: input.entrypoint, runtimeImage,
-      dependencyLocks: input.dependencyLocks, timelineFiles: input.timelineFiles, sourceRevisions: input.sourceRevisions,
-    };
-    const write = this.db.transaction((): ArtifactRevision => {
-      // 文件读取是网络往返：落库前复核请求仍在运行、交付未关闭。
-      const current = this.requireRunningRequest(context);
-      if (current.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再封存工程。");
+    const checkInputs = (): ArtifactRow | undefined => {
+      const request = this.requireRunningRequest(context);
+      if (request.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再封存工程。");
+      requireWork(this.db, context.actorId, context.conversationId, input.workId);
       for (const ref of input.sourceRevisions) {
         const hit = this.db.prepare(
           "SELECT r.id FROM artifact_revisions r JOIN artifacts a ON a.id = r.artifact_id WHERE r.artifact_id=? AND r.id=? AND a.conversation_id=? AND a.owner_id=?",
         ).get(ref.artifactId, ref.revisionId, context.conversationId, context.actorId);
         if (!hit) throw new AgentError("INVALID_INPUT", "来源修订不在当前会话，不能封存进工程。");
       }
-      const now = this.clock();
-      let artifact: ArtifactRow;
       if (input.artifactId !== undefined) {
         const row = getArtifactRow(this.db, context.actorId, input.artifactId);
         if (!row || row.conversation_id !== context.conversationId || row.kind !== "project") {
@@ -523,21 +507,48 @@ export class BusinessTools implements PiBusinessTools {
         if (row.head_revision_id !== input.baseRevisionId) {
           throw new AgentError("STALE_REVISION", "工程已更新，请基于当前最新版本重新封存。", { currentRevisionId: row.head_revision_id });
         }
-        artifact = row;
-      } else {
-        const artifactId = newAgentId("art");
-        this.db.prepare(
-          `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'project', ?, NULL, 0, ?, ?, ?)`,
-        ).run(artifactId, context.conversationId, context.actorId, input.title, input.workId,
-          nextSeq(this.db, "artifacts", context.conversationId), now, now);
-        artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
+        return row;
       }
-      const revision = insertRevision(this.db, now, artifact, input.baseRevisionId ?? null,
-        { title: input.title, kind: "project", content }, context.requestId);
-      return rowToArtifactRevision(revision);
+      return undefined;
+    };
+    checkInputs();
+    // 事务外读取工程文件与宿主镜像标识；读取结果进入事务前不再变化（容器内文件由本轮原生工具写定）。
+    const runner = this.creative.runner;
+    const workspace = this.creative.workspace(context.conversationId, input.workId);
+    const runtimeImage = await runner.imageId(workspace);
+    const blobs = this.blobs;
+    return blobs.withStagingDirectory(async directory => {
+      const prepared: import("./production-blobs.js").PreparedFile[] = [];
+      for (const [index, file] of input.files.entries()) {
+        const local = join(directory, String(index));
+        await runner.transferFile(workspace, "export_file", file, local, blobs.transferRoot);
+        prepared.push(await blobs.prepareFile(local));
+      }
+      return blobs.withRegistration(context.actorId, context.conversationId, (register): ArtifactRevision => {
+        let artifact = checkInputs();
+        const now = this.clock();
+        if (!artifact) {
+          const artifactId = newAgentId("art");
+          this.db.prepare(
+            `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'project', ?, NULL, 0, ?, ?, ?)`,
+          ).run(artifactId, context.conversationId, context.actorId, input.title, input.workId,
+            nextSeq(this.db, "artifacts", context.conversationId), now, now);
+          artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
+        }
+        const files = input.files.map((file, index): ProjectFile => {
+          const blob = register(prepared[index]!, projectMimeForExtension(extname(file)), null);
+          return { relativePath: file, blobId: blob.id, digest: blob.digest, purpose: "source", mimeType: blob.mime_type, sizeBytes: blob.size_bytes };
+        }) as [ProjectFile, ...ProjectFile[]];
+        const content: CreativeProjectContent = {
+          format: "project", files, entrypoint: input.entrypoint, runtimeImage,
+          dependencyLocks: input.dependencyLocks, timelineFiles: input.timelineFiles, sourceRevisions: input.sourceRevisions,
+        };
+        const revision = insertRevision(this.db, now, artifact, input.baseRevisionId ?? null,
+          { title: input.title, kind: "project", content }, context.requestId, "tool_auxiliary");
+        return rowToArtifactRevision(revision);
+      });
     });
-    return write();
   }
 
   // 本地免费渲染受理（render_project）：核对请求边界后交给 ProductionService 冻结目标并建立 run。
@@ -558,81 +569,90 @@ export class BusinessTools implements PiBusinessTools {
   async dubFree(context: RequestContext, input: ToolDubFree, signal?: AbortSignal): Promise<DubFreeResult> {
     const request = this.requireRunningRequest(context);
     if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
+    if (input.workId) requireWork(this.db,context.actorId,context.conversationId,input.workId);
     const config = captureEdgeTtsConfig(this.db);
     if (!config) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费配音未启用，可在「免费服务 → 配音」中选择语音并打开。");
     if (!this.blobs) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "配音存储通道未装配。");
     const voice = input.voice ?? config.voice;
     const rate = input.rate ?? "+0%";
-    let stdout: string;
-    try {
-      const pending = runDubPython(config.pythonCommand, ["-I", "-c", DUB_DRIVER_PYTHON], {
-        timeout: 180_000, maxBuffer: 64 * 1024 * 1024, signal,
+    const blobs = this.blobs;
+    return blobs.withStagingDirectory(async directory => {
+      const file = join(directory, "dub.mp3");
+      let stdout: string;
+      try {
+        const pending = runDubPython(config.pythonCommand, ["-I", "-c", DUB_DRIVER_PYTHON, file], {
+          timeout: 180_000, maxBuffer: 64 * 1024 * 1024, signal,
+        });
+        // 异步 execFile 不支持 input 选项（仅同步变体支持），必须经 .child 手动写入并结束 stdin。
+        // 解释器启动失败时该流会 EPIPE，真实原因由下方 catch 承载，这里只防未处理的流错误事件。
+        pending.child.stdin?.on("error", () => {});
+        pending.child.stdin?.end(JSON.stringify({ text: input.text, voice, rate }));
+        ({ stdout } = await pending);
+      } catch (error) {
+        if ((error as Error).name === "AbortError" || signal?.aborted) throw error;
+        // 驱动 traceback 的末尾就是真实异常；退出被杀/spawn 失败时 stderr 是空串而非 undefined，需显式回退 message。
+        const stderr = ((error as { stderr?: string | Buffer }).stderr ?? "").toString().trim();
+        const detail = stderr || (error as Error).message;
+        throw new AgentToolError("TEMPORARILY_UNAVAILABLE", `免费配音调用失败：${detail.slice(-400)}`);
+      }
+      // 外部进程输出只在这里校验一次；之后的 boundaries 是已验证的内部数据。
+      const parsed = JSON.parse(stdout) as { boundaries?: unknown };
+      const boundaries = (Array.isArray(parsed.boundaries) ? parsed.boundaries : []).map((item): SpeechBoundary => {
+        const boundary = item as { text?: unknown; offsetMs?: unknown; durationMs?: unknown };
+        if (typeof boundary.text !== "string" || !boundary.text
+          || !Number.isInteger(boundary.offsetMs) || !Number.isInteger(boundary.durationMs)) {
+          throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的边界数据形状不正确。");
+        }
+        // Number.isInteger 不做类型收窄；形状在此边界校验一次后，内部按 number 使用。
+        return { text: boundary.text, offsetMs: boundary.offsetMs as number, durationMs: boundary.durationMs as number };
       });
-      // 异步 execFile 不支持 input 选项（仅同步变体支持），必须经 .child 手动写入并结束 stdin。
-      // 解释器启动失败时该流会 EPIPE，真实原因由下方 catch 承载，这里只防未处理的流错误事件。
-      pending.child.stdin?.on("error", () => {});
-      pending.child.stdin?.end(JSON.stringify({ text: input.text, voice, rate }));
-      ({ stdout } = await pending);
-    } catch (error) {
-      if ((error as Error).name === "AbortError" || signal?.aborted) throw error;
-      // 驱动 traceback 的末尾就是真实异常；退出被杀/spawn 失败时 stderr 是空串而非 undefined，需显式回退 message。
-      const stderr = ((error as { stderr?: string | Buffer }).stderr ?? "").toString().trim();
-      const detail = stderr || (error as Error).message;
-      throw new AgentToolError("TEMPORARILY_UNAVAILABLE", `免费配音调用失败：${detail.slice(-400)}`);
-    }
-    // 外部进程输出只在这里校验一次；之后的 boundaries/audioBytes 是已验证的内部数据。
-    const parsed = JSON.parse(stdout) as { audioB64?: unknown; boundaries?: unknown };
-    const boundaries = (Array.isArray(parsed.boundaries) ? parsed.boundaries : []).map((item): SpeechBoundary => {
-      const boundary = item as { text?: unknown; offsetMs?: unknown; durationMs?: unknown };
-      if (typeof boundary.text !== "string" || !boundary.text
-        || !Number.isInteger(boundary.offsetMs) || !Number.isInteger(boundary.durationMs)) {
-        throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的边界数据形状不正确。");
+      if (!(await stat(file)).size) throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音没有返回音频数据。");
+      let durationMs: number;
+      try { durationMs = (await probeAudioFile(file, signal)).durationMs; }
+      catch (error) {
+        if (error instanceof InvalidAudioFile) throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的音频无法解码为有效的 MP3。");
+        throw error;
       }
-      // Number.isInteger 不做类型收窄；形状在此边界校验一次后，内部按 number 使用。
-      return { text: boundary.text, offsetMs: boundary.offsetMs as number, durationMs: boundary.durationMs as number };
+      const prepared = await blobs.prepareFile(file);
+      // 本次没有返回任何边界事件时如实标 none，不编造词级/句级。
+      const granularity: DubbedSpeechMeta["granularity"] = boundaries.length ? "word" : "none";
+      const title = input.text.replace(/\s+/g, " ").trim().slice(0, 40) || "免费配音";
+      return blobs.withRegistration(context.actorId, context.conversationId, (register): DubFreeResult => {
+        // 网络往返与解码之后：落库前复核请求仍在运行、交付未关闭。
+        const current = this.requireRunningRequest(context);
+        if (current.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
+        const now = this.clock();
+        const blob = register(prepared, "audio/mpeg", durationMs);
+        const content: MediaContent = {
+          format: "media", blobId: blob.id, mimeType: "audio/mpeg", durationMs,
+          dub: { text: input.text, voice, rate, granularity, boundaries },
+        };
+        const artifactId = newAgentId("art");
+        this.db.prepare(
+          `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'audio', NULL, NULL, 0, ?, ?, ?)`,
+        ).run(artifactId, context.conversationId, context.actorId, title,
+          nextSeq(this.db, "artifacts", context.conversationId), now, now);
+        const artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
+        const revision = insertRevision(this.db, now, artifact, null, { title, kind: "audio", content }, context.requestId, "tool_auxiliary");
+        insertEvent(this.db, now, { ownerId: context.actorId, conversationId: context.conversationId, kind: "artifact.delivered",
+          entityId: artifactId, entityVersion: revision.revision_number, notification: "new_output" });
+        const source={artifactId,revisionId:revision.id};
+        const work=input.workId ? requireWork(this.db,context.actorId,context.conversationId,input.workId) : null;
+        const subtitle=boundaries.length ? registerSubtitle(this.db,now,{ownerId:context.actorId,conversationId:context.conversationId},work,source,{
+          format:"subtitles",source,alignment:"tts_word",stylePreset:"clean_bottom",cues:speechCues({words:boundaries,starts:[],ends:[]},durationMs,reviewedNarration(this.db,work,input.text)),
+        },context.requestId).artifact : undefined;
+        return { ...source,durationMs,granularity,boundaryCount:boundaries.length,voice,rate,...(subtitle?{subtitle}:{}) };
+      });
     });
-    const audioBytes = typeof parsed.audioB64 === "string" ? Buffer.from(parsed.audioB64, "base64") : Buffer.alloc(0);
-    if (audioBytes.length === 0) throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音没有返回音频数据。");
-    // 时长不信任服务方口径：解码实际文件核实（也是可播放性的真实检查）。
-    let durationMs: number;
-    const dir = await mkdtemp(join(tmpdir(), "frame-dub-"));
-    try {
-      const file = join(dir, "dub.mp3");
-      await writeFile(file, audioBytes);
-      durationMs = (await probeAudioFile(file, signal)).durationMs;
-    } catch (error) {
-      if ((error as Error).name === "AbortError" || signal?.aborted) throw error;
-      if (error instanceof InvalidAudioFile) {
-        throw new AgentToolError("TEMPORARILY_UNAVAILABLE", "免费配音返回的音频无法解码为有效的 MP3。");
-      }
-      throw error;
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-    // 本次没有返回任何边界事件时如实标 none，不编造词级/句级。
-    const granularity: DubbedSpeechMeta["granularity"] = boundaries.length ? "word" : "none";
-    const title = input.text.replace(/\s+/g, " ").trim().slice(0, 40) || "免费配音";
-    const write = this.db.transaction((): DubFreeResult => {
-      // 网络往返与解码之后：落库前复核请求仍在运行、交付未关闭。
-      const current = this.requireRunningRequest(context);
-      if (current.delivery_closed) throw new AgentError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
-      const now = this.clock();
-      const blob = this.blobs!.persist(context.actorId, context.conversationId, audioBytes, "audio/mpeg", durationMs);
-      const content: MediaContent = {
-        format: "media", blobId: blob.id, mimeType: "audio/mpeg", durationMs,
-        dub: { text: input.text, voice, rate, granularity, boundaries },
-      };
-      const artifactId = newAgentId("art");
-      this.db.prepare(
-        `INSERT INTO artifacts(id, conversation_id, owner_id, title, kind, work_id, head_revision_id, head_revision_number, created_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'audio', NULL, NULL, 0, ?, ?, ?)`,
-      ).run(artifactId, context.conversationId, context.actorId, title,
-        nextSeq(this.db, "artifacts", context.conversationId), now, now);
-      const artifact = getArtifactRow(this.db, context.actorId, artifactId)!;
-      const revision = insertRevision(this.db, now, artifact, null, { title, kind: "audio", content }, context.requestId);
-      return { artifactId, revisionId: revision.id, durationMs, granularity, boundaryCount: boundaries.length, voice, rate };
-    });
-    return write();
+  }
+
+  async createSubtitles(context: RequestContext,input:ToolCreateSubtitles,signal?:AbortSignal):Promise<SubtitleReceipt> {
+    const check=()=>{if(this.requireRunningRequest(context).delivery_closed) throw new AgentError("DELIVERY_CLOSED","这次请求已完成交付。");};
+    check();
+    if(!this.blobs) throw new AgentError("CAPABILITY_UNAVAILABLE","字幕素材存储未装配。");
+    const work=requireWork(this.db,context.actorId,context.conversationId,input.workId);
+    return createSubtitle(this.db,this.blobs,this.clock,context.actorId,work.id,{commandId:digestOf([context.requestId,context.toolCallId]),expectedRevision:work.revision,source:input.source,stylePreset:input.stylePreset ?? "clean_bottom"},{id:context.requestId,check},signal);
   }
 
   private requireRequest(context: RequestContext): RequestRow {
@@ -656,7 +676,7 @@ export class BusinessTools implements PiBusinessTools {
 // stdin JSON → stdout JSON 的薄封装。offset/duration 原始单位 100ns，这里换算为毫秒；
 // boundary="WordBoundary" 请求逐词事件；服务一条事件都没给时 boundaries 为空，由调用方如实标 none。
 const DUB_DRIVER_PYTHON = `
-import asyncio, base64, json, os, sys
+import asyncio, json, os, sys
 from urllib.parse import urlsplit
 from urllib.request import proxy_bypass_environment
 import edge_tts
@@ -669,36 +689,23 @@ async def main():
     if proxy_bypass_environment(urlsplit(WSS_URL).hostname, {"no": no_proxy}):
         proxy = None
     communicate = edge_tts.Communicate(request["text"], request["voice"], rate=request["rate"], boundary="WordBoundary", proxy=proxy or None)
-    audio = bytearray()
     boundaries = []
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio.extend(chunk["data"])
-        elif chunk["type"] == "WordBoundary":
-            boundaries.append({
-                "text": chunk["text"],
-                "offsetMs": round(chunk["offset"] / 1e4),
-                "durationMs": round(chunk["duration"] / 1e4),
-            })
-    sys.stdout.write(json.dumps({"audioB64": base64.b64encode(bytes(audio)).decode(), "boundaries": boundaries}))
+    with open(sys.argv[1], "xb") as audio:
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio.write(chunk["data"])
+            elif chunk["type"] == "WordBoundary":
+                boundaries.append({
+                    "text": chunk["text"],
+                    "offsetMs": round(chunk["offset"] / 1e4),
+                    "durationMs": round(chunk["duration"] / 1e4),
+                })
+    sys.stdout.write(json.dumps({"boundaries": boundaries}))
 
 asyncio.run(main())
 `;
 
 const runDubPython = promisify(execFile);
-
-// 工程文件的描述性类型；执行时按字节写回工作区，不依赖这里的 MIME。
-const PROJECT_FILE_MIME: Record<string, string> = {
-  ".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript",
-  ".json": "application/json", ".md": "text/markdown", ".txt": "text/plain",
-  ".py": "text/x-python", ".sh": "text/x-shellscript",
-  // 媒体工程文件按扩展名登记准确 MIME：作品库选材据此区分共享 blob 与文本副本（G4-2）。
-  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
-};
-function projectFileMime(file: string): string {
-  return PROJECT_FILE_MIME[file.slice(file.lastIndexOf("."))] ?? "application/octet-stream";
-}
 
 // Pi 工具输出的内容块：文本或内嵌图像（SDK 层按模型能力决定是否投喂图像）。
 type ToolContentBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -726,9 +733,11 @@ async function presentMedia(
   frameTimesMs: readonly number[] | undefined,
   signal?: AbortSignal,
 ): Promise<ToolContentBlock[] | null> {
-  const file = blobs.filePath(blobs.get(ownerId, content.blobId).digest);
-  if (content.mimeType === "image/jpeg" || content.mimeType === "image/png") {
-    return resizedImageBlocks(await readFile(file), content.mimeType);
+  const blob = blobs.get(ownerId, content.blobId);
+  const file = blobs.filePath(blob.digest);
+  if (content.mimeType.startsWith("image/")) {
+    const { bytes, mimeType } = await readModelImage(file, content.mimeType, blob.size_bytes, signal);
+    return resizedImageBlocks(bytes, mimeType);
   }
   if (content.mimeType === "video/mp4" || content.mimeType === "video/webm") {
     const explicit = frameTimesMs?.length ? frameTimesMs : undefined;
@@ -916,7 +925,7 @@ export function buildAgentTools(
   const renderProject: ToolDefinition = {
     name: "render_project",
     label: "受理本地渲染",
-    description: "把已有素材或冻结工程交给现有本地 worker 免费执行，立即返回 run（后台完成，不等待结果、完成后不自动点评），不创建提案、授权或费用。每个操作声明 operationId/outputSlot、inputs、现有 RenderParameters 与 target：支持 code_project、ordered_concat、narrated_concat、timed_narrated_concat、mixed_concat。纯本地整批走本工具；要新增付费图片/视频/配音时，完整批次走 prepare_production 一次确认。"
+    description: "把已有素材或冻结工程交给现有本地 worker 免费执行，立即返回 run（后台完成，不等待结果、完成后不自动点评），不创建提案、授权或费用。每个操作声明 operationId/outputSlot、inputs、现有 RenderParameters 与 target：支持 code_project、ordered_concat、narrated_concat、timed_narrated_concat、mixed_concat。后四种可省略宽高，按上游视觉片段主画幅选 720p/1080p。竖屏、方形或横屏可显式指定偶数宽高和 24、25、30 或 60fps；片段可设 contain_pad、cover_crop、blur_backdrop，静帧可设 kenBurns。纯本地整批走本工具；要新增付费图片/视频/配音时，完整批次走 prepare_production 一次确认。"
       + "native 输入按数组下标指定槽位；ordered_concat 按顺序拼接（原声按 audioMode），narrated_concat 完整保留画面与旁白，timed_narrated_concat 按 segments 区间/静帧时间合成。mixed_concat 的 segmentIds 与 segments 对应，可设置逐段 originalGain、一路已有 music 和完整 narration；音乐选区、位置、播放长、repeat、gain、fades、duckUnderNarration 都要明确，不暗循环、不加速或裁旁白。music.candidateId 仅引用已采用的音乐候选，本地已登记音轨可省略；musicSource 由服务器从真实输入解析，不能自填许可。"
       + "code_project 的 projectRevision 用 publish_project 返回的准确修订，entrypoint 必须与冻结入口一致，outputPath 不与封存文件或 inputs/<slot>.* 同名；expectedMediaKind 与尺寸/采样率/声道/fps 字段按实际媒体填写。媒体输入物化为 inputs/<slot>.<扩展名>，operation_output 可串接批内输出；按冻结 argv 执行，正常退出却没有声明输出仍失败。target 已有组/项传准确 id，新组/项用 create 声明并由服务端分配身份。"
       + "purpose=production 时批内每个视频都受组审阅认可约束，reviewInputs 引用 read_work 的准确 confirmationId 与采用版本；预览草稿可空。受理后该作品在途期间不再受理新制作，保存后继工程与独立认可不受影响。完成先落 target 草稿，不自动认可或定稿；需要正式交付时用 deliver_artifacts 引用运行输出。",
@@ -1096,6 +1105,11 @@ export function buildAgentTools(
     },
   };
 
+  const createSubtitles:ToolDefinition={
+    name:"create_subtitles",label:"生成字幕",description:"从本作品的配音或原声视频生成带时间码的字幕稿，交给用户校对与认可。",
+    parameters:inlineSchema("ToolCreateSubtitles"),
+    async execute(toolCallId,args,signal){const result=await tools.createSubtitles(requireContext(holder,toolCallId),args as ToolCreateSubtitles,signal);return {content:[{type:"text",text:JSON.stringify(result)}],details:result};}
+  };
   const dubFree: ToolDefinition = {
     name: "dub_free",
     label: "免费配音",
@@ -1112,7 +1126,7 @@ export function buildAgentTools(
   };
 
   return [readArtifact, deliverArtifacts, prepareProduction, publishProject, renderProject, readProposal, readRun, listProduction,
-    searchMaterials, readMaterialBatch, readTrends, importMaterial, dubFree, startWork, readWork, confirmReview, recordWorkFeedback,
+    searchMaterials, readMaterialBatch, readTrends, importMaterial, dubFree, createSubtitles, startWork, readWork, confirmReview, recordWorkFeedback,
     ...(readSkillFile ? [readSkillFile] : [])];
 }
 
@@ -1127,9 +1141,11 @@ function requireContext(holder: { current: ActiveRequestContext | null }, toolCa
 export function inlineSchema(defName: string): TSchema {
   const defs = (contractsSchema as { $defs: Record<string, unknown> }).$defs;
   if (!defs[defName]) throw new Error(`契约中没有 ${defName}`);
-  const resolve = (node: unknown, stack: readonly string[]): unknown => {
+  // 联合分支会内联同一字段多次。保留首次完整说明，避免重复的注解耗掉长会话的上下文。
+  const descriptions = new Set<string>();
+  const resolve = (node: unknown, stack: readonly string[], field = defName): unknown => {
     if (typeof node === "string") return node;
-    if (Array.isArray(node)) return node.map(item => resolve(item, stack));
+    if (Array.isArray(node)) return node.map(item => resolve(item, stack, field));
     if (node === null || typeof node !== "object") return node;
     const record = node as Record<string, unknown>;
     const ref = record.$ref;
@@ -1140,9 +1156,20 @@ export function inlineSchema(defName: string): TSchema {
       if (!name || stack.includes(name)) throw new Error(`契约定义循环引用：${name}`);
       const target = defs[name] as Record<string, unknown> | undefined;
       if (!target) throw new Error(`契约缺少定义：${name}`);
-      return resolve(target, [...stack, name]);
+      return resolve(target, [...stack, name], field);
     }
-    return Object.fromEntries(Object.entries(record).map(([key, value]) => [key, resolve(value, stack)]));
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(record)) {
+      // const 和同型枚举已经精确限定标量类型，联合内联无需再付一份 type 的提示词成本。
+      if (key==="type" && typeof value==="string" && (typeof record.const===value || (Array.isArray(record.enum) && record.enum.length>0 && record.enum.every(v=>typeof v===value)))) continue;
+      if (key === "description" && typeof value === "string") {
+        const identity = JSON.stringify([field, value]);
+        if (descriptions.has(identity)) continue;
+        descriptions.add(identity);
+      }
+      result[key] = resolve(value, stack, key);
+    }
+    return result;
   };
   return resolve(defs[defName], [defName]) as TSchema;
 }

@@ -193,7 +193,7 @@ export function assertReviewActionSource(
   if (!matches) throw new AgentError("INVALID_INPUT", "本次用户消息的认可动作、目标或版本与原始动作不一致。");
 }
 
-// 精确修订必须在本次用户表达前已交付。两个顺序都来自 events；消息领取/完成的后续事件不代表新授权。
+// 新写入的消息和修订共享持久因果时钟。迁移前已经剪掉的事件无法恢复其准确位置。
 export function assertReviewSourceAvailable(
   db: AgentDatabase,
   scope: { ownerId: string; conversationId: string },
@@ -201,17 +201,18 @@ export function assertReviewSourceAvailable(
   origin: ConfirmationOrigin,
 ): void {
   if (origin.kind !== "user_message") return;
-  const facts = db.prepare(`SELECT
-      (SELECT MIN(e.seq) FROM events e WHERE e.conversation_id = a.conversation_id AND e.owner_id = a.owner_id
-        AND e.kind = 'message.changed' AND e.entity_id = ?) AS message_seq,
-      (SELECT MIN(e.seq) FROM events e WHERE e.conversation_id = a.conversation_id AND e.owner_id = a.owner_id
-        AND e.kind = 'artifact.delivered' AND e.entity_id = a.id AND e.entity_version = r.revision_number) AS delivered_seq
-    FROM artifact_revisions r JOIN artifacts a ON a.id = r.artifact_id
+  const facts = db.prepare(`SELECT CASE
+      WHEN r.created_seq > 0 AND m.causal_seq > 0 THEN r.created_seq < m.causal_seq
+      WHEN r.created_seq = 0 AND m.created_seq > c.legacy_message_seq THEN 1
+      WHEN r.created_seq = 0 THEN r.created_at < m.created_at
+      ELSE 0 END AS available
+    FROM artifact_revisions r JOIN artifacts a ON a.id = r.artifact_id JOIN conversations c ON c.id = a.conversation_id
+    JOIN messages m ON m.id = ? AND m.owner_id = a.owner_id AND m.conversation_id = a.conversation_id AND m.role = 'user'
     WHERE a.id = ? AND r.id = ? AND a.owner_id = ? AND a.conversation_id = ?`)
     .get(origin.messageId, source.artifactId, source.revisionId, scope.ownerId, scope.conversationId) as
-      { message_seq: number | null; delivered_seq: number | null } | undefined;
+      { available: number } | undefined;
   if (!facts) throw new AgentError("NOT_FOUND", "引用的产物修订不存在或不属于当前会话。");
-  if (facts.message_seq === null || facts.delivered_seq === null || facts.delivered_seq >= facts.message_seq) {
+  if (!facts.available) {
     throw new AgentError("INVALID_INPUT", "这份修订在本次用户消息发出前尚未交付，不能提前认可未来产物。");
   }
 }
@@ -493,20 +494,28 @@ export function relatedWorkFeedback(
   });
 }
 
+export function withStandaloneApprovals(db: AgentDatabase, heads: ArtifactHead[]): ArtifactHead[] {
+  const eligible = heads.filter(head => head.kind === "script" && head.workId === null).map(head => head.id);
+  if (!eligible.length) return heads;
+  // 一页最多 50 个稿件；对每个独立脚本通过已有的表达式索引取最新认可。
+  const rows = db.prepare(`SELECT ids.value AS artifact_id, c.id, json_extract(c.subject_json, '$.revisionId') AS revision_id, c.created_at
+    FROM json_each(?) ids JOIN work_review_confirmations c ON c.rowid = (
+      SELECT f.rowid FROM work_review_confirmations f
+      WHERE f.subject_scope = 'standalone_artifact' AND f.action = 'approve'
+        AND json_extract(f.subject_json, '$.artifactId') = ids.value ORDER BY f.rowid DESC LIMIT 1
+    )`).all(JSON.stringify(eligible)) as { artifact_id: string; id: string; revision_id: string; created_at: string }[];
+  const byId = new Map(rows.map(row => [row.artifact_id, { confirmationId: row.id, revisionId: row.revision_id, approvedAt: row.created_at }]));
+  return heads.map(head => {
+    const approval = byId.get(head.id);
+    return approval ? { ...head, standaloneApproval: approval } : head;
+  });
+}
+
 export function withStandaloneApproval(db: AgentDatabase, artifact: ArtifactHead): ArtifactHead {
-  if (artifact.kind !== "script" || artifact.workId !== null) return artifact;
-  const confirmation = db.prepare(`SELECT id, subject_json, created_at FROM work_review_confirmations
-    WHERE subject_scope = 'standalone_artifact' AND action = 'approve' AND json_extract(subject_json, '$.artifactId') = ?
-    ORDER BY rowid DESC LIMIT 1`).get(artifact.id) as { id: string; subject_json: string; created_at: string } | undefined;
-  if (!confirmation) return artifact;
-  const subject = JSON.parse(confirmation.subject_json) as Extract<ContentSource, { kind: "artifact_revision" }>;
-  return { ...artifact, standaloneApproval: {
-    confirmationId: confirmation.id, revisionId: subject.revisionId, approvedAt: confirmation.created_at,
-  } };
+  return withStandaloneApprovals(db, [artifact])[0]!;
 }
 
 export function workProjection(db: AgentDatabase, row: WorkRow): Work {
-  const state = parseCreationState(row);
   // finalizedSource 是只读投影：来自确认表里该事项最近的 finalize_video 行。
   // 非 video 事项没有 finalize 行，自然保持 null。
   const finalizeRows = db.prepare(
@@ -514,6 +523,23 @@ export function workProjection(db: AgentDatabase, row: WorkRow): Work {
      WHERE owner_id = ? AND subject_scope = 'work_item' AND work_id = ? AND action = 'finalize_video'
      ORDER BY created_at ASC, rowid ASC`,
   ).all(row.owner_id, row.id) as { item_id: string; subject_json: string }[];
+  return projectWork(row, finalizeRows);
+}
+
+type FinalizedItem = { item_id: string; subject_json: string };
+
+export function batchWorkProjections(db: AgentDatabase, ownerId: string, conversationId: string, limit: number): Work[] {
+  const rows = db.prepare(`SELECT w.*,
+    (SELECT json_group_array(json_object('item_id',item_id,'subject_json',subject_json) ORDER BY created_at,rowid)
+     FROM work_review_confirmations WHERE owner_id=w.owner_id AND work_id=w.id
+       AND subject_scope='work_item' AND action='finalize_video') AS finalized
+    FROM works w WHERE w.owner_id=? AND w.conversation_id=? AND w.creation_state_json IS NOT NULL
+    ORDER BY w.rowid DESC LIMIT ?`).all(ownerId, conversationId, limit) as (WorkRow & { finalized: string })[];
+  return rows.reverse().map(row => projectWork(row, JSON.parse(row.finalized) as FinalizedItem[]));
+}
+
+function projectWork(row: WorkRow, finalizeRows: FinalizedItem[]): Work {
+  const state = parseCreationState(row);
   const finalizedByItem = new Map<string, ContentSource>();
   for (const confirmation of finalizeRows) finalizedByItem.set(confirmation.item_id, JSON.parse(confirmation.subject_json) as ContentSource);
   return {

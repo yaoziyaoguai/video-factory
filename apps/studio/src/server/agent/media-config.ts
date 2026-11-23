@@ -1,6 +1,7 @@
+import { validateVideoImages, videoImageFeatures } from "./video-image-inputs.js";
 import type { Bootstrap, ModelBinding } from "../../shared/agent/generated/contracts.js";
 import { AgentError } from "./errors.js";
-import { renderSlotRole } from "./render-inputs.js";
+import { renderSlotRole, validateRenderCanvas } from "./render-inputs.js";
 import { canonicalJson, digestOf } from "./util.js";
 import { RENDER_CATALOG_KEY, type CatalogValidationContext, type QuoteCatalog, type QuoteCatalogEntry, type TrustedOperationInput } from "./artifact-store.js";
 
@@ -72,13 +73,13 @@ export function rangedQuoteMinor(quote: RangedVideoQuoteConfig, durationSeconds:
 /** 参数校验（M2 参数化通道共用）：整数时长区间、画幅/分辨率等于冻结值、原声开关属于能力集合。 */
 export function validateRangedVideoParameters(capability: RangedVideoCapability, parameters: {
   durationSeconds: number; aspectRatio: string; resolution: string; audioMode: string;
-}, channelLabel: string): void {
+}, channelLabel: string, imageMode = false): void {
   if (!Number.isInteger(parameters.durationSeconds)
     || parameters.durationSeconds < capability.durationSecondsMin || parameters.durationSeconds > capability.durationSecondsMax) {
     throw new AgentError("CAPABILITY_UNAVAILABLE",
       `视频时长必须是 ${capability.durationSecondsMin}–${capability.durationSecondsMax} 的整数秒（${channelLabel}）。`);
   }
-  if (parameters.aspectRatio !== capability.aspectRatio || parameters.resolution !== capability.resolution) {
+  if ((!imageMode && parameters.aspectRatio !== capability.aspectRatio) || parameters.resolution !== capability.resolution) {
     throw new AgentError("CAPABILITY_UNAVAILABLE",
       `视频参数与已核实的启用组合不一致（${capability.resolution}/${capability.aspectRatio}，${channelLabel}）。`);
   }
@@ -219,8 +220,9 @@ export function arkVideoValidator(profile: ArkVideoProfile): NonNullable<QuoteCa
     if (op.kind !== "video") throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 video 操作。");
     if (op.maxCreateAttempts !== 1) throw new AgentError("INVALID_INPUT", "本通道每个操作只允许一次创建尝试。");
     if (isRangedVideoCapability(profile.video)) {
-      validateRangedVideoParameters(profile.video, op.parameters, "Seedance");
-      requireSingleTextInput(op, inputs);
+      const withImages = validateVideoImages(profile.modelId, op, inputs);
+      validateRangedVideoParameters(profile.video, op.parameters, "Seedance", withImages);
+      if (!withImages) requireSingleTextInput(op, inputs);
       return;
     }
     if (canonicalJson(op.parameters) !== canonicalJson(profile.video)) {
@@ -244,9 +246,7 @@ export function realRenderValidator(
   if (op.kind !== "render" || op.parameters.assembly !== "ordered_concat") {
     throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 ordered_concat 拼接。");
   }
-  if (op.parameters.width !== 1280 || op.parameters.height !== 720 || op.parameters.fps !== 24) {
-    throw new AgentError("CAPABILITY_UNAVAILABLE", "本阶段拼接只启用 1280×720、24fps 输出。");
-  }
+  validateRenderCanvas(op.parameters);
   const probes = ctx?.renderFileProbes;
   if (!probes) return;
   for (const input of inputs ?? []) {
@@ -269,6 +269,7 @@ export function narratedRenderValidator(
   if (op.kind !== "render" || op.parameters.assembly !== "narrated_concat") {
     throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 narrated_concat 拼接。");
   }
+  validateRenderCanvas(op.parameters);
   const probes = ctx?.renderFileProbes;
   if (!probes) return;
   for (const input of inputs ?? []) {
@@ -291,9 +292,7 @@ export function timedNarratedRenderValidator(
   if (op.kind !== "render" || op.parameters.assembly !== "timed_narrated_concat") {
     throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 timed_narrated_concat 拼接。");
   }
-  if (op.parameters.width !== 1280 || op.parameters.height !== 720 || op.parameters.fps !== 24) {
-    throw new AgentError("CAPABILITY_UNAVAILABLE", "本阶段剪辑只启用 1280×720、24fps 输出。");
-  }
+  validateRenderCanvas(op.parameters);
   const probes = ctx?.renderFileProbes;
   if (!probes) return;
   const kindsBySlot = new Map<number, "video" | "image" | "audio">();
@@ -322,6 +321,7 @@ export function mixedRenderCatalogEntry(): QuoteCatalogEntry {
       if (op.kind !== "render" || op.parameters.assembly !== "mixed_concat") {
         throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 mixed_concat 混音。");
       }
+      validateRenderCanvas(op.parameters);
       for (const [slot, input] of (inputs ?? []).entries()) {
         const blobId = input.kind === "blob" ? input.blobId
           : input.kind === "artifact_revision" && input.content.format === "media" ? input.content.blobId : null;
@@ -807,12 +807,13 @@ export function wanVideoBinding(profile: WanVideoProfile, connectionId: string):
 }
 
 // 参数化视频通道共用：校验器/目录条目/型号视图（Seedance 参数化行、H3、万相同一形状）。
-export function rangedVideoValidator(video: RangedVideoCapability, channelLabel: string): NonNullable<QuoteCatalogEntry["validate"]> {
-  return (op, inputs): void => {
+export function rangedVideoValidator(video: RangedVideoCapability, channelLabel: string, modelId?: string): NonNullable<QuoteCatalogEntry["validate"]> {
+  return (op, inputs, context): void => {
     if (op.kind !== "video") throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 video 操作。");
     if (op.maxCreateAttempts !== 1) throw new AgentError("INVALID_INPUT", "本通道每个操作只允许一次创建尝试。");
-    validateRangedVideoParameters(video, op.parameters, channelLabel);
-    requireSingleTextInput(op, inputs);
+    const withImages = validateVideoImages(modelId ?? op.model.modelId, op, inputs, context);
+    validateRangedVideoParameters(video, op.parameters, channelLabel, withImages);
+    if (!withImages) requireSingleTextInput(op, inputs);
   };
 }
 
@@ -820,7 +821,7 @@ export function rangedVideoCatalogEntry(binding: ModelBinding, video: RangedVide
   channelLabel: string): QuoteCatalogEntry {
   return {
     binding, quoteMinor: rangedQuoteMinor(quote, video.durationSecondsMin, video.resolution), priceKind: "estimate",
-    validate: rangedVideoValidator(video, channelLabel), maxCreateAttempts: 1,
+    validate: rangedVideoValidator(video, channelLabel, binding.modelId), maxCreateAttempts: 1,
     quoteMinorFor: op => op.kind === "video" ? rangedQuoteMinor(quote, op.parameters.durationSeconds, op.parameters.resolution) : 0,
     estimateNote: `${channelLabel}视频按冻结秒数 × 每秒单价估价（${quote.source}，核实 ${quote.verifiedAt}${quote.usdCny ? `，USD→CNY ${quote.usdCny}` : ""}）；实际以供应商账单为准。`,
   };
@@ -830,7 +831,7 @@ export function rangedVideoModelView(binding: ModelBinding, displayName: string,
   quote: RangedVideoQuoteConfig, channelLabel: string, available = true, unavailableReason = ""): Bootstrap["models"][number] {
   return {
     binding, name: displayName, kind: "video",
-    features: ["text-to-video", `${video.durationSecondsMin}–${video.durationSecondsMax}s`, video.resolution, video.aspectRatio,
+    features: ["text-to-video", ...videoImageFeatures(binding.modelId), `${video.durationSecondsMin}–${video.durationSecondsMax}s`, video.resolution, video.aspectRatio,
       video.audioModes.includes("native") ? video.audioModes.includes("none") ? "无声或原生音画" : "原生音画" : "无声输出"],
     availability: available ? "configured" : "unavailable",
     verificationNote: `${unavailableReason}已核实范围：${video.durationSecondsMin}–${video.durationSecondsMax} 整数秒、${video.resolution} ${video.aspectRatio}、${

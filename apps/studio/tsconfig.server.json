@@ -8,8 +8,6 @@
     "src/shared/**/*.ts",
     "test/agent-*.test.ts",
     "test/auth.test.ts",
-    "test/maintenance.test.ts",
-    "test/maintenance-gate.test.ts",
     "test/helpers/agent-*.ts"
   ]
 }

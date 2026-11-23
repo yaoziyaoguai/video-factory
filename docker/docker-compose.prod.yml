@@ -4,8 +4,14 @@ services:
     container_name: video_factory_prod
     restart: unless-stopped
     environment:
+      FRAME_BILLING_STATEMENT_SOURCE: ${FRAME_BILLING_STATEMENT_SOURCE:-/data/factory/agent/billing-statements.ndjson}
+      FRAME_BUDGET_TZ: ${FRAME_BUDGET_TZ:-Asia/Shanghai}
+      FRAME_ASR_LANGUAGE: ${FRAME_ASR_LANGUAGE:-}
+      FRAME_MEDIA_RETENTION_DAYS: ${FRAME_MEDIA_RETENTION_DAYS:-30}
+      FRAME_CREDENTIAL_SECRET: ${FRAME_CREDENTIAL_SECRET:?set a persistent 32-byte credential encryption secret}
       RELEASE_SHA: ${RELEASE_SHA}
       AGENT_UI_ORIGIN: ${AGENT_UI_ORIGIN:?set public HTTPS origin}
+      AGENT_EDGE_TTS_PYTHON: ${FRAME_EDGE_TTS_PYTHON:-python3}
       VIDEO_FACTORY_AUTH_USERNAME: ${VIDEO_FACTORY_AUTH_USERNAME:?set username}
       VIDEO_FACTORY_AUTH_PASSWORD_HASH: ${VIDEO_FACTORY_AUTH_PASSWORD_HASH:?set password hash}
       VIDEO_FACTORY_AUTH_SESSION_SECRET: ${VIDEO_FACTORY_AUTH_SESSION_SECRET:?set session secret}

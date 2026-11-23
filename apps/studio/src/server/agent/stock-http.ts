@@ -1,3 +1,6 @@
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { getGlobalDispatcher, interceptors, request } from "undici";
 // 免费素材来源的共享传输纪律：API Key 只发各自固定 API 入口（重定向即拒），
 // 媒体下载只走各来源的固定域名（含逐跳重定向复核）、声明长度预检与流式字节上限。
 // 响应在这里一次性解析为受控类型；之后只传 typed 数据。
@@ -62,9 +65,18 @@ function asHtmlText(value: unknown, max: number): string | null {
 export const stockValueHelpers = { asUrl, asPositiveInt, asPositiveSeconds, asText, asHtmlText };
 
 /** 固定 API 入口的 JSON GET：不跟随重定向（Key 不能发往其它地址）、429 单列限流语义。 */
-export async function fetchApiJson(input: {
+interface ApiGet {
   url: string; label: string; headers?: Record<string, string> | undefined; fetchImpl: HttpFetch; signal?: AbortSignal | undefined;
-}): Promise<unknown> {
+}
+export type ApiJsonResult = { status: 200; payload: unknown; etag: string | null; modified: string | null } | { status: 304 };
+
+export async function fetchApiJson(input: ApiGet): Promise<unknown> {
+  const response = await fetchApiJsonWithMetadata(input);
+  if (response.status === 304) throw new StockUnavailableError(`${input.label} 未返回目录内容。`);
+  return response.payload;
+}
+
+export async function fetchApiJsonWithMetadata(input: ApiGet): Promise<ApiJsonResult> {
   const timeout = AbortSignal.timeout(API_TIMEOUT_MS);
   try {
     const response = await input.fetchImpl(input.url, {
@@ -73,12 +85,13 @@ export async function fetchApiJson(input: {
       redirect: "manual",
     });
     // 凭据只发固定 API 入口；入口出现重定向时不带 Key 跟随，直接拒绝。
+    if (response.status === 304) return { status: 304 };
     if (response.status >= 300 && response.status < 400) {
       throw new StockUnavailableError(`${input.label} API 入口出现重定向，本次不跟随。`);
     }
     if (response.status === 429) throw new StockUnavailableError(`${input.label} 暂时限流，请稍后重试。`);
     if (!response.ok) throw new StockUnavailableError(`${input.label} 请求失败（HTTP ${response.status}）。`);
-    return await response.json() as unknown;
+    return { status: 200, payload: await response.json() as unknown, etag: response.headers.get("etag"), modified: response.headers.get("last-modified") };
   } catch (error) {
     if (error instanceof StockUnavailableError) throw error;
     if (input.signal?.aborted) throw error;
@@ -93,9 +106,23 @@ export interface StockDownloadRules {
 }
 
 /** 受控下载：域名逐跳复核（含每次重定向）、content-length 预检、流式字节上限、回调式落盘。 */
+export type StockDownloadSink = (chunks: AsyncIterable<Uint8Array>) => Promise<void>;
+
+async function mediaResponse(url: string, fetchImpl: HttpFetch, signal?: AbortSignal) {
+  if (fetchImpl !== fetch) {
+    const response = await fetchImpl(url, { ...(signal ? { signal } : {}), redirect: "manual" });
+    return { status: response.status, location: response.headers.get("location"), length: response.headers.get("content-length"),
+      body: response.body ? Readable.fromWeb(response.body as import("node:stream/web").ReadableStream) : null };
+  }
+  // 直接消费 HTTP 接收缓冲区，避免 Fetch 在数百 MiB 下载中转换 Web Stream 时重复分配字节。
+  const response = await request(url, { method: "GET", signal: signal ?? null, headers: { "accept-encoding": "identity" },
+    dispatcher: getGlobalDispatcher().compose(interceptors.decompress()) });
+  return { status: response.statusCode, location: response.headers.location, length: response.headers["content-length"], body: response.body };
+}
+
 export async function downloadWithinBounds(input: {
   url: string; rules: StockDownloadRules; maxBytes: number; fetchImpl: HttpFetch; signal?: AbortSignal | undefined;
-}, sink: (stream: ReadableStream<Uint8Array>, response: Response) => Promise<void>): Promise<void> {
+}, sink: StockDownloadSink): Promise<void> {
   const allowed = (host: string): boolean => input.rules.isAllowedHost ? input.rules.isAllowedHost(host)
     : (input.rules.mediaHosts?.has(host) ?? false);
   let current = input.url;
@@ -106,24 +133,23 @@ export async function downloadWithinBounds(input: {
     }
     let received = 0;
     try {
-      const response = await input.fetchImpl(current, { ...(input.signal ? { signal: input.signal } : {}), redirect: "manual" });
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get("location");
-        if (!location) throw new StockUnavailableError("素材重定向缺少目标地址。");
-        current = new URL(location, current).toString();
-        continue;
-      }
-      if (!response.ok || !response.body) throw new StockUnavailableError(`素材下载失败（HTTP ${response.status}）。`);
-      const declared = Number(response.headers.get("content-length") ?? Number.NaN);
-      if (Number.isSafeInteger(declared) && declared > input.maxBytes) throw new StockUnavailableError("素材文件超过大小上限。");
-      const body = response.body.pipeThrough(new TransformStream({
-        transform(chunk, controller2) {
+      const response = await mediaResponse(current, input.fetchImpl, input.signal);
+      try {
+        if (response.status >= 300 && response.status < 400) {
+          if (typeof response.location !== "string") throw new StockUnavailableError("素材重定向缺少目标地址。");
+          current = new URL(response.location, current).toString();
+          continue;
+        }
+        const stream = response.body;
+        if (response.status < 200 || response.status >= 300 || !stream) throw new StockUnavailableError(`素材下载失败（HTTP ${response.status}）。`);
+        if (Number(response.length) > input.maxBytes) throw new StockUnavailableError("素材文件超过大小上限。");
+        const limit = new Transform({ transform(chunk: Buffer, _encoding, done) {
           received += chunk.byteLength;
-          if (received > input.maxBytes) controller2.error(new StockUnavailableError("素材文件超过大小上限。"));
-          else controller2.enqueue(chunk);
-        },
-      }));
-      await sink(body as ReadableStream<Uint8Array>, response);
+          if (received > input.maxBytes) done(new StockUnavailableError("素材文件超过大小上限。"));
+          else done(null, chunk);
+        } });
+        await pipeline(stream, limit, sink, { signal: input.signal });
+      } finally { response.body?.destroy(); }
       return;
     } catch (error) {
       if (error instanceof StockUnavailableError) throw error;

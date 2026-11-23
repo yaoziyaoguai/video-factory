@@ -1,5 +1,5 @@
 import type {
-  EdgeTtsSettings, KeyedMaterialSettings, KeylessMaterialSettings, MaterialProvider, NewsNowSettings, PexelsSettings,
+  EdgeTtsSettings, FreeServiceSettingsDirectory, KeyedMaterialSettings, KeylessMaterialSettings, MaterialProvider, NewsNowSettings, PexelsSettings,
   SaveEdgeTtsSettings, SaveFreeServiceSettingsReceipt, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
@@ -10,7 +10,7 @@ import { validatorFor } from "./validate.js";
 import { canonicalJson, type AgentClock } from "./util.js";
 
 // 免费服务（素材来源与 NewsNow 聚合）的当前配置：每服务一行，只存当前事实，无执行版本历史。
-// 读取工具在调用开始时捕获配置；保存不触发任何外部请求。Key 明文只存服务端私有库。
+// 读取工具在调用开始时捕获配置；保存不触发任何外部请求。凭据随该次执行解密。
 
 export type KeyedServiceId = "pexels" | "pixabay" | "unsplash" | "coverr";
 export type KeylessServiceId = KeylessMaterialSettings["serviceId"];
@@ -70,7 +70,7 @@ function isKeylessService(id: FreeServiceId): id is KeylessServiceId {
 }
 
 function readRow(db: AgentDatabase, serviceId: FreeServiceId): ServiceRow | undefined {
-  return db.prepare("SELECT * FROM free_service_settings WHERE service_id=?").get(serviceId) as ServiceRow | undefined;
+  return db.prepare("SELECT service_id,revision,config_json,frame_open(api_key) AS api_key,updated_at FROM free_service_settings WHERE service_id=?").get(serviceId) as ServiceRow | undefined;
 }
 
 export function readFreeServiceSettings(
@@ -114,12 +114,26 @@ export function readFreeServiceSettings(
   return { serviceId, revision, enabled: config.enabled, writeUnavailableReason: null };
 }
 
+/** 设置页挂载时的单次读取目录：顺序固定，与契约 FreeServiceSettingsDirectory 逐项对位。 */
+export const FREE_SERVICE_DIRECTORY: readonly FreeServiceId[] = [
+  ...KEYED_SERVICES, ...KEYLESS_STOCK, "douyin-music", "tiktok-sounds", "newsnow", "edge-tts",
+];
+
+/** 一次返回全部免费服务的当前配置快照；供设置页挂载单次读取，替代逐服务请求。 */
+export function readFreeServiceSettingsDirectory(db: AgentDatabase): FreeServiceSettingsDirectory {
+  // 契约把 15 项定长数组编成元组；目录常量与它同长同序，map 结果在构造点一次断言即可。
+  const services = FREE_SERVICE_DIRECTORY.map(serviceId => readFreeServiceSettings(db, serviceId));
+  return { services: services as FreeServiceSettingsDirectory["services"] };
+}
+
 /** 工具调用开始时一次性捕获全部素材来源配置；本次请求内不受后续设置修改影响。 */
 export function captureStockConfigs(db: AgentDatabase): Partial<Record<MaterialProvider, CapturedStockConfig>> {
   const configs: Partial<Record<MaterialProvider, CapturedStockConfig>> = {};
-  for (const serviceId of [...KEYED_SERVICES, ...KEYLESS_STOCK]) {
-    const row = readRow(db, serviceId);
-    if (!row) continue;
+  const providers = new Set<string>([...KEYED_SERVICES, ...KEYLESS_STOCK]);
+  const rows = db.prepare("SELECT service_id,config_json,frame_open(api_key) AS api_key FROM free_service_settings").all() as ServiceRow[];
+  for (const row of rows) {
+    const serviceId = row.service_id as MaterialProvider;
+    if (!providers.has(serviceId)) continue;
     const config = JSON.parse(row.config_json) as { enabled: boolean };
     configs[serviceId] = { enabled: config.enabled, apiKey: row.api_key };
   }
@@ -208,7 +222,7 @@ function normalizeNewsNowEndpoint(input: string): string {
 
 function upsertConfig(db: AgentDatabase, serviceId: FreeServiceId, revision: number, configJson: string, apiKey: string | null, now: string): void {
   // 只有 Key 服务携带凭据列；Keyless 与 NewsNow 恒为 null，不覆盖也无可覆盖。
-  db.prepare(`INSERT INTO free_service_settings(service_id,revision,config_json,api_key,updated_at) VALUES(?,?,?,?,?)
+  db.prepare(`INSERT INTO free_service_settings(service_id,revision,config_json,api_key,updated_at) VALUES(?,?,?,frame_seal(?),?)
     ON CONFLICT(service_id) DO UPDATE SET revision=revision+1, config_json=excluded.config_json,
       api_key=CASE WHEN ? THEN excluded.api_key ELSE free_service_settings.api_key END, updated_at=excluded.updated_at`)
     .run(serviceId, revision + 1, configJson, apiKey, now, isKeyedService(serviceId) ? 1 : 0);

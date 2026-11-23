@@ -18,6 +18,16 @@ const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
 // 固定端口会被失败运行遗留的子进程占用；先占后放选端口，失败也在 after 里兜底清理。
 const children = new Set<ChildProcess>();
 
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+  child.kill("SIGKILL");
+  await exited;
+}
+
+// 超时可能发生在等待新进程就绪时，此时用例还拿不到 ChildHandle。
+after(async () => { await Promise.all([...children].map(stopChild)); });
+
 async function reservePort(): Promise<number> {
   const server = net.createServer();
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -43,7 +53,11 @@ async function startChild(options: { scenario: string; crashPoint: string; dataD
   const child = spawn(process.execPath, ["--import", "tsx", helperPath,
     "--scenario", options.scenario, "--crash-point", options.crashPoint,
     "--data-dir", options.dataDir, "--port", String(options.port)],
-    { cwd: repositoryRoot, env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: repositoryRoot, env: {
+      PATH: process.env.PATH,
+      // 连续 SIGKILL 需要冷启动真实进程，允许复用 Node 字节码；会话、SQLite 和凭据仍隔离。
+      ...(process.env.NODE_COMPILE_CACHE ? { NODE_COMPILE_CACHE: process.env.NODE_COMPILE_CACHE } : {}),
+    }, stdio: ["ignore", "pipe", "pipe"] });
   children.add(child);
   child.once("exit", () => children.delete(child));
   const lines: string[] = [];
@@ -75,10 +89,7 @@ async function startChild(options: { scenario: string; crashPoint: string; dataD
     process: child,
     port: listening.port as number,
     waitForCrashPoint: () => waitForLine(line => line.includes('"crash-point"')).then(line => JSON.parse(line).point as string),
-    close: async () => {
-      child.kill("SIGKILL");
-      await new Promise(resolve => child.once("exit", resolve));
-    },
+    close: () => stopChild(child),
   };
 }
 
@@ -94,7 +105,6 @@ describe("agent crash recovery (F7 receipt window)", () => {
   });
 
   after(async () => {
-    for (const child of children) child.kill("SIGKILL");
     await rm(directory, { recursive: true, force: true });
   });
 

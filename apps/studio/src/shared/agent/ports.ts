@@ -7,7 +7,7 @@ import type {
   ToolImportMaterial, MaterialImportResult,
   ToolStartWork, ToolReadWork, ToolConfirmReview, ToolReadMaterialBatch, ToolRecordWorkFeedback,
   ToolReadArtifact, ToolPublishProject, ToolRenderProject, LocalCreationReceipt,
-  ToolDubFree, DubFreeResult,
+  ToolDubFree, DubFreeResult, ToolCreateSubtitles, SubtitleReceipt,
   Work, MaterialBatch, FeedbackReceipt, ContentSource,
 } from "./generated/contracts.js";
 
@@ -79,6 +79,7 @@ export interface PiBusinessTools {
   readMaterialBatch(context: RequestContext, input: ToolReadMaterialBatch): Promise<MaterialBatch>;
   recordWorkFeedback(context: RequestContext, input: ToolRecordWorkFeedback): Promise<FeedbackReceipt>;
   // 免费配音（edge-tts 维护版客户端）：在线免费服务，不占用付费 speech 型号；失败原因原样透传。
+  createSubtitles(context:RequestContext,input:ToolCreateSubtitles,signal?:AbortSignal):Promise<SubtitleReceipt>;
   dubFree(context: RequestContext, input: ToolDubFree, signal?: AbortSignal): Promise<DubFreeResult>;
 }
 

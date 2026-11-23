@@ -1,4 +1,5 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
 import type { ExecutionInput, ExecutionObservation, InputRef, MarkdownContent, ModelBinding, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
@@ -10,7 +11,7 @@ import { InvalidAudioFile, probeAudioFile, type AudioFileFacts } from "./media-p
 import type { AgentClock } from "./util.js";
 import type { MiniMaxSpeechProfile } from "./media-config.js";
 import { getRevisionRow } from "./artifact-store.js";
-import { PortObservations, ProviderHttpError, providerRequestJson } from "./media-port-support.js";
+import { decodedMediaChunks, PortObservations, ProviderHttpError, providerRequestJson, withAttemptFiles } from "./media-port-support.js";
 import { speechText } from "../../shared/agent/markdown.js";
 
 // MiniMax t2a v2 同步配音薄适配（wire 序列按 2026-11-01 官方页核实）：
@@ -97,13 +98,13 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     if (typeof data.audio !== "string" || data.audio.length === 0) {
       return this.preRefusal(input.attemptId, "供应商未返回任何音频。");
     }
-    if (!/^(?:[0-9a-fA-F]{2})+$/.test(data.audio)) {
+    if (data.audio.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(data.audio)) {
       return this.observations.nonCompliant(input.attemptId, null, "供应商返回的音频不是完整合法的 hex 数据。");
     }
-    const audio = Buffer.from(data.audio, "hex");
+    const audio = data.audio;
     const extra = typeof parsed.extra_info === "object" && parsed.extra_info !== null ? parsed.extra_info as { usage_characters?: unknown } : {};
     const usageCharacters = typeof extra.usage_characters === "number" ? extra.usage_characters : null;
-    return this.settleBytes(input.attemptId, audio, usageCharacters);
+    return withAttemptFiles(this.db, this.options.workRoot, input.attemptId, () => this.settleBytes(input.attemptId, audio, usageCharacters));
   }
 
   // 单次请求没有可外查的任务身份：恢复只读本地证据，不要求当前 Key 可用。
@@ -124,7 +125,7 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     if (receipt?.exit_kind === "failed") {
       return this.observations.deterministic(query.attemptId, "failed", null, receipt.detail ?? "已取得的输出不满足冻结参数。");
     }
-    if (existsSync(path.join(this.options.workRoot, query.attemptId, "speech.mp3"))) return this.settleSpeech(query.attemptId);
+    if (existsSync(path.join(this.options.workRoot, query.attemptId, "speech.mp3"))) return withAttemptFiles(this.db, this.options.workRoot, query.attemptId, () => this.settleSpeech(query.attemptId));
     return this.observations.stableUnknown(query.attemptId,
       "单次配音请求没有可查询的任务身份，无法向供应商查询；结果与实际费用未取得；不会重新提交。");
   }
@@ -137,15 +138,13 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
   // —— 落盘与验收 ——
 
   /** 音频字节原子落盘→按冻结规格探测核对→发布；规格不符如实 failed，工具暂不可用保留文件 unknown。 */
-  private async settleBytes(attemptId: string, audio: Buffer, usageCharacters: number | null): Promise<ExecutionObservation> {
+  private async settleBytes(attemptId: string, audio: string, usageCharacters: number | null): Promise<ExecutionObservation> {
     const attemptDir = path.join(this.options.workRoot, attemptId);
     const temporary = path.join(attemptDir, "speech.mp3.part");
     const finalFile = path.join(attemptDir, "speech.mp3");
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
-    writeFileSync(temporary, audio, { mode: 0o600 });
-    const handle = openSync(temporary, "r+");
-    try { fsyncSync(handle); } finally { closeSync(handle); }
-    renameSync(temporary, finalFile);
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
+    await writeFile(temporary, decodedMediaChunks(audio, "hex"), { mode: 0o600, flush: true });
+    await rename(temporary, finalFile);
     return this.settleSpeech(attemptId, usageCharacters);
   }
 
@@ -158,7 +157,7 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
       return this.publish(attemptId, facts.durationMs, usageCharacters);
     } catch (error) {
       if (error instanceof InvalidAudioFile || error instanceof BadAudioOutput) {
-        rmSync(finalFile, { force: true });
+        await rm(finalFile, { force: true });
         return this.observations.nonCompliant(attemptId, null, error.message);
       }
       return this.observations.stableUnknown(attemptId,
@@ -166,14 +165,14 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     }
   }
 
-  private publish(attemptId: string, durationMs: number, usageCharacters: number | null): ExecutionObservation {
+  private async publish(attemptId: string, durationMs: number, usageCharacters: number | null): Promise<ExecutionObservation> {
     const finalFile = path.join(this.options.workRoot, attemptId, "speech.mp3");
     const row = this.db.prepare("SELECT run_id FROM production_attempts WHERE id=?").get(attemptId) as { run_id: string };
     const run = runRow(this.db, row.run_id);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), "audio/mpeg", durationMs);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "audio/mpeg", durationMs);
     const detail = `音频 ${(durationMs / 1000).toFixed(1)} 秒`
       + (usageCharacters !== null ? `；计费字符 ${usageCharacters}，实际以供应商账单为准` : "");
-    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest, detail }))();
+    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest, detail,usage:{mediaDurationMs:durationMs,...(usageCharacters!==null?{characters:usageCharacters}:{})} }))();
     return this.observations.deterministicSucceeded(attemptId, null, blob.id, blob.digest, "audio/mpeg", detail);
   }
 

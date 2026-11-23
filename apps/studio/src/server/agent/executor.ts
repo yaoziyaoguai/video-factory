@@ -1,3 +1,5 @@
+import { imagesForUploads } from "./conversation-uploads.js";
+import type { ProductionBlobs } from "./production-blobs.js";
 import type { AgentSession, AgentSessionEvent, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ArtifactDraftStream } from "./artifact-drafts.js";
 import { AgentError, AgentToolError } from "./errors.js";
@@ -6,19 +8,16 @@ import type { EventHub } from "./event-log.js";
 import type { PiModelSelection, PiRuntimeHost, ConversationSession } from "./pi-runtime.js";
 import type { ActiveRequestContext, CrashPointHook } from "./pi-tools.js";
 import type {
-  ContextStatus, RequestProgress, RequestProgressStep, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewConfirmation, ReviewContext,
+  ContextStatus, RequestProgress, RequestProgressStep, Target, ModelBinding, ModelEntry, FeedbackNote, LibrarySelection, ReviewConfirmation, ReviewContext, UploadAttachment,
 } from "../../shared/agent/generated/contracts.js";
 import {
   claimNextRequest, emptyReferences, finalizeRequestMessages, getConversation, insertMessage,
   markRequestTerminal, nextSeq, touchConversation, saveAssistantMessage, recordRequestProgress, type RequestRow,
 } from "./conversation-store.js";
-import { listArtifactRows, getProposalRow, rowToProposal } from "./artifact-store.js";
-import { getWorkRow, listWorkRows, relatedWorkFeedback, workProjection } from "./creative-work.js";
+import { batchReadRevisionDigests } from "./artifact-store.js";
+import { getWorkRow, listWorkRows, relatedWorkFeedback, batchWorkProjections } from "./creative-work.js";
 import type { CreativeSkill, CreativeToolContext } from "./creative-runner.js";
-import { captureStockConfigs } from "./free-service-settings.js";
-import { listMaterialBatches } from "./material-store.js";
-import { StockClient } from "./stock-providers.js";
-import { contextProductionIndex } from "./production-index.js";
+import { confirmationWorkQuery, readTurnEnvelope, referencedTurnProposals } from "./turn-context.js";
 import type { AgentClock } from "./util.js";
 import { NativeTurnTiming, turnDiagnostics, type TurnDiagnostic } from "./turn-diagnostics.js";
 
@@ -28,6 +27,7 @@ import { NativeTurnTiming, turnDiagnostics, type TurnDiagnostic } from "./turn-d
 // 模型按每条请求的冻结绑定解析：编辑配置不影响已接收请求，缺版本如实失败。
 
 export interface ExecutorOptions {
+  blobs?: ProductionBlobs;
   db: AgentDatabase;
   clock: AgentClock;
   hub: EventHub;
@@ -56,7 +56,7 @@ interface CurrentTurn {
 const TOOL_NAMES = [
   "read_artifact", "deliver_artifacts", "prepare_production", "publish_project", "render_project",
   "read_proposal", "read_run", "list_production",
-  "search_materials", "read_material_batch", "read_trends", "import_material", "dub_free",
+  "search_materials", "read_material_batch", "read_trends", "import_material", "dub_free", "create_subtitles",
   "start_work", "read_work", "confirm_review", "record_work_feedback", "read_skill_file",
 ] as const;
 
@@ -65,7 +65,7 @@ const TOOL_PROGRESS_LABELS: Record<string, string> = {
   read_trends: "读取选题参考", read_artifact: "查看作品内容", deliver_artifacts: "交付新版本",
   publish_project: "保存制作工程", render_project: "提交视频渲染", prepare_production: "准备制作提案",
   read_run: "检查制作进展", list_production: "检查制作记录", read_proposal: "核对制作提案",
-  dub_free: "生成配音", start_work: "准备作品", read_work: "核对作品版本",
+  dub_free: "生成配音", create_subtitles: "识别音轨并生成字幕", start_work: "准备作品", read_work: "核对作品版本",
   confirm_review: "记录认可", record_work_feedback: "记录修改意见", read_skill_file: "读取创作方法",
   read: "读取创作文件", write: "编写创作文件", edit: "修改创作文件", bash: "执行创作步骤",
 };
@@ -77,7 +77,7 @@ export class ConversationRunner {
   private subscribed = false;
   private closing = false;
   private kickPending = false;
-  private readonly steering = new Set<Promise<unknown>>();
+  private readonly steering = new Map<string, Promise<"applied" | "not_running">>();
 
   constructor(
     readonly conversationId: string,
@@ -178,13 +178,14 @@ export class ConversationRunner {
       const index = this.pendingSteerSources.findIndex(entry => entry.text === text);
       if (index !== -1) {
         const [entry] = this.pendingSteerSources.splice(index, 1);
-        this.holder.current.actionSourceMessageId = entry!.messageId;
+        const messageId = entry!.accept();
+        this.holder.current.actionSourceMessageId = messageId;
         // 新消息带明确作品时按它重新明确：本回合先前的激活让位（§11.6 S7）；
         // 无明确指向时保留当前激活，也不经旧 request target 拉回旧目标。
         const request = this.freshRequest(current.requestId);
         const message = this.options.db.prepare("SELECT target_json, feedback_json, review_context_json FROM messages WHERE id=?")
-          .get(entry!.messageId) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
-        if (message && request && this.explicitWorkId(request, message, entry!.messageId) !== null) {
+          .get(messageId) as { target_json: string | null; feedback_json: string | null; review_context_json: string | null } | undefined;
+        if (message && request && this.explicitWorkId(request, message, messageId) !== null) {
           delete this.holder.current.activatedWorkId;
         }
       }
@@ -279,13 +280,8 @@ export class ConversationRunner {
   private nativeTiming: NativeTurnTiming | null = null;
   private readonly deltaSequences = new Map<string, number>();
   private readonly toolCallCounts = new Map<string, number>();
-  /** 已持久化、尚未被 Pi 原生接收的 steering 及其真实消息ID；接收/拒绝时按文本一一摘除。 */
-  private readonly pendingSteerSources: { text: string; messageId: string }[] = [];
-
-  private dropPendingSteer(messageId: string): void {
-    const index = this.pendingSteerSources.findIndex(entry => entry.messageId === messageId);
-    if (index !== -1) this.pendingSteerSources.splice(index, 1);
-  }
+  /** Pi 可能在 steer 的 Promise 返回前消费消息，以同一受理动作绑定确切的用户来源。 */
+  private readonly pendingSteerSources: { text: string; accept: () => string }[] = [];
 
   private endEarly(reason: Exclude<AbortReason, null>): void {
     if (!this.current || this.current.abortReason) return;
@@ -307,21 +303,18 @@ export class ConversationRunner {
   // reviewContext（C2/F05，继续按钮随消息指向作品与组）都是真实用户表达。
   // 原消息 target 只负责初始化：steering 被原生接收后按 steering 行的指向解析，
   // 无明确指向时不回退原消息 target 拉回旧目标（§11.6 S7）。
-  private explicitWorkId(request: RequestRow, message: { target_json: string | null; feedback_json: string | null; review_context_json: string | null }, actionSourceMessageId: string): string | null {
+  private explicitWorkId(request: Pick<RequestRow, "target_json" | "message_id">, message: { target_json: string | null; feedback_json: string | null; review_context_json: string | null }, actionSourceMessageId: string, confirmedWork?: string | null): string | null {
     const note = message.feedback_json ? JSON.parse(message.feedback_json) as FeedbackNote : null;
     const messageTarget = message.target_json ? JSON.parse(message.target_json) as Target : null;
     const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
-    const confirmation = this.options.db.prepare(
-      `SELECT work_id FROM (
-         SELECT work_id FROM work_review_confirmations WHERE subject_scope='work_item' AND source_kind='user_message' AND source_id=?
-         UNION ALL
-         SELECT work_id FROM work_stage_confirmations WHERE source_kind='user_message' AND source_id=?
-       ) LIMIT 1`,
-    ).get(actionSourceMessageId, actionSourceMessageId) as { work_id: string } | undefined;
     const initialTarget = actionSourceMessageId === request.message_id && request.target_json
       ? JSON.parse(request.target_json) as Target : null;
     const feedbackTarget = note ? messageTarget : messageTarget ?? initialTarget;
-    return note?.workId ?? feedbackTarget?.workId ?? reviewContext?.workId ?? confirmation?.work_id ?? null;
+    const explicit = note?.workId ?? feedbackTarget?.workId ?? reviewContext?.workId;
+    if (explicit) return explicit;
+    if (confirmedWork !== undefined) return confirmedWork;
+    const result = this.options.db.prepare(confirmationWorkQuery).pluck().get({ sourceId: actionSourceMessageId }) as string | undefined;
+    return result ?? null;
   }
 
   private effectiveEditWorkId(request: RequestRow, message: { target_json: string | null; feedback_json: string | null; review_context_json: string | null }, actionSourceMessageId: string): string | null {
@@ -356,20 +349,12 @@ export class ConversationRunner {
   private currentContext(): string | null {
     const current = this.current;
     if (!current || current.abortReason || !this.holder.current) return null;
-    const request = this.freshRequest(current.requestId);
-    if (!request || request.state !== "running" || request.execution_epoch !== current.epoch || request.stop_requested) return null;
-    const artifacts = listArtifactRows(this.options.db, this.conversationId, 50).map(row => ({
-      artifactId: row.id, title: row.title, kind: row.kind, workId: row.work_id,
-      headRevisionId: row.head_revision_id, headRevisionNumber: row.head_revision_number,
-      digest: this.options.db.prepare("SELECT digest FROM artifact_revisions WHERE id = ?").get(row.head_revision_id ?? "") as { digest: string } | undefined,
-    })).map(row => ({ ...row, digest: row.digest?.digest ?? null }));
-    const proposalIds = this.options.db.prepare(
-      "SELECT DISTINCT proposal_id FROM tool_invocations WHERE request_id = ? AND proposal_id IS NOT NULL",
-    ).all(request.id) as { proposal_id: string }[];
-    // 引用以实际已消费的动作来源消息为准：steering 被原生接收后 context 读最新关联，
-    // 不始终停留在最初 request.message_id。
-    const message = this.options.db.prepare("SELECT references_json, target_json, feedback_json, library_selections_json, review_context_json, review_confirmation_json FROM messages WHERE id=?")
-      .get(this.holder.current.actionSourceMessageId) as { references_json: string; target_json: string | null; feedback_json: string | null; library_selections_json: string | null; review_context_json: string | null; review_confirmation_json: string | null };
+    const sourceId = this.holder.current.actionSourceMessageId;
+    const envelope = readTurnEnvelope(this.options.db, current.requestId, sourceId, current.epoch);
+    if (!envelope) return null;
+    const { request, message } = envelope;
+    const artifacts = batchReadRevisionDigests(this.options.db, this.conversationId, request.owner_id, 50);
+    const works = batchWorkProjections(this.options.db, request.owner_id, this.conversationId, 50);
     const references = JSON.parse(message.references_json) as { proposalIds: string[]; artifacts: { artifactId: string }[] };
     // 消息声明的组审阅指向（C2/F05）：与 target 互斥，双作品会话里随消息明确当前对象。
     const reviewContext = message.review_context_json ? JSON.parse(message.review_context_json) as ReviewContext : null;
@@ -378,11 +363,10 @@ export class ConversationRunner {
     const target = messageTarget ?? (this.holder.current.actionSourceMessageId === request.message_id && request.target_json
       ? JSON.parse(request.target_json) as Target : null);
     const feedbackTarget = note ? messageTarget : target;
-    const explicitWorkId = this.explicitWorkId(request, message, this.holder.current.actionSourceMessageId);
-    const editingWorkId = this.effectiveEditWorkId(request, message, this.holder.current.actionSourceMessageId);
+    const explicitWorkId = this.explicitWorkId(request, message, sourceId, envelope.confirmedWork);
+    const editingWorkId = this.holder.current.activatedWorkId ?? explicitWorkId ?? (works.length === 1 ? works[0]!.id : null);
     const artifactIds = new Set(references.artifacts.map(item => item.artifactId));
     if (feedbackTarget) artifactIds.add(feedbackTarget.artifactId);
-    const works = listWorkRows(this.options.db, this.conversationId, 50).map(row => workProjection(this.options.db, row));
     // 明确的意见归属优先；采用的独立稿没有 artifacts.work_id，按事项的真实来源识别。
     const referencedWorkIds = works.filter(work => explicitWorkId ? work.id === explicitWorkId :
       artifacts.some(artifact => artifact.workId === work.id && artifactIds.has(artifact.artifactId)) ||
@@ -400,8 +384,7 @@ export class ConversationRunner {
     }
     const feedback = relatedWorkFeedback(this.options.db, this.conversationId,
       { workIds: referencedWorkIds, artifactIds: [...artifactIds] });
-    const referencedProposals = references.proposalIds.map(id => getProposalRow(this.options.db, request.owner_id, id))
-      .filter(row => row?.conversation_id === this.conversationId).map(row => rowToProposal(row!, this.options.db));
+    const referencedProposals = referencedTurnProposals(this.options.db, request.owner_id, this.conversationId, references.proposalIds);
     const context = {
       conversationId: this.conversationId,
       requestId: request.id,
@@ -416,22 +399,19 @@ export class ConversationRunner {
       librarySelections: message.library_selections_json ? JSON.parse(message.library_selections_json) as LibrarySelection[] : [],
       // §11.7 来源7：当前明确作品已准备的选材输入位置（inputs/library/ 下，原字节），
       // 由持久行重新解析，不靠客户端临时 state；未准备或只读回退时为空。
-      libraryInputs: editingWorkId
-        ? (this.options.db.prepare("SELECT source_key, path FROM library_input_preparations WHERE work_id=?")
-          .all(editingWorkId) as { source_key: string; path: string }[])
-        : [],
+      libraryInputs: envelope.inputs.filter(input => input.work === editingWorkId).map(({ source_key, path }) => ({ source_key, path })),
       referencedProposals,
       works,
       referencedWorkIds,
-      materialBatches: listMaterialBatches(this.options.db, this.conversationId, 100),
+      materialBatches: envelope.batches,
       // 当前实际可用（已启用且凭据齐全）的素材来源与各自支持的类型；未启用的来源不出现在能力里。
-      materialServices: new StockClient(captureStockConfigs(this.options.db)).enabledServices(),
+      materialServices: envelope.services,
       mediaModels: this.options.mediaModels?.() ?? [],
       productionAvailable: this.options.productionAvailable ?? false,
-      productionIndex: contextProductionIndex(this.options.db, this.conversationId),
-      lockedArtifactIds: (this.options.db.prepare("SELECT DISTINCT artifact_id AS id FROM production_input_locks l JOIN production_runs r ON r.id=l.run_id WHERE r.conversation_id=?").all(this.conversationId) as { id: string }[]).map(row => row.id),
+      productionIndex: envelope.productionIndex,
+      lockedArtifactIds: envelope.locks,
       artifacts,
-      proposalsPreparedThisRequest: proposalIds.map(row => row.proposal_id),
+      proposalsPreparedThisRequest: envelope.prepared,
       deliveryClosed: request.delivery_closed === 1,
     };
     return `[frame-current-state]${JSON.stringify(context)}\n这是本请求的当前业务状态，历史状态记录不代表当前事实；业务工具仍以数据库校验为准，模型输出不是制作授权。`;
@@ -518,7 +498,12 @@ export class ConversationRunner {
           if (!ready || ready.state !== "running" || ready.execution_epoch !== epoch || ready.stop_requested) {
             outcome = "stopped";
           } else if (!this.current?.abortReason) {
-            const prompt = ready.text;
+            const message = this.options.db.prepare("SELECT uploads_json FROM messages WHERE id=?").get(ready.message_id) as { uploads_json: string | null };
+            const uploads: UploadAttachment[] = message.uploads_json ? JSON.parse(message.uploads_json) : [];
+            const prompt = uploads.length ? `${ready.text}\n[本条消息附带的创作者素材] ${JSON.stringify(uploads)}` : ready.text;
+            if (uploads.length && !this.options.blobs) throw new Error("上传素材存储未装配。");
+            const images = uploads.length ? await imagesForUploads(this.options.blobs!, ready.owner_id, uploads) : [];
+            if (this.current?.abortReason) throw new AgentError("REQUEST_NOT_RUNNING", "该请求已停止。");
             this.options.db.prepare("UPDATE conversations SET pi_checkpoint_json=?, pi_needs_recovery=0 WHERE id=?")
               .run(JSON.stringify({
                 leafId: session.sessionManager.getLeafId(),
@@ -528,7 +513,7 @@ export class ConversationRunner {
             const promptStarted = performance.now();
             timing?.startPrompt(promptStarted);
             try {
-              await session.prompt(skill ? `/skill:${skill.name} ${prompt}` : prompt);
+              await session.prompt(skill ? `/skill:${skill.name} ${prompt}` : prompt, images.length ? { images } : undefined);
             } finally {
               turnElapsedMs = Math.round(performance.now() - promptStarted);
             }
@@ -570,7 +555,7 @@ export class ConversationRunner {
       if (error instanceof AgentError) failureNotice = error.message;
       process.emitWarning(`agent turn ${request.id} 初始化失败: ${String(error)}`);
     } finally {
-      await Promise.allSettled([...this.steering]);
+      await Promise.allSettled(this.steering.values());
       this.session?.clearQueue();
       this.pendingSteerSources.length = 0;
       // 同步摘除当前回合上下文：之后的 steer 不可能落进本回合，工具调用立刻失去上下文。
@@ -633,23 +618,39 @@ export class ConversationRunner {
 
   // steer：只在会话确实流式时生效；否则返回未运行且不落任何消息。
   // 同步检查与调用之间没有 await，状态不会漂移。来源消息ID只在 Pi 原生 message_start 接收后绑定。
-  async steerActive(requestId: string, text: string, persist: () => string): Promise<"applied" | "not_running"> {
+  async steerActive(requestId: string, commandId: string, text: string, persist: () => string, replay: () => boolean): Promise<"applied" | "not_running"> {
+    const prior = this.steering.get(commandId);
+    if (prior) {
+      await prior;
+      return replay() ? "applied" : "not_running";
+    }
     const session = this.session;
-    if (!this.current || this.current.requestId !== requestId || this.current.abortReason || !session?.isStreaming) return "not_running";
-    // 先持久化用户干预，再交给 Pi；等待队列接收完成后才允许启动下一条请求。
-    const messageId = persist();
-    const pending = session.steer(text);
-    this.pendingSteerSources.push({ text, messageId });
-    this.steering.add(pending);
-    try {
-      const disposition = await pending;
-      if (disposition !== "queued" || !session.isStreaming || this.current?.requestId !== requestId) {
-        this.dropPendingSteer(messageId);
-        session.clearQueue();
-        return "not_running";
+    const live = () => this.current?.requestId === requestId && !this.current.abortReason && session?.isStreaming === true;
+    if (!session || !live()) return "not_running";
+    const admit = async (): Promise<"applied" | "not_running"> => {
+      let messageId: string | undefined;
+      const source = { text, accept: () => {
+        if (messageId === undefined) messageId = persist();
+        return messageId;
+      } };
+      this.pendingSteerSources.push(source);
+      let accepted = false;
+      try {
+        const disposition = await session.steer(text);
+        if (disposition !== "queued" || (messageId === undefined && !live())) return "not_running";
+        source.accept();
+        accepted = true;
+        return "applied";
+      } finally {
+        const index = this.pendingSteerSources.indexOf(source);
+        if (!accepted && index >= 0) this.pendingSteerSources.splice(index, 1);
       }
-      return "applied";
-    } finally { this.steering.delete(pending); }  }
+    };
+    const pending = admit();
+    this.steering.set(commandId, pending);
+    try { return await pending; }
+    finally { this.steering.delete(commandId); }
+  }
 
   stopIfRunning(requestId: string): void {
     if (this.current?.requestId === requestId) {

@@ -1,3 +1,4 @@
+import {queueUnsettled} from "./billing-statements.js";
 import type { MediaExecutionPort } from "../../shared/agent/ports.js";
 import type { ContentSource, CreationBinding, ExecutionInput, ExecutionObservation, FrozenReviewTarget, LocalRenderOperation, MediaContent, OperationSpec, RecoveryQuery, RevisionRef, Run } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
@@ -29,6 +30,7 @@ export class ProductionWorker {
   private readonly active = new Map<string, { kind: "provider" | "local"; promise: Promise<void>; stop: AbortController }>();
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private started = false;
   private readonly leaseMs: number;
   private readonly crash: ProductionCrashHook;
   private readonly reconcileTerminalBilling: boolean;
@@ -39,13 +41,27 @@ export class ProductionWorker {
     this.reconcileTerminalBilling = port.reconcileTerminalBilling ?? true;
   }
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => { void this.pollOnce().catch(error => console.error("production worker:", error)); }, this.options.pollMs ?? 1000);
+    if (this.started) return;
+    this.started = true;
+    this.poke();
+  }
+  poke(): void {
+    if (this.started && !this.stopped) this.schedule(0);
+  }
+  private schedule(delay: number): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.pollOnce().catch(error => {
+        console.error("production worker:", error);
+        if (!this.stopped && !this.timer) this.schedule(30_000);
+      });
+    }, delay);
     this.timer.unref();
   }
   async close(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     // 服务关闭：先通知本地在途等待退出（渲染进程、图片 HTTP、配音会话），
     // 已取得的事实随各端口既有语义落盘；不伪造用户取消，不打断的事实按重启路径读取。
@@ -68,6 +84,8 @@ export class ProductionWorker {
       (r.state NOT IN ('succeeded','failed','cancelled') OR ${billingPending}
         OR EXISTS(SELECT 1 FROM ledger_observations l JOIN production_attempts a ON a.id=l.attempt_id WHERE a.run_id=r.id AND l.applied=0))
       AND (lease_until IS NULL OR lease_until<=?) ORDER BY COALESCE(lease_until,created_at), created_seq LIMIT 32`).all(this.clock()) as RunRow[];
+    if (this.started) this.schedule(candidates.length || this.active.size ? (this.options.pollMs ?? 1000) : 30_000);
+    if (!candidates.length) return;
     // 本地并发1同时覆盖：本进程在途的渲染、以及跨重启尚未确认退出的本地尝试（收据缺失即占用）。
     // 占用只计“其他 run”：run 自身的未决尝试必须继续被轮询查询，否则永远轮不到发现其退出证据。
     const localHeldRuns = new Set(heldLocalAttemptRuns(this.db).filter(row => !this.active.has(row.runId)).map(row => row.runId));
@@ -280,7 +298,7 @@ export class ProductionWorker {
       if (ref.kind === "text" || ref.kind === "project_revision") continue;
       const role = op.kind === "render" && !codeProject ? renderSlotRole(op.parameters, slot) : "none";
       const audio = role === "audio", image = role === "image";
-      // 混音音乐槽额外接受本地登记 WAV；旁白槽仍是供应商 MP3 契约（与 prepare 边界一致）。
+      // 上传的干声与配乐可以直接采用 WAV。
       const musicSlot = op.kind === "render" && op.parameters.assembly === "mixed_concat" ? op.parameters.music?.inputSlot : undefined;
       let id: string | undefined;
       if (ref.kind === "blob") id = ref.blobId;
@@ -298,7 +316,7 @@ export class ProductionWorker {
         this.blobs.verify(blob);
         // code_project 的媒体类型由端口按 MEDIA_INPUT_EXTENSION 落位，不支持的类型在执行处确定性失败。
         if (op.kind === "render" && !codeProject) {
-          const accepted = audio ? blob.mime_type === "audio/mpeg" || slot === musicSlot && blob.mime_type === "audio/wav" : image ? blob.mime_type.startsWith("image/") : blob.mime_type === "video/mp4" || blob.mime_type === "video/webm";
+          const accepted = audio ? blob.mime_type === "audio/mpeg" || blob.mime_type === "audio/wav" : image ? blob.mime_type.startsWith("image/") : blob.mime_type === "video/mp4" || blob.mime_type === "video/webm";
           if (!accepted) throw new AgentError("INVALID_INPUT", audio ? slot === musicSlot ? "音乐槽只接受音频。" : "旁白槽只接受音频。" : image ? "图片片段只接受图片。" : "有序拼接只接受视频片段。");
         }
         resolvedInputs.push({ slot, blobId: id, digest: blob.digest });
@@ -347,7 +365,9 @@ export class ProductionWorker {
       }
       this.db.prepare("UPDATE production_attempts SET phase='observed',state=?,provider_task_id=COALESCE(provider_task_id,?) WHERE id=?")
         .run(state, observation.providerTaskId, attempt.id);
+      if(observation.usage) this.db.prepare("UPDATE production_attempts SET usage_json=json_patch(COALESCE(usage_json,'{}'),?) WHERE id=?").run(canonicalJson(observation.usage),attempt.id);
       mergeBilling(this.db, attempt, observation.billing, op.kind === "render");
+      if(op.kind!=="render")queueUnsettled(this.db,attempt.id,this.clock());
       if (state === "succeeded") this.db.prepare("UPDATE production_operations SET state='succeeded' WHERE run_id=? AND id=?").run(run.id, op.operationId);
       else if (state === "failed" || state === "cancelled") {
         const current = attemptsFor(this.db, run.id).find(a => a.id === attempt.id)!;
@@ -388,6 +408,7 @@ export class ProductionWorker {
       : "video";
     const content: MediaContent = { format: "media", blobId: blob.id, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms };
     if (op.kind === "render") {
+      if((op.parameters.assembly==="mixed_concat" || op.parameters.assembly==="timed_narrated_concat") && op.parameters.subtitles) content.subtitles=op.parameters.subtitles;
       // 成片署名：按冻结输入的实际 blob 顺序聚合素材来源（去重、保持首次使用顺序），
       // 与修订同事务登记；本地生成或无来源输入的成品不带 sources。
       const sources = recordBlobSources(this.db, blob.id, mergeSources([
@@ -443,7 +464,7 @@ export class ProductionWorker {
       && artifact.work_id === run.work_id && artifact.kind === artifactKind && artifact.head_revision_id === draft.revisionId
       ? getRevisionRow(this.db, artifact.id, draft.revisionId) : undefined;
     const continued = op.kind === "render" && artifact && draft && base && base.digest === draft.digest
-      ? insertRevision(this.db, now, artifact, base.id, { title, kind: artifactKind, content }, null, binding, run.id)
+      ? insertRevision(this.db, now, artifact, base.id, { title, kind: artifactKind, content }, null, "production_output", binding, run.id)
       : null;
     const artifactId = continued?.artifact_id ?? newAgentId("art");
     const revisionId = continued?.id ?? newAgentId("rev");
@@ -459,7 +480,7 @@ export class ProductionWorker {
     if (!continued) {
       this.db.prepare("INSERT INTO artifacts(id,conversation_id,owner_id,title,kind,work_id,head_revision_id,head_revision_number,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?)")
         .run(artifactId, run.conversation_id, run.owner_id, title, artifactKind, run.work_id, revisionId, maxArtifactSeq(this.db, run.conversation_id) + 1, now, now);
-      this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,?,?,?,?)")
+      this.db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,run_id,origin_kind,digest,content_json,creation_binding_json,created_at) VALUES(?,?,1,?,'production_output',?,?,?,?)")
         .run(revisionId, artifactId, run.id, source.digest, canonicalJson(content), binding ? canonicalJson(binding) : null, now);
       this.db.prepare("INSERT INTO revision_blob_links(revision_id,blob_id) VALUES(?,?)").run(revisionId, blob.id);
     }
@@ -593,6 +614,10 @@ function operationSources(db: AgentDatabase, run: RunRow, op: OperationSpec): { 
     projectRevisions.push(ref);
   };
   const projectParameters = op.kind === "render" && op.parameters.assembly === "code_project" ? op.parameters : null;
+  if(op.kind==="render" && (op.parameters.assembly==="mixed_concat" || op.parameters.assembly==="timed_narrated_concat") && op.parameters.subtitles){
+    const ref=op.parameters.subtitles.track, revision=getRevisionRow(db,ref.artifactId,ref.revisionId)!;
+    pushSource(ref.artifactId,ref.revisionId,revision.digest);
+  }
   if (projectParameters) pushProject(projectParameters.projectRevision);
   for (const input of op.inputs) {
     if (input.kind === "artifact_revision") {

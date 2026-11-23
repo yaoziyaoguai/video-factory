@@ -11,6 +11,7 @@ import type { DeliveryItem } from "../src/shared/agent/generated/contracts.js";
 import Database from "better-sqlite3";
 import { MIGRATIONS, openAgentDatabase } from "../src/server/agent/db.js";
 import { assembleOfflineAgent, OFFLINE_QUOTE_CATALOG, type OfflineAgentAssembly } from "../src/server/agent/offline.js";
+import { decodePhasedPos, encodeListCursor, encodePhasedPos } from "../src/server/agent/paging.js";
 import { systemClock } from "../src/server/agent/util.js";
 
 // A 增量领域规则（HTTP + SQLite + Pi Faux 纵向路径）：
@@ -382,10 +383,13 @@ describe("agent domain rules", () => {
     assert.equal((await snapshotOf(conversationId)).activeRequestId, sent.body.requestId);
 
     try {
-      const steer = await send(conversationId, "cmd-t2", "补充：语气再轻松一点", {
+      const steer = () => send(conversationId, "cmd-t2", "补充：语气再轻松一点", {
         mode: "steer", steerRequestId: sent.body.requestId,
       });
-      assert.equal(steer.status, 202);
+      const receipts = await Promise.all([steer(), steer()]);
+      assert.deepEqual(receipts.map(result => result.status), [202, 202]);
+      assert.equal(receipts[0]!.body.messageId, receipts[1]!.body.messageId);
+      assert.deepEqual(receipts.map(result => result.body.replayed).sort(), [false, true]);
     } finally { releaseFirst(); }
     await waitFor(async () => (await snapshotOf(conversationId)).activeRequestId === null);
 
@@ -730,8 +734,11 @@ describe("agent domain rules", () => {
       const operations = upgraded.prepare("SELECT * FROM production_operations ORDER BY rowid").all() as Record<string, unknown>[];
       assert.deepEqual(operations.map(row => row.output_revision_id), ["rev-unique-0", null, "rev-local-target-0", "rev-paid-target-0"]);
       for (const [table, rows] of Object.entries(original)) {
-        assert.deepEqual(table === "production_operations" ? operations.map(({ output_revision_id, ...row }) => row)
-          : upgraded.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(), rows, `${table} 旧业务事实及顺序不变`);
+        const columns = Object.keys(rows[0] ?? {});
+        const restored = columns.length
+          ? upgraded.prepare(`SELECT ${columns.join(",")} FROM ${table} ORDER BY rowid`).all()
+          : upgraded.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
+        assert.deepEqual(restored, rows, `${table} 旧业务事实及顺序不变`);
       }
       upgraded.close();
       const again = openAgentDatabase(dir);
@@ -772,4 +779,55 @@ describe("agent domain rules", () => {
       again.close();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
+});
+
+it("ISS-02 两代定稿各 30 条，跨阶段翻页完整并在末尾停止", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-library-pages-"));
+  const app = await assembleOfflineAgent({ dataDir: directory, uiOrigin: "http://127.0.0.1:4399" });
+  t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
+  const owner = "local-owner";
+  const conversation = app.service.createConversation(owner, { commandId: "library-pages", title: "分页" }).conversation.id;
+  const now = systemClock();
+  const db = app.database;
+  db.prepare("INSERT INTO works(id,owner_id,conversation_id,title,created_at,updated_at) VALUES ('w',?,?,'分页',?,?)").run(owner, conversation, now, now);
+  const addArtifact = db.prepare(`INSERT INTO artifacts(id,owner_id,conversation_id,title,kind,head_revision_id,head_revision_number,created_seq,created_at,updated_at)
+    VALUES (?,?,?,?, 'video',?,1,?,?,?)`);
+  const addRev = db.prepare("INSERT INTO artifact_revisions(id,artifact_id,revision_number,digest,content_json,created_at) VALUES (?,?,1,?,?,?)");
+  const modern = db.prepare(`INSERT INTO work_review_confirmations(id,owner_id,conversation_id,subject_scope,work_id,group_id,item_id,action,subject_json,source_kind,source_id,created_at)
+    VALUES (?,?,?,'work_item','w','group','item','finalize_video',?,'user_message','m',?)`);
+  const legacy = db.prepare(`INSERT INTO work_stage_confirmations(id,owner_id,conversation_id,work_id,stage,action,subject_json,source_kind,source_id,created_at)
+    VALUES (?,?,?,'w','video','finalize_video',?,'user_message','m',?)`);
+  const subject = (i: number) => JSON.stringify({ kind: "artifact_revision", artifactId: `art-${i}`, revisionId: `rev-${i}`, digest: "d" });
+  db.transaction(() => {
+    for (let i = 1; i <= 60; i++) {
+      addArtifact.run(`art-${i}`, owner, conversation, `视频 ${i}`, `rev-${i}`, i, now, now);
+      addRev.run(`rev-${i}`, `art-${i}`, "d", JSON.stringify({ format: "media", blobId: `blob-${i}`, mimeType: "video/mp4", durationMs: 1000 }), now);
+      (i <= 30 ? legacy : modern).run(`c-${i}`, owner, conversation, subject(i), now);
+    }
+  })();
+  function checkPages() {
+    const all: string[] = [];
+    let cursor: string | undefined;
+    for (let pageNo = 1; pageNo <= 3; pageNo++) {
+      const page = app.service.listLibraryVideos(owner, cursor, 20);
+      assert.equal(page.items.length, 20);
+      assert.ok(page.items.every(entry => entry.finalizedAt === now), "保持首次定稿时间");
+      all.push(...page.items.map(entry => entry.video.revisionId));
+      if (pageNo < 3) assert.ok(page.nextCursor && page.nextCursor !== cursor);
+      else assert.equal(page.nextCursor, null);
+      cursor = page.nextCursor ?? undefined;
+    }
+    assert.deepEqual(all, Array.from({ length: 60 }, (_, i) => `rev-${60 - i}`));
+    const afterLast = encodeListCursor({ v: 1, c: owner, k: "library", p: encodePhasedPos(1, 1), w: 0 });
+    assert.deepEqual(app.service.listLibraryVideos(owner, afterLast, 20), { items: [], nextCursor: null });
+  }
+  checkPages();
+  const later = new Date(Date.parse(now) + 1000).toISOString();
+  modern.run("reconfirm-legacy", owner, conversation, subject(1), later);
+  modern.run("repeat-modern", owner, conversation, subject(31), later);
+  checkPages();
+  for (const phase of [0, 1] as const) {
+    assert.deepEqual(decodePhasedPos(encodePhasedPos(phase, 2 ** 32 - 1)), { phase, rowId: 2 ** 32 - 1 });
+  }
+  for (const bad of [-1, 1.5, 2 ** 33]) assert.throws(() => decodePhasedPos(bad), /分页位置/);
 });

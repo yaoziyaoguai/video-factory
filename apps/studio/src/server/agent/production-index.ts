@@ -95,16 +95,24 @@ export function getScopedRunRow(db: AgentDatabase, ownerId: string, conversation
   return row;
 }
 
-// 回合上下文注入：各一页近期索引 + nextCursor，模型发现更早对象后用 detail 工具读取。
-export function contextProductionIndex(db: AgentDatabase, conversationId: string): {
-  proposals: { items: ProposalIndexItem[]; nextCursor: string | null };
-  runs: { items: RunIndexItem[]; nextCursor: string | null };
-} {
-  const proposals = listProductionIndex(db, conversationId, { kind: "proposals" });
-  const runs = listProductionIndex(db, conversationId, { kind: "runs" });
-  // kind 判别后的窄化：ProductionIndexPage.items 是 oneOf 联合数组。
-  return {
-    proposals: { items: proposals.items as ProposalIndexItem[], nextCursor: proposals.nextCursor },
-    runs: { items: runs.items as RunIndexItem[], nextCursor: runs.nextCursor },
-  };
+// 工具与模型都用相同的页大小和游标编码；索引只需要冻结标题、状态及来源。
+export const contextIndexColumns = `
+  (SELECT coalesce(max(seq),0) FROM events WHERE conversation_id=r.conversation_id) AS watermark,
+  (SELECT json_group_array(json_object('id',id,'title',json_extract(spec_json,'$.title'),'state',state,'revision',revision,
+    'digest',digest,'expiresAt',expires_at,'acceptedRunId',accepted_run_id,'acceptanceBlocker',NULL,'created_seq',created_seq))
+    FROM (SELECT * FROM proposals WHERE conversation_id=r.conversation_id ORDER BY created_seq DESC LIMIT ${DEFAULT_LIMIT + 1})) AS proposals_page,
+  (SELECT json_group_array(json_object('id',id,'title',title,'state',state,'revision',revision,
+    'origin',json(CASE WHEN proposal_id IS NULL THEN json_object('kind','local_request','requestId',source_request_id)
+      ELSE json_object('kind','proposal','proposalId',proposal_id) END),'createdAt',created_at,'updatedAt',updated_at,'created_seq',created_seq))
+    FROM (SELECT * FROM production_runs WHERE conversation_id=r.conversation_id ORDER BY created_seq DESC LIMIT ${DEFAULT_LIMIT + 1})) AS runs_page`;
+
+export interface ContextIndexRow { watermark: number; proposals_page: string; runs_page: string }
+
+export function contextProductionIndex(row: ContextIndexRow, conversationId: string) {
+  function page<T>(raw: string, kind: "proposals" | "runs") {
+    const all = JSON.parse(raw) as (T & { created_seq: number })[];
+    return { items: all.slice(0, DEFAULT_LIMIT).map(({ created_seq, ...item }) => item),
+      nextCursor: pageCursor(all, DEFAULT_LIMIT, { v: 1, c: conversationId, k: kind, w: row.watermark }) };
+  }
+  return { proposals: page<ProposalIndexItem>(row.proposals_page, "proposals"), runs: page<RunIndexItem>(row.runs_page, "runs") };
 }

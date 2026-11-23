@@ -48,7 +48,9 @@ for (const useProxy of [true, false]) test(`正式入口加载 Pi 后保留${use
   assert.deepEqual(proxied, useProxy ? ["http://frame-provider.invalid/v1/models"] : []);
 });
 
-test("免费配音实际 Python 驱动把部署代理传给客户端，并遵循 NO_PROXY 与变量优先级", async () => {
+test("免费配音实际 Python 驱动把部署代理传给客户端，并遵循 NO_PROXY 与变量优先级", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-dub-wire-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
   const source = await readFile(new URL("../src/server/agent/pi-tools.ts", import.meta.url), "utf8");
   const driver = source.match(/const DUB_DRIVER_PYTHON = `([\s\S]*?)`;/)?.[1];
   assert.ok(driver, "应运行产品实际驱动");
@@ -66,7 +68,7 @@ class Communicate:
 edge.Communicate = Communicate
 sys.modules["edge_tts"] = edge
 sys.modules["edge_tts.constants"] = constants
-exec(sys.argv[1])
+exec(sys.argv.pop(1))
 `;
   const cases: { env: NodeJS.ProcessEnv; expected: string | null }[] = [
     { env: { HTTPS_PROXY: "http://https-proxy.invalid:8080" }, expected: "http://https-proxy.invalid:8080" },
@@ -76,11 +78,13 @@ exec(sys.argv[1])
     { env: { HTTPS_PROXY: "http://https-proxy.invalid:8080", NO_PROXY: "other.invalid", no_proxy: "speech.platform.bing.com" }, expected: "http://https-proxy.invalid:8080" },
   ];
   const runPython = promisify(execFile);
-  for (const { env, expected } of cases) {
-    const pending: Promise<{ stdout: string; stderr: string }> & { child: import("node:child_process").ChildProcess } = runPython("python3", ["-I", "-c", clientBoundary, driver], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } });
+  for (const [index, { env, expected }] of cases.entries()) {
+    const audio = path.join(directory, index + ".mp3");
+    const pending: Promise<{ stdout: string; stderr: string }> & { child: import("node:child_process").ChildProcess } = runPython("python3", ["-I", "-c", clientBoundary, driver, audio], { encoding: "utf8", env: { PATH: process.env.PATH, ...env } });
     pending.child.stdin!.end(JSON.stringify({ text: "短句", voice: "zh-CN-XiaoxiaoNeural", rate: "+10%" }));
     const { stdout, stderr } = await pending;
     assert.deepEqual(JSON.parse(stderr), { text: "短句", voice: "zh-CN-XiaoxiaoNeural", rate: "+10%", boundary: "WordBoundary", proxy: expected });
-    assert.deepEqual(JSON.parse(stdout), { audioB64: Buffer.from("fixture-mp3").toString("base64"), boundaries: [{ text: "短句", offsetMs: 100, durationMs: 200 }] });
+    assert.deepEqual(await readFile(audio), Buffer.from("fixture-mp3"));
+    assert.deepEqual(JSON.parse(stdout), { boundaries: [{ text: "短句", offsetMs: 100, durationMs: 200 }] });
   }
 });

@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+import { checkBudget } from "./studio-accounts.js";
 import type {
   AcceptProposal, AdmissionReceipt, CancelReceipt, CancelRun, FrozenReviewTarget,
   LocalCreationReceipt, LocalCreationSpec, LocalRenderOperation, MessageInput, OperationRequest, RequestReceipt, Run,
@@ -23,10 +25,10 @@ import { runRow, terminal, toRun, type RunRow } from "./production-store.js";
 export type ProductionCrashPoint = "before-admission-commit" | "after-admission-commit" | "after-attempt-prepared" | "after-submit-started" | "before-result-commit" | "after-result-commit";
 export type ProductionCrashHook = (point: ProductionCrashPoint) => void;
 
-export class ProductionService {
+export class ProductionService extends EventEmitter<{ work: [] }> {
   constructor(private readonly db: AgentDatabase, private readonly clock: AgentClock, private readonly hub: EventHub,
     private readonly catalog: () => QuoteCatalog, readonly blobs: ProductionBlobs,
-    private readonly crash: ProductionCrashHook = () => {}, private readonly enabled = true) {}
+    private readonly crash: ProductionCrashHook = () => {}, private readonly enabled = true) { super(); }
 
   accept(ownerId: string, proposalId: string, input: AcceptProposal): AdmissionReceipt {
     const check = validatorFor("AcceptProposal")(input);
@@ -42,8 +44,9 @@ export class ProductionService {
       storeCommandReceipt(this.db, this.clock(), key, input, receipt);
       this.crash("before-admission-commit");
       return receipt;
-    })();
+    }).immediate();
     this.crash("after-admission-commit");
+    if (!result.replayed) this.emit("work");
     this.hub.notifyCommitted(result.run.conversationId);
     return result;
   }
@@ -69,8 +72,9 @@ export class ProductionService {
       storeCommandReceipt(this.db, now, key, input, receipt);
       this.crash("before-admission-commit");
       return receipt;
-    })();
+    }).immediate();
     this.crash("after-admission-commit");
+    if (!result.replayed) this.emit("work");
     this.hub.notifyCommitted(conversationId);
     return result;
   }
@@ -170,6 +174,7 @@ export class ProductionService {
           baseRevisionId: item.draft?.kind === "artifact_revision" ? item.draft.revisionId : null };
       }
     }
+    checkBudget(this.db,ownerId,proposal.conversation_id,now,spec.maxSpend.amountMinor);
     // 事务顺序：核对 → 本次可信 user_action → 授权/run/locks。后续任何失败整体回滚。
     const runId = newAgentId("run"), snapshotId = newAgentId("snp"), actionId = newAgentId("act");
     this.db.prepare("INSERT INTO production_snapshots(id,spec_json,digest,created_at) VALUES(?,?,?,?)").run(snapshotId, proposal.spec_json, digestOf(spec), now);
@@ -196,7 +201,7 @@ export class ProductionService {
   // 当前请求注入。目标在同一事务内解析或分配并随操作冻结，新事项尚无草稿、只展示“制作中”。
   admitLocalRender(ownerId: string, conversationId: string, request: { requestId: string; messageId: string }, intent: ToolRenderProject, probes?: Map<string, RenderFileProbe>): LocalCreationReceipt {
     if (!this.enabled) throw new AgentError("CAPABILITY_UNAVAILABLE", "制作能力尚未接入，暂不能受理这次本地制作。");
-    return this.db.transaction(() => {
+    const receipt = this.db.transaction(() => {
       requireConversation(this.db, ownerId, conversationId);
       const work = requireWork(this.db, ownerId, conversationId, intent.workId);
       if (workInFlight(this.db, work.id)) throw new AgentError("RUN_BUSY", "这件作品已经在制作中。");
@@ -279,7 +284,7 @@ export class ProductionService {
         operationId: operation.operationId, outputSlot: operation.outputSlot, inputs: operation.inputs,
         kind: "render", model: null, maxCreateAttempts: 1, parameters: operation.parameters,
       }));
-      const { validation, renderParameters, musicSources } = normalizeOperationInputs(this.db, scope, inputSources, requestedOperations, catalog, probes, this.blobs);
+      const { validation, renderParameters, musicSources } = normalizeOperationInputs(this.db, scope, inputSources, requestedOperations, catalog, probes, this.blobs,work.id);
       const operations: LocalRenderOperation[] = [];
       const projectArtifactIds: string[] = [];
       for (const operation of intent.operations) {
@@ -290,7 +295,7 @@ export class ProductionService {
           const entry = catalog[`render:${parameters.assembly}`];
           if (!entry || entry.binding !== null) throw new AgentError("CAPABILITY_UNAVAILABLE", "本地合成能力尚未启用，不能受理这次渲染。");
           const requested = requestedOperations.find(op => op.operationId === operation.operationId)!;
-          entry.validate?.(requested, validation.trusted.get(operation.operationId), validation);
+          entry.validate?.({ ...requested, parameters }, validation.trusted.get(operation.operationId), validation);
         }
         const musicSource = musicSources.get(operation.operationId);
         operations.push({ operationId: operation.operationId, outputSlot: operation.outputSlot, inputs: operation.inputs,
@@ -323,6 +328,9 @@ export class ProductionService {
       return { run: toRun(this.db, run),
         reviewTargets: operations.map(op => ({ operationId: op.operationId, groupId: op.target.groupId, itemId: op.target.itemId })) as LocalCreationReceipt["reviewTargets"] };
     })();
+    this.emit("work");
+    this.hub.notifyCommitted(conversationId);
+    return receipt;
   }
 
   // 两个入口都在受理事务中发布；绑定确认先保存用户消息，再追加受理通知。
@@ -366,6 +374,7 @@ export class ProductionService {
       storeCommandReceipt(this.db, this.clock(), key, input, result);
       return result;
     })();
+    if (!receipt.replayed) this.emit("work");
     this.hub.notifyCommitted(receipt.run.conversationId);
     return receipt;
   }

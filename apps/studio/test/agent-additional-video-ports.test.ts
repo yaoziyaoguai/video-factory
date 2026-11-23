@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -250,13 +250,36 @@ describe("MiniMax H3 video port (M2)", () => {
       assert.ok(receipt.blob_id && receipt.digest);
       const blob = ctx.blobs.get("owner", receipt.blob_id);
       assert.equal(blob.digest, receipt.digest);
-      const file = path.join(ctx.workRoot, input.attemptId, "download.mp4");
-      assert.ok(existsSync(file), "成片落在确定性位置");
+      const file = ctx.blobs.filePath(blob.digest);
+      assert.ok(existsSync(file), "收据中的成片可读");
+      assert.equal(existsSync(path.join(ctx.workRoot, input.attemptId)), false, "收到成片后释放尝试目录");
       const facts = await probeVideoFile(file);
       assert.ok(Math.abs(facts.durationMs - 6000) <= 100, "按冻结 6 秒验收时长");
       assert.equal(facts.hasAudio, true, "原生音画必须有音轨");
       assert.ok(!JSON.stringify(done).includes("M2-KEY-mm-video"), "观测不回显 Key");
       assert.equal(stub.state.posts.length, 1, "整个生命周期恰好一次 create");
+    });
+  });
+
+  it("ISS-04 连续十次供应商下载后成片均可解码，尝试目录归零", async t => {
+    await withVideoAssets(async (native, _silent, wrong) => {
+      const stub = await startMiniMaxStub(native, wrong);
+      t.after(() => closeServer(stub.server));
+      const ctx = await openPort(t, stub.baseUrl);
+      stub.state.taskStatus = "succeeded";
+      for (let index = 0; index < 10; index++) {
+        const { input, query } = seedProviderAttempt(ctx.db, videoOperation(ctx.binding,
+          { durationSeconds: 6, resolution: "768P", audioMode: "native" }, TEXT), ctx.binding, "download-" + index);
+        await ctx.port.submit(input, issueSubmitPermit(input.attemptId, 1));
+        const result = await ctx.port.query(query);
+        assert.equal(result.state, "succeeded", result.message ?? "");
+        const receipt = attemptOutput(ctx.db, input.attemptId)!;
+        assert.equal(result.blob?.digest, receipt.digest);
+        assert.ok((await probeVideoFile(ctx.blobs.filePath(receipt.digest!))).hasAudio);
+      }
+      assert.equal(stub.state.downloads, 10);
+      assert.deepEqual(await readdir(ctx.workRoot), []);
+      t.diagnostic("10 次环回 HTTP 下载、10 个真实媒体探测与成品收据、0 个残留尝试目录");
     });
   });
 
@@ -492,7 +515,7 @@ describe("Wan video port (M2)", () => {
       const receipt = attemptOutput(ctx.db, input.attemptId)!;
       assert.equal(receipt.provider_task_id, "task-wan-1");
       assert.ok(receipt.blob_id);
-      const facts = await probeVideoFile(path.join(ctx.workRoot, input.attemptId, "download.mp4"));
+      const facts = await probeVideoFile(ctx.blobs.filePath(done.blob!.digest));
       assert.equal(facts.hasAudio, true);
       assert.equal(stub.state.posts.length, 1, "除 create 外不增任何改写/生成调用");
     });
@@ -510,7 +533,7 @@ describe("Wan video port (M2)", () => {
       stub.state.downloadPath = "/dl/silent.mp4";
       const done = await ctx.port.query(query);
       assert.equal(done.state, "succeeded", done.message ?? "no message");
-      assert.equal((await probeVideoFile(path.join(ctx.workRoot, input.attemptId, "download.mp4"))).hasAudio, false, "冻结无声必须无声");
+      assert.equal((await probeVideoFile(ctx.blobs.filePath(done.blob!.digest))).hasAudio, false, "冻结无声必须无声");
     });
   });
 
@@ -651,7 +674,7 @@ describe("MiniMax speech port (M2)", () => {
     return { ...fixture, binding, port, current };
   }
 
-  it("真实音频字节解码：payload 原样、规格验收、usage_characters 只进消息", async t => {
+  it("真实音频字节解码：payload 原样、规格验收、字符用量持久化并保留结算待核", async t => {
     await withSpeechAssets(async (mp3, wrong) => {
       const stub = await startSpeechStub(mp3, wrong);
       t.after(() => closeServer(stub.server));
@@ -661,6 +684,8 @@ describe("MiniMax speech port (M2)", () => {
       assert.equal(done.state, "succeeded");
       assert.equal(done.blob?.mimeType, "audio/mpeg");
       assert.match(done.message ?? "", /计费字符 25/);
+      assert.equal(done.usage?.characters,25);assert.ok(done.usage!.mediaDurationMs!>0);
+      assert.deepEqual((await ctx.port.query(query)).usage,done.usage);
       const post = stub.state.posts[0]!;
       assert.equal(post.auth, "Bearer M2-KEY-mm-speech");
       assert.equal(post.body.model, "speech-2.8-turbo");
@@ -670,8 +695,9 @@ describe("MiniMax speech port (M2)", () => {
       assert.deepEqual(post.body.voice_setting, { voice_id: MINIMAX_SPEECH_VOICE });
       assert.deepEqual(post.body.audio_setting, { sample_rate: 32_000, bitrate: 128_000, format: "mp3", channel: 1 });
 
-      const file = path.join(ctx.workRoot, input.attemptId, "speech.mp3");
-      assert.ok(existsSync(file), "解码字节落在确定性位置");
+      const file = ctx.blobs.filePath(done.blob!.digest);
+      assert.ok(existsSync(file), "解码字节可由回执中的摘要读取");
+      assert.equal(existsSync(path.join(ctx.workRoot, input.attemptId)), false);
       const facts = await probeAudioFile(file);
       assert.equal(facts.channels, 1);
       assert.equal(facts.sampleRate, 32_000);
@@ -997,4 +1023,202 @@ describe("duration bound (M2 §11.3)", () => {
       (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && /超出该视频可用时长 8\.0s/.test(error.message ?? ""));
     assert.equal((db.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0, "拒绝不产生运行");
   });
+});
+
+it("CAP-02 三种真实端口的首帧、首尾帧和角色参考图：本地 HTTP 逐字节核对，查询并交付成片", async (t) => {
+  const { ArkMediaPort } = await import("../src/server/agent/ark-media.js");
+  const { DEFAULT_ARK_VIDEO_PROFILE, mediaBinding } = await import("../src/server/agent/media-config.js");
+  const { readFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(path.join(tmpdir(), "frame-i2v-wire-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const png = path.join(dir, "frame.png");
+  await run("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720", "-frames:v", "1", png]);
+  const original = await readFile(png);
+  await withVideoAssets(async (native, silent) => {
+    const bodyLog: {
+      model: string;
+      ratio?: string;
+      content?: { type: string; text?: string; role?: string; image_url?: { url: string } }[];
+      input?: { prompt: string; media: { type: string; url: string }[] };
+      parameters?: { ratio?: string };
+    }[] = [];
+    let base = "";
+    const server = http.createServer(async (req, res) => {
+      const send = (value: unknown) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(value));
+      };
+      if (req.method === "POST") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.from(chunk));
+        bodyLog.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        if (req.url === "/contents/generations/tasks") return send({ id: "task" });
+        if (req.url === "/v2/video_generation") return send({ task_id: "task" });
+        if (req.url === "/api/v1/services/aigc/video-generation/video-synthesis")
+          return send({ output: { task_id: "task" } });
+      }
+      if (req.url === "/contents/generations/tasks/task")
+        return send({ id: "task", status: "succeeded", content: { video_url: base + "/silent.mp4" } });
+      if (req.url === "/v2/query/video_generation/task")
+        return send({ task: { status: "succeeded", content: { url: base + "/native.mp4" } } });
+      if (req.url === "/api/v1/tasks/task")
+        return send({ output: { task_status: "SUCCEEDED", video_url: base + "/silent.mp4" } });
+      if (req.url === "/silent.mp4" || req.url === "/native.mp4") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(req.url === "/silent.mp4" ? silent : native);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      for (const model of ["doubao-seedance-2-5-260628", "MiniMax-H3", "wan3.0-video"]) {
+        for (const mode of ["first", "pair", "references"]) {
+          const { db, blobs, workRoot } = await openFixture(t, "frame-image-port-");
+          let binding: ModelBinding, port: import("../src/shared/agent/ports.js").MediaExecutionPort;
+          if (model === "MiniMax-H3") {
+            const profile = { ...minimaxVideoProfile(model, "https://api.minimax.cn")!, baseUrl: base };
+            binding = minimaxVideoBinding(profile, "test-i2v");
+            port = new MiniMaxVideoPort(db, blobs, staticClock, {
+              resolve: resolverFor(profile, "fixture-key").resolve,
+              workRoot,
+            });
+          } else if (model === "wan3.0-video") {
+            const profile = { ...wanVideoProfile(model, "https://ws.cn-beijing.maas.aliyuncs.com")!, baseUrl: base };
+            binding = wanVideoBinding(profile, "test-i2v");
+            port = new WanVideoPort(db, blobs, staticClock, {
+              resolve: resolverFor(profile, "fixture-key").resolve,
+              workRoot,
+            });
+          } else {
+            const profile = { ...DEFAULT_ARK_VIDEO_PROFILE, baseUrl: base };
+            binding = mediaBinding(profile, "test-i2v");
+            port = new ArkMediaPort(db, blobs, staticClock, {
+              resolve: resolverFor(profile, "fixture-key").resolve,
+              workRoot,
+            });
+          }
+          const op = videoOperation(
+            binding,
+            {
+              durationSeconds: 6,
+              resolution: model === "MiniMax-H3" ? "768P" : model === "wan3.0-video" ? "720P" : "720p",
+              audioMode: model === "MiniMax-H3" ? "native" : "none",
+            },
+            "冻结的镜头提示",
+          );
+          assert.ok(op.kind === "video");
+          const imageRef = { kind: "blob" as const, blobId: "frame-input", digest: "1".repeat(64) };
+          const two = mode !== "first";
+          op.inputs = two
+            ? [imageRef, { kind: "text", text: "冻结的镜头提示" }, imageRef]
+            : [imageRef, { kind: "text", text: "冻结的镜头提示" }];
+          op.parameters = {
+            ...op.parameters,
+            ...(mode === "references"
+              ? { referenceImageSlots: [0, 2] }
+              : mode === "pair"
+                ? { firstFrameSlot: 0, lastFrameSlot: 2 }
+                : { firstFrameSlot: 0 }),
+          };
+          if (mode === "first")
+            op.inputs[0] = { kind: "operation_output", producerOperationId: "board", outputSlot: "image" };
+          const { input, query } = seedProviderAttempt(db, op, binding);
+          const blob = await blobs.persistFromFileAsync("owner", "conversation", png, "image/png", null);
+          input.operation.inputs = input.operation.inputs.map((ref) =>
+            ref.kind === "blob" ? { kind: "blob", blobId: blob.id, digest: blob.digest } : ref,
+          ) as typeof input.operation.inputs;
+          input.resolvedInputs = (two ? [0, 2] : [0]).map((slot) => ({ slot, blobId: blob.id, digest: blob.digest }));
+          const submitted = await port.submit(input, issueSubmitPermit(input.attemptId, 1));
+          assert.equal(submitted.state, "running", submitted.message ?? "");
+          const body = bodyLog.at(-1)!;
+          assert.equal(body.model, model);
+          const images = body.content
+            ? body.content.filter((x) => x.type === "image_url").map((x) => ({ role: x.role, url: x.image_url!.url }))
+            : body.input!.media.map((x) => ({ role: x.type, url: x.url }));
+          assert.equal(body.content ? body.content[0]?.text : body.input!.prompt, "冻结的镜头提示");
+          assert.deepEqual(
+            images.map((x) => x.role),
+            mode === "first"
+              ? ["first_frame"]
+              : mode === "pair"
+                ? ["first_frame", "last_frame"]
+                : ["reference_image", "reference_image"],
+          );
+          for (const image of images) {
+            assert.ok(image.url.startsWith("data:image/png;base64,"));
+            assert.deepEqual(Buffer.from(image.url.split(",")[1]!, "base64"), original);
+          }
+          if (model === "MiniMax-H3" || model === "doubao-seedance-2-5-260628") assert.equal(body.ratio, mode === "references" ? "16:9" : "adaptive");
+          const done = await port.query({ ...query, providerTaskId: "task" });
+          assert.equal(done.state, "succeeded", done.message ?? "");
+          assert.equal(done.blob?.mimeType, "video/mp4");
+        }
+      }
+      assert.equal(bodyLog.length, 9);
+      t.diagnostic(JSON.stringify({ providers: 3, submissions: 9, completed: 9, pngBytes: original.length }));
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+it("CAP-02 准备时核对上游产物类型、槽位、型号及请求大小", async () => {
+  const { validateVideoImages } = await import("../src/server/agent/video-image-inputs.js");
+  const { DEFAULT_ARK_VIDEO_PROFILE, mediaBinding } = await import("../src/server/agent/media-config.js");
+  const model = mediaBinding(DEFAULT_ARK_VIDEO_PROFILE, "fixture");
+  const op = videoOperation(model, { durationSeconds: 5, resolution: "720p", audioMode: "none" }, "镜头");
+  assert.ok(op.kind === "video");
+  op.inputs.push({ kind: "operation_output", producerOperationId: "board", outputSlot: "image" });
+  op.parameters.firstFrameSlot = 1;
+  assert.ok(
+    validateVideoImages(model.modelId, op, [{ kind: "text" }, { kind: "operation_output", producerKind: "image" }]),
+  );
+  assert.throws(
+    () =>
+      validateVideoImages(model.modelId, op, [{ kind: "text" }, { kind: "operation_output", producerKind: "video" }]),
+    { code: "INVALID_INPUT" },
+  );
+  assert.throws(() => validateVideoImages("text-only", op), { code: "CAPABILITY_UNAVAILABLE" });
+  assert.throws(
+    () => validateVideoImages(model.modelId, { ...op, parameters: { ...op.parameters, lastFrameSlot: 1 } }),
+    { code: "INVALID_INPUT" },
+  );
+  const synthetic = { kind: "blob" as const, blobId: "existing", digest: "e".repeat(64) };
+  op.inputs[1] = synthetic;
+  op.inputs.push(synthetic);
+  op.parameters.lastFrameSlot = 2;
+  const fact = { kind: "blob" as const, blobId: "existing", mimeType: "image/png" };
+  assert.throws(
+    () =>
+      validateVideoImages(model.modelId, op, [{ kind: "text" }, fact, fact], {
+        trusted: new Map(),
+        renderFileProbes: new Map([
+          ["existing", { ok: true, kind: "image", width: 1280, height: 720, sizeBytes: 25_000_000 }],
+        ]),
+      }),
+    { code: "CAPABILITY_UNAVAILABLE" },
+  );
+});
+
+it("CAP-02 Seedance 2.5 允许三十张参考图，MiniMax 与万相在各自上限拒绝", async () => {
+  const {validateVideoImages} = await import("../src/server/agent/video-image-inputs.js");
+  const {DEFAULT_ARK_VIDEO_PROFILE, mediaBinding} = await import("../src/server/agent/media-config.js");
+  const model = mediaBinding(DEFAULT_ARK_VIDEO_PROFILE, "limits");
+  const op = videoOperation(model, {durationSeconds:5,resolution:"720p",audioMode:"none"}, "按角色设定成片");
+  assert.ok(op.kind === "video");
+  const refs: [number, ...number[]] = [1, ...Array.from({length:29}, (_,i)=>i+2)];
+  op.parameters.referenceImageSlots = refs;
+  for (const slot of refs) op.inputs.push({kind:"operation_output",producerOperationId:"image-"+slot,outputSlot:"image"});
+  assert.ok(validateVideoImages(model.modelId,op));
+  assert.throws(()=>validateVideoImages("MiniMax-H3",op),{code:"CAPABILITY_UNAVAILABLE"});
+  assert.throws(()=>validateVideoImages("wan3.0-video",op),{code:"CAPABILITY_UNAVAILABLE"});
+  op.inputs.splice(2); op.parameters = {...op.parameters,aspectRatio:"9:16",firstFrameSlot:1};
+  delete op.parameters.referenceImageSlots;
+  const image={kind:"blob" as const,blobId:"horizontal",mimeType:"image/jpeg"};
+  assert.throws(()=>validateVideoImages(model.modelId,op,[{kind:"text"},image],{trusted:new Map(),
+    renderFileProbes:new Map([[image.blobId,{ok:true,kind:"image",width:1280,height:720,sizeBytes:11433}]])}),{code:"CAPABILITY_UNAVAILABLE"});
 });

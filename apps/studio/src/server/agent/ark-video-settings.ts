@@ -28,7 +28,7 @@ export function readArkVideoCurrent(db: AgentDatabase): ArkVideoCurrent | null {
   const row = db.prepare("SELECT revision, display_name, current_configuration_revision_id FROM ark_video_settings WHERE id=1")
     .get() as { revision: number; display_name: string; current_configuration_revision_id: string } | undefined;
   if (!row) return null;
-  const version = db.prepare("SELECT * FROM ark_video_configuration_versions WHERE configuration_revision_id=?")
+  const version = db.prepare("SELECT configuration_revision_id,binding_json,profile_json,frame_open(api_key) AS api_key,created_at FROM ark_video_configuration_versions WHERE configuration_revision_id=?")
     .get(row.current_configuration_revision_id) as ArkVideoVersionRow | undefined;
   if (!version) throw new Error("ark_video_settings 引用的配置版本缺失。");
   return { revision: row.revision, displayName: row.display_name, version };
@@ -43,7 +43,7 @@ function insertVersion(db: AgentDatabase, now: string, profile: ArkVideoProfile,
     api_key: apiKey,
     created_at: now,
   };
-  db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,?,?)")
+  db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,frame_seal(?),?)")
     .run(version.configuration_revision_id, version.binding_json, version.profile_json, version.api_key, now);
   return version;
 }
@@ -88,7 +88,7 @@ export function initializeArkVideoSettings(db: AgentDatabase, options: ArkVideoI
     const match = db.prepare("SELECT configuration_revision_id FROM ark_video_configuration_versions WHERE binding_json=? AND api_key IS NULL")
       .get(expected) as { configuration_revision_id: string } | undefined;
     if (!match) return;
-    db.prepare("UPDATE ark_video_configuration_versions SET api_key=? WHERE configuration_revision_id=? AND api_key IS NULL")
+    db.prepare("UPDATE ark_video_configuration_versions SET api_key=frame_seal(?) WHERE configuration_revision_id=? AND api_key IS NULL")
       .run(legacy.apiKey, match.configuration_revision_id);
     if (existing.version.configuration_revision_id === match.configuration_revision_id) {
       db.prepare("UPDATE ark_video_settings SET revision=revision+1,updated_at=? WHERE id=1").run(now);
@@ -121,7 +121,7 @@ export function arkVideoCatalog(current: ArkVideoCurrent | null, render: LocalRe
 
 // 冻结绑定解析只读原版本与原 Key，不依赖当前选择。
 export function resolveArkBinding(db: AgentDatabase, binding: ModelBinding): { profile: ArkVideoProfile; apiKey: string | null } | null {
-  const row = db.prepare("SELECT binding_json, profile_json, api_key FROM ark_video_configuration_versions WHERE configuration_revision_id=?")
+  const row = db.prepare("SELECT binding_json, profile_json, frame_open(api_key) AS api_key FROM ark_video_configuration_versions WHERE configuration_revision_id=?")
     .get(binding.configurationRevisionId) as { binding_json: string; profile_json: string; api_key: string | null } | undefined;
   if (!row || row.binding_json !== canonicalJson(binding)) return null;
   return { profile: JSON.parse(row.profile_json), apiKey: row.api_key };

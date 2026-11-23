@@ -10,7 +10,7 @@ SKILLS = Path("/skills")
 
 def controlled_path(value, writable=False):
     candidate = Path(value).resolve()
-    roots = [PROJECT] if writable else [PROJECT, SKILLS]
+    roots = [PROJECT] if writable or Path(value).is_relative_to(PROJECT) else [PROJECT, SKILLS]
     if not any(candidate == root or candidate.is_relative_to(root) for root in roots):
         raise ValueError("FORBIDDEN: 路径超出当前工程或只读 Skill 区。")
     return candidate
@@ -51,7 +51,9 @@ def handle(request):
         files = []
         for directory, _, names in os.walk(PROJECT, followlinks=False):
             for name in sorted(names):
-                file = controlled_path(str(Path(directory) / name))
+                file = Path(directory) / name
+                if file.is_symlink() and not Path(os.path.realpath(file)).is_relative_to(PROJECT):
+                    continue
                 if file.is_file():
                     files.append({"path": str(file.relative_to(PROJECT)), "size": file.stat().st_size})
         return {"files": sorted(files, key=lambda file: file["path"])}

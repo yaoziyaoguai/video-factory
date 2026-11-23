@@ -1,5 +1,8 @@
+import { buildLocalRuntime, LOCAL_CATALOG } from "./helpers/native-render.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import http from "node:http";
 import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
@@ -8,13 +11,15 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { it } from "node:test";
 import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
+import { AgentService } from "../src/server/agent/agent-service.js";
+import { AgentError } from "../src/server/agent/errors.js";
 import { buildFrameApp } from "../src/server/agent/app.js";
 import { savePexelsServiceSettings } from "../src/server/agent/free-service-settings.js";
 import { createAgentRuntime, type AgentRuntime, type AgentRuntimeOptions } from "../src/server/agent/assembly.js";
 import { FAUX_PROVIDER, FAUX_TEXT_MODEL, defaultSkillsRoot } from "../src/server/agent/offline.js";
 import { ArkMediaPort, RealMediaGateway } from "../src/server/agent/ark-media.js";
 import { OpenAISpeechPort } from "../src/server/agent/openai-speech.js";
-import { LocalRenderPort } from "../src/server/agent/local-render.js";
+import { isMatchingFrameRate, LocalRenderPort } from "../src/server/agent/local-render.js";
 import {
   mediaBinding, mixedRenderCatalogEntry, narratedRenderCatalogEntry, renderCatalogEntry, timedNarratedRenderCatalogEntry,
   openaiSpeechBinding, openaiSpeechProfile,
@@ -203,21 +208,6 @@ async function outputFileOf(runtime: AgentRuntime, runId: string, operationId = 
 const workRootOf = (directory: string) => path.join(directory, "media-work");
 
 // —— 本地运行时：只有本地拼接目录（ordered + narrated 两个条目） ——
-
-const LOCAL_CATALOG = () => ({ "render:ordered_concat": renderCatalogEntry(true), "render:narrated_concat": narratedRenderCatalogEntry(), "render:timed_narrated_concat": timedNarratedRenderCatalogEntry(), "render:mixed_concat": mixedRenderCatalogEntry() });
-
-function buildLocalRuntime(directory: string, createPort?: (blobs: ProductionBlobs, db: AgentDatabase) => MediaExecutionPort, extraCatalog: QuoteCatalog = {}): Promise<AgentRuntime> {
-  const workRoot = path.join(directory, "media-work");
-  return createAgentRuntime({
-    dataDir: directory, skillsRoot: defaultSkillsRoot,
-    host: { faux: { provider: FAUX_PROVIDER, modelIds: [FAUX_TEXT_MODEL] } },
-    models: [FAUX_TEXT_ENTRY], defaultModelId: FAUX_TEXT_MODEL, clock: staticClock,
-    media: { autoStart: false, factory: (db, blobs) => ({
-      port: createPort ? createPort(blobs, db) : new LocalRenderPort(db, blobs, staticClock, { workRoot }),
-      catalog: () => ({ ...LOCAL_CATALOG(), ...extraCatalog }), models: () => [],
-    }) },
-  });
-}
 
 // —— 组合供应商桩：Ark 视频走本地 HTTP；配音走进程内 Realtime 替身（FakeRealtimeHub） ——
 
@@ -448,6 +438,14 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     const longFile = await outputFileOf(runtime, longRun.id);
     const longFacts = await probeVideoFile(longFile);
     assert.ok(Math.abs(longFacts.durationMs - assets.longMs) <= 200, `长旁白输出 ${longFacts.durationMs}ms 应≈${assets.longMs}ms`);
+    const editZip=path.join(assets.directory,"narrated-draft.zip");
+    await pipeline(await runtime.service.editingArchive("local-owner",longRun.id,"otio"),createWriteStream(editZip));
+    const saved=await promisify(execFile)("unzip",["-p",editZip,"Frame-timeline.json"]);
+    const timeline=JSON.parse(saved.stdout) as {visual:{at:number;start:number;length:number;gain:number;media:string}[];narration:{at:number;length:number}[];durationMs:number};
+    assert.equal(timeline.visual.length,3);
+    const hold=timeline.visual[2]!;assert.ok(Math.abs(hold.at-2000)<100);assert.equal(hold.start,hold.at);assert.equal(hold.gain,0);
+    assert.ok(Math.abs(hold.at+hold.length-longFacts.videoDurationMs)<=1000/24);assert.equal(timeline.narration[0]!.at,0);
+    assert.match(hold.media,new RegExp(path.basename(longFile)));
     assert.ok(isRed(await frameColor(longFile, 0.2)));
     assert.ok(isBlue(await frameColor(longFile, 1.6)));
     assert.ok(isBlue(await frameColor(longFile, Math.max(2.0, assets.longMs / 1000 - 0.2))), "画面结束后应停留最后一个画面帧");
@@ -493,6 +491,20 @@ it("T6-03：旁白比画面长时停留尾帧，比画面短时补静音，时�
     assert.ok(await maxVolumeDb(shiftedFile, 1.86, 0.1) < -60, "偏移后的音频结束才补静音");
     assert.equal((await outputRevisionOf(runtime, shiftedRun)).dub, undefined, "合成输出不继承源音频的 dub 坐标");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
+});
+
+it("CAP-06 两个具名来源可引用同一媒体原件，剪辑保持两段且 ZIP 只存一份",async()=>{
+  const assets=await prepareLocalAssets(),runtime=await buildLocalRuntime(assets.directory);
+  try{
+    const cid=runtime.service.createConversation("local-owner",{commandId:cmd(),title:"同一镜头多次采用"}).conversation.id;
+    const refs=[0,1].map(()=>mediaRevision(runtime,cid,assets.clipA,"video/mp4",1200));
+    assert.notEqual(refs[0]!.artifactId,refs[1]!.artifactId);
+    const result=await drive(runtime,await acceptIntent(runtime,cid,orderedIntent(refs)));assert.equal(result.state,"succeeded");
+    const zip=path.join(assets.directory,"duplicate-bytes.zip");await pipeline(await runtime.service.editingArchive("local-owner",result.id,"fcpxml"),createWriteStream(zip));
+    const checked=await promisify(execFile)("unzip",["-Z1",zip]);assert.equal(checked.stdout.split("\n").filter(name=>name.includes("/media/")).length,1);
+    const projection=await promisify(execFile)("unzip",["-p",zip,"Frame.fcpxmld/Frame-timeline.json"]);
+    const {visual}=JSON.parse(projection.stdout);assert.equal(visual.length,2);assert.equal(visual[0].media,visual[1].media);assert.ok(visual[1].at>0);
+  }finally{await runtime.close();await rm(assets.directory,{recursive:true,force:true});}
 });
 
 // —— T6-04：有声输入的两种声音方案（ordered 省略 audioMode=整条去原声；narrated=旁白替换原声） ——
@@ -1749,6 +1761,12 @@ it("DGR-07 准确五源及raw成员校验，跨会话原字节读回再交付不
     const selected = { sourceVideo: entry.video, source: raw[0]! };
     const message = (selection: typeof selected) => ({ commandId: cmd(), text: "只读这个素材", target: null, skillId: null,
       proposalRef: null, mode: "new" as const, steerRequestId: null, librarySelections: [selection] });
+    const textOnly = new AgentService({ db: runtime.database, host: runtime.host, hub: runtime.service.hub(),
+      registry: runtime.registry, clock: staticClock, catalog: () => ({}), models: [FAUX_TEXT_ENTRY],
+      defaultTextBinding: () => FAUX_TEXT_ENTRY.binding!, skills: () => [], displayName: "测试" });
+    assert.throws(() => textOnly.sendMessage(scope.ownerId, other.id, message(selected)),
+      (error: unknown) => error instanceof AgentError && error.code === "CAPABILITY_UNAVAILABLE");
+    assert.equal(runtime.service.snapshot(scope.ownerId, other.id).messages.items.length, 0);
     assert.throws(() => runtime.service.sendMessage(scope.ownerId, other.id, message({ ...selected, source: { ...selected.source, inputIndex: 1 } })), /实际采用/);
     const unusedFile = path.join(directory, "unused.mp4");
     await makeClip(unusedFile, "red", 24, 1);
@@ -1890,5 +1908,56 @@ it("DGR-03 正式批次 native 视频在前、工程图片在后仍须真实认�
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0);
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_snapshots").get() as { n: number }).n, 0);
     assert.deepEqual(runtime.service.snapshot(scope.ownerId, scope.conversationId).works.find(entry => entry.id === work.id)!.reviewGroups, []);
+  } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+it("ISS-13 固定随机种子的 50 组毫秒配音分别通过真实旁白与混音合成", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-fps-"));
+  const runtime = await buildLocalRuntime(directory);
+  try {
+    const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "毫秒时长帧率验收" }).conversation;
+    const source = path.join(directory, "shot.mp4"), speech = path.join(directory, "voice.mp3");
+    await makeClip(source, "blue", 24, 0.75);
+    const clip = mediaRevision(runtime, conversation.id, readFileSync(source), "video/mp4", (await probeVideoFile(source)).durationMs);
+    await makeClip(source, "blue", 24, 1.3);
+    const mixClip = mediaRevision(runtime, conversation.id, readFileSync(source), "video/mp4", (await probeVideoFile(source)).durationMs);
+    let state = 20261122;
+    const durations = new Set<number>();
+    while (durations.size < 50) {
+      state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+      durations.add(251 + 2 * Math.floor((state / 2 ** 32) * 455));
+    }
+    const averages: number[] = [];
+    for (const duration of durations) {
+      await makeMp3(speech, duration / 1000, 24000);
+      const voice = mediaRevision(runtime, conversation.id, readFileSync(speech), "audio/mpeg", (await probeAudioFile(speech)).durationMs,
+        { text: "样本旁白", voice: "zh-CN-XiaoxiaoNeural", rate: "+0%", granularity: "none", boundaries: [] });
+      for (const mode of ["narrated_concat", "mixed_concat"] as const) {
+        const intent = narratedIntent([mode === "mixed_concat" ? mixClip : clip], voice);
+        if (mode === "mixed_concat") {
+          intent.operations[0] = renderOp(intent.operations[0]!.inputs, {
+            assembly: mode, format: "mp4", width: 1280, height: 720, fps: 24, segmentIds: ["shot"],
+            segments: [{ kind: "video", inputSlot: 0, startMs: 0, durationMs: 1300, originalGain: 0 }],
+            narration: { inputSlot: 1, timelineStartMs: 0, gain: 1 },
+          });
+        }
+        const result = await drive(runtime, await acceptIntent(runtime, conversation.id, intent));
+        assert.equal(result.state, "succeeded", JSON.stringify({ duration, mode, run: result }));
+        const facts = await probeVideoFile(await outputFileOf(runtime, result.id));
+        assert.equal(facts.hasAudio, true);
+        assert.equal(isMatchingFrameRate(facts, 24), true);
+        averages.push(facts.frameRate!);
+      }
+    }
+    const wrong: number[] = [];
+    for (const rate of [15,30]) {
+      await makeClip(source, "blue", rate, 0.75);
+      const facts = await probeVideoFile(source);
+      assert.equal(facts.nominalFrameRate, rate);
+      assert.equal(isMatchingFrameRate(facts, 24), false);
+      wrong.push(rate);
+    }
+    t.diagnostic(JSON.stringify({ seed: 20261122, samplesMs: [...durations], renders: averages.length,
+      minAvg: Math.min(...averages), maxAvg: Math.max(...averages), mismatchesRejected: wrong }));
   } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
 });

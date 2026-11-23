@@ -1,13 +1,17 @@
+import { buildVisualNormalizeFilter } from "./visual-normalize.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { subtitleAss, subtitleText, type CutParameters } from "./subtitle-track.js";
+import { renderedCues } from "./subtitle-service.js";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { withAttemptFiles } from "./media-port-support.js";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
 import type { CodeProjectParameters, CreativeProjectContent, ExecutionInput, ExecutionObservation, MediaContent, RecoveryQuery } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import type { CreativeRunner } from "./creative-runner.js";
-import { assertCreativeWriteFits, codeProjectInputPath } from "./creative-runner.js";
+import { assertCreativeFileFits, codeProjectInputPath } from "./creative-runner.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
 import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
 import {
@@ -16,6 +20,11 @@ import {
 } from "./media-probe.js";
 import { digestOf, type AgentClock } from "./util.js";
 import type { RenderParameters } from "../../shared/agent/generated/contracts.js";
+
+export function isMatchingFrameRate(facts: Pick<VideoFileFacts, "nominalFrameRate" | "frameRate">, target: number): boolean {
+  return facts.nominalFrameRate !== null && Math.abs(facts.nominalFrameRate - target) < 0.05
+    && facts.frameRate !== null && Math.abs(facts.frameRate - target) <= 0.5;
+}
 
 // 真实本地 ordered_concat：受控 argv 调 FFmpeg，按输入原顺序机械归一为冻结输出规格。
 // submit 在后台异步等待子进程退出（占用 worker 本地并发名额）；先原子落盘再写效果收据。
@@ -71,7 +80,11 @@ export class LocalRenderPort implements MediaExecutionPort {
     /** code_project 执行所需的隔离创作环境；缺省时该类操作如实失败。 */
     private readonly creative?: CreativeRunner) {}
 
-  async submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
+  submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
+    return withAttemptFiles(this.db, this.options.workRoot, input.attemptId, () => this.render(input, permit, signal));
+  }
+
+  private async render(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
     consumeSubmitPermit(permit, input.attemptId);
     const run = runRow(this.db, input.runId);
     if (input.operation.kind !== "render") throw new Error("本地端口只接受 render 操作。");
@@ -104,7 +117,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const temporary = path.join(attemptDir, "output.part");
     const finalFile = path.join(attemptDir, "output.mp4");
     const filter = ordered
-      .map((_, index) => `[${index}:v]setpts=PTS-STARTPTS,scale=${parameters.width}:${parameters.height},fps=${parameters.fps},setsar=1[v${index}]`)
+      .map((_, index) => buildVisualNormalizeFilter(`${index}:v`, `v${index}`, "setpts=PTS-STARTPTS", parameters,
+        parameters.visualStyles?.find(style => style.inputSlot === index)))
       .concat([`${ordered.map((_, index) => `[v${index}]`).join("")}concat=n=${ordered.length}:v=1:a=0[out]`]);
     if (preserveAudio) {
       // 每段声音对齐自己的画面：短音轨补静音、长音轨裁齐；不能独立 concat 后让下一镜声音提前。
@@ -120,8 +134,8 @@ export class LocalRenderPort implements MediaExecutionPort {
       ...ordered.map(file => ["-i", file.path]).flat(),
       "-filter_complex", filter.join(";"), "-map", "[out]",
       ...(preserveAudio ? ["-map", "[aout]", "-c:a", "aac", "-ar", "32000", "-ac", "1"] : ["-an"]),
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-f", "mp4", temporary];
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-movflags", "+faststart", "-f", "mp4", temporary];
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
     const outcome = await this.runFfmpeg(input.attemptId, args, signal);
     if (outcome.kind !== "completed") {
@@ -133,7 +147,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     catch (error) {
       return this.terminal(input.attemptId, "failed", `拼接输出不可读：${error instanceof Error ? error.message : String(error)}`);
     }
-    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || outputFacts.frameRate !== parameters.fps || outputFacts.hasAudio !== preserveAudio) {
+    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || !isMatchingFrameRate(outputFacts, parameters.fps) || outputFacts.hasAudio !== preserveAudio) {
       return this.terminal(input.attemptId, "failed",
         `拼接输出规格不符（${outputFacts.width}x${outputFacts.height}${outputFacts.hasAudio ? " 含声音轨" : " 无声音轨"}，要求 ${parameters.width}x${parameters.height}${preserveAudio ? " 保留原声" : " 无声"}）。`);
     }
@@ -144,16 +158,14 @@ export class LocalRenderPort implements MediaExecutionPort {
       return this.terminal(input.attemptId, "failed",
         `拼接输出时长 ${outputFacts.durationMs} ms 与输入总和 ${expectedMs} ms 不符。`);
     }
-    renameSync(temporary, finalFile);
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
+    await rename(temporary, finalFile);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
-  // §10 narrated_concat：画面按冻结顺序连接（保比例 pad 到 1280×720，原声一律丢弃），
+  // §10 narrated_concat：画面按冻结顺序连接（按冻结画幅适配，原声一律丢弃），
   // 旁白从 0 播到尾不变速；成片=max(画面总时长,旁白时长)——画面短则停留尾帧，旁白短则补静音。
   private async submitNarrated(input: ExecutionInput, run: ReturnType<typeof runRow>,
     parameters: Extract<RenderParameters, { assembly: "narrated_concat" }>, signal?: AbortSignal): Promise<ExecutionObservation> {
@@ -191,7 +203,8 @@ export class LocalRenderPort implements MediaExecutionPort {
     const videoPadSeconds = Math.max(0, (targetMs - videoTotalMs) / 1000);
     // 画面：保比例缩放并 pad（不拉伸竖画面），连接后按需停留尾帧；旁白：统一 32kHz 单声道并按需补静音。
     const filter = ordered
-      .map((_, index) => `[${index}:v]scale=${parameters.width}:${parameters.height}:force_original_aspect_ratio=decrease,pad=${parameters.width}:${parameters.height}:(ow-iw)/2:(oh-ih)/2,fps=${parameters.fps},setsar=1[v${index}]`)
+      .map((_, index) => buildVisualNormalizeFilter(`${index}:v`, `v${index}`, "setpts=PTS-STARTPTS", parameters,
+        parameters.visualStyles?.find(style => style.inputSlot === parameters.videoInputSlots[index])))
       .concat([
         `${ordered.map((_, index) => `[v${index}]`).join("")}concat=n=${ordered.length}:v=1:a=0[vcat]`,
         `[vcat]tpad=stop_mode=clone:stop_duration=${videoPadSeconds}[vout]`,
@@ -203,9 +216,9 @@ export class LocalRenderPort implements MediaExecutionPort {
     const args = ["-y", "-hide_banner", "-loglevel", "error",
       ...ordered.map(file => ["-i", file.path]).flat(), "-i", narration!.path,
       "-filter_complex", filter, "-map", "[vout]", "-map", "[aout]",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "32000", "-ac", "1",
+      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "aac", "-ar", "32000", "-ac", "1",
       "-movflags", "+faststart", "-t", String(targetSeconds), "-f", "mp4", temporary];
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
     const outcome = await this.runFfmpeg(input.attemptId, args, signal);
     if (outcome.kind !== "completed") {
@@ -217,7 +230,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     catch (error) {
       return this.terminal(input.attemptId, "failed", `有声拼接输出不可读：${error instanceof Error ? error.message : String(error)}`);
     }
-    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || outputFacts.frameRate !== parameters.fps || !outputFacts.hasAudio) {
+    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || !isMatchingFrameRate(outputFacts, parameters.fps) || !outputFacts.hasAudio) {
       return this.terminal(input.attemptId, "failed",
         `有声拼接输出规格不符（${outputFacts.width}x${outputFacts.height}${outputFacts.hasAudio ? "" : " 无声音轨"}，要求 ${parameters.width}x${parameters.height} 含旁白音轨）。`);
     }
@@ -226,17 +239,32 @@ export class LocalRenderPort implements MediaExecutionPort {
       return this.terminal(input.attemptId, "failed",
         `有声拼接输出时长 ${outputFacts.durationMs} ms 与画面/旁白上限 ${targetMs} ms 不符。`);
     }
-    renameSync(temporary, finalFile);
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
+    await rename(temporary, finalFile);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
   // S3-04 timed_narrated_concat：按冻结 segments 顺序裁切视频/停留图片，统一为冻结规格后连接；
   // 原声一律丢弃，旁白从 0 播放并按需补静音；成片时长取 segments.durationMs 之和。
   // 旁白实际长过画面总长时如实失败，不加速、不剪词、不延长画面。
+  private async writeCaptions(input:ExecutionInput,run:ReturnType<typeof runRow>,parameters:CutParameters,args:string[],inputCount:number,dir:string) {
+    if(!parameters.subtitles) return;
+    const slots=new Map(input.resolvedInputs.map(f=>[f.slot,f.blobId]));
+    const {style,cues}=renderedCues(this.db,{ownerId:run.owner_id,conversationId:run.conversation_id},run.work_id,parameters,slots);
+    const filter=args.indexOf("-filter_complex");
+    if(parameters.subtitles.mode==="burn_in"){
+      await writeFile(path.join(dir,"track.ass"),subtitleAss(cues,style,parameters.width,parameters.height),"utf8");
+      args[filter+1]+=";[vout]ass=filename=track.ass[vsub]";
+      args[args.indexOf("[vout]",filter+2)]="[vsub]";
+    } else {
+      if(!cues.length) throw new Error("剪辑范围内没有可封装的字幕。");
+      await writeFile(path.join(dir,"track.srt"),subtitleText(cues,"srt"),"utf8");
+      args.splice(filter,0,"-f","srt","-i","track.srt");
+      args.splice(args.indexOf("-c:v"),0,"-map",String(inputCount)+":s:0","-c:s","mov_text","-metadata:s:s:0","title=Frame");
+    }
+  }
+
   private async submitTimed(input: ExecutionInput, run: ReturnType<typeof runRow>,
     parameters: Extract<RenderParameters, { assembly: "timed_narrated_concat" }>, signal?: AbortSignal): Promise<ExecutionObservation> {
     const files = new Map<number, { index: number; path: string; kind: "video" | "image"; facts?: VideoFileFacts }>();
@@ -267,7 +295,7 @@ export class LocalRenderPort implements MediaExecutionPort {
         }
         // 静帧按片段时长循环，来源原声不存在，无需额外丢弃。
         files.set(resolved.slot, { index, path: filePath, kind: "image" });
-        inputArgs.push(["-loop", "1", "-i", filePath]);
+        inputArgs.push(["-loop", "1", "-framerate", String(parameters.fps), "-i", filePath]);
       } else {
         let facts: VideoFileFacts;
         try { facts = await probeVideoFile(filePath, this.options.ffprobePath); }
@@ -295,7 +323,7 @@ export class LocalRenderPort implements MediaExecutionPort {
       const trim = segment.kind === "video"
         ? `trim=start=${(segment.startMs / 1000).toFixed(3)}:duration=${(segment.durationMs / 1000).toFixed(3)},setpts=PTS-STARTPTS`
         : `trim=duration=${(segment.durationMs / 1000).toFixed(3)},setpts=PTS-STARTPTS`;
-      segmentFilters.push(`[${file.index}:v]${trim},scale=${parameters.width}:${parameters.height}:force_original_aspect_ratio=decrease,pad=${parameters.width}:${parameters.height}:(ow-iw)/2:(oh-ih)/2,fps=${parameters.fps},setsar=1[s${order}]`);
+      segmentFilters.push(buildVisualNormalizeFilter(`${file.index}:v`, `s${order}`, trim, parameters, segment));
     });
     const targetSeconds = targetMs / 1000;
     const filter = segmentFilters.concat([
@@ -308,11 +336,12 @@ export class LocalRenderPort implements MediaExecutionPort {
     const args = ["-y", "-hide_banner", "-loglevel", "error",
       ...inputArgs.flat(),
       "-filter_complex", filter, "-map", "[vout]", "-map", "[aout]",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "32000", "-ac", "1",
+      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "aac", "-ar", "32000", "-ac", "1",
       "-movflags", "+faststart", "-t", String(targetSeconds), "-f", "mp4", temporary];
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
-    const outcome = await this.runFfmpeg(input.attemptId, args, signal);
+    await this.writeCaptions(input,run,parameters,args,inputArgs.length,attemptDir);
+    const outcome = await this.runFfmpeg(input.attemptId, args, signal,attemptDir);
     if (outcome.kind !== "completed") {
       return this.terminal(input.attemptId, outcome.kind === "terminated" ? "cancelled" : "failed", outcome.detail ?? "本地渲染进程未成功结束。");
     }
@@ -321,7 +350,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     catch (error) {
       return this.terminal(input.attemptId, "failed", `剪辑输出不可读：${error instanceof Error ? error.message : String(error)}`);
     }
-    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || outputFacts.frameRate !== parameters.fps || !outputFacts.hasAudio) {
+    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || !isMatchingFrameRate(outputFacts, parameters.fps) || !outputFacts.hasAudio) {
       return this.terminal(input.attemptId, "failed",
         `剪辑输出规格不符（${outputFacts.width}x${outputFacts.height}${outputFacts.hasAudio ? "" : " 无旁白音轨"}，要求 ${parameters.width}x${parameters.height} 含旁白音轨）。`);
     }
@@ -330,12 +359,10 @@ export class LocalRenderPort implements MediaExecutionPort {
       return this.terminal(input.attemptId, "failed",
         `剪辑输出时长 ${outputFacts.durationMs} ms 与片段总长 ${targetMs} ms 不符。`);
     }
-    renameSync(temporary, finalFile);
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
+    await rename(temporary, finalFile);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
@@ -367,7 +394,7 @@ export class LocalRenderPort implements MediaExecutionPort {
             role = "图片片段";
             await probeImageFile(filePath, signal);
             files.set(resolved.slot, { index });
-            inputArgs.push(["-loop", "1", "-i", filePath]);
+            inputArgs.push(["-loop", "1", "-framerate", String(parameters.fps), "-i", filePath]);
           } else {
             role = "视频片段";
             files.set(resolved.slot, { index, facts: await probeVideoFile(filePath, this.options.ffprobePath, signal) });
@@ -399,7 +426,7 @@ export class LocalRenderPort implements MediaExecutionPort {
       }
       const seconds = segment.durationMs / 1000;
       const trim = segment.kind === "video" ? `trim=start=${segment.startMs / 1000}:duration=${seconds}` : `trim=duration=${seconds}`;
-      filter.push(`[${file.index}:v]${trim},setpts=PTS-STARTPTS,scale=${parameters.width}:${parameters.height}:force_original_aspect_ratio=decrease,pad=${parameters.width}:${parameters.height}:(ow-iw)/2:(oh-ih)/2,fps=${parameters.fps},setsar=1[v${order}]`);
+      filter.push(buildVisualNormalizeFilter(`${file.index}:v`, `v${order}`, `${trim},setpts=PTS-STARTPTS`, parameters, segment));
       filter.push(segment.kind === "video" && file.facts?.hasAudio
         ? `[${file.index}:a]atrim=start=${segment.startMs / 1000}:duration=${seconds},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${segment.originalGain ?? 1},apad=whole_dur=${seconds},atrim=duration=${seconds}[a${order}]`
         : `anullsrc=r=48000:cl=stereo:d=${seconds},aformat=sample_fmts=fltp:channel_layouts=stereo[a${order}]`);
@@ -441,11 +468,12 @@ export class LocalRenderPort implements MediaExecutionPort {
     const finalFile = path.join(attemptDir, "output.mp4");
     const args = ["-y", "-hide_banner", "-loglevel", "error", ...inputArgs.flat(),
       "-filter_complex", filter.join(";"), "-map", "[vout]", "-map", "[aout]",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+      "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "aac", "-ar", "48000", "-ac", "2",
       "-movflags", "+faststart", "-t", String(targetSeconds), "-f", "mp4", temporary];
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
-    const outcome = await this.runFfmpeg(input.attemptId, args, signal);
+    await this.writeCaptions(input,run,parameters,args,inputArgs.length,attemptDir);
+    const outcome = await this.runFfmpeg(input.attemptId, args, signal,attemptDir);
     if (outcome.kind !== "completed") {
       return this.terminal(input.attemptId, outcome.kind === "terminated" ? "cancelled" : "failed", outcome.detail ?? "本地渲染进程未成功结束。");
     }
@@ -454,19 +482,17 @@ export class LocalRenderPort implements MediaExecutionPort {
     catch (error) {
       return this.terminal(input.attemptId, "failed", `混音输出不可读：${error instanceof Error ? error.message : String(error)}`);
     }
-    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || outputFacts.frameRate !== parameters.fps || !outputFacts.hasAudio) {
-      return this.terminal(input.attemptId, "failed", "混音输出规格不符，要求 1280x720 / 24fps / 含声音轨。");
+    if (outputFacts.width !== parameters.width || outputFacts.height !== parameters.height || !isMatchingFrameRate(outputFacts, parameters.fps) || !outputFacts.hasAudio) {
+      return this.terminal(input.attemptId, "failed", `混音输出规格不符，要求 ${parameters.width}×${parameters.height} / ${parameters.fps}fps / 含声音轨。`);
     }
     const toleranceMs = Math.ceil(((parameters.segments.length + 1) * 1000) / parameters.fps) + 40;
     if (Math.abs(outputFacts.durationMs - targetMs) > toleranceMs) {
       return this.terminal(input.attemptId, "failed", `混音输出时长 ${outputFacts.durationMs} ms 与片段总长 ${targetMs} ms 不符。`);
     }
-    renameSync(temporary, finalFile);
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
+    await rename(temporary, finalFile);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "video/mp4", outputFacts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(input.attemptId, blob.id, blob.digest);
   }
 
@@ -481,9 +507,9 @@ export class LocalRenderPort implements MediaExecutionPort {
       .get(parameters.projectRevision.artifactId, parameters.projectRevision.revisionId) as { content_json: string } | undefined;
     if (!revision) return this.terminal(input.attemptId, "failed", "冻结工程修订不存在，无法执行。");
     const content = JSON.parse(revision.content_json) as CreativeProjectContent;
-    const workspace = { conversationId: run.conversation_id, workId: run.work_id, executionId: `${run.id}:${input.operationId}` };
+    const workspace = { conversationId: run.conversation_id, workId: run.work_id, executionId: `${run.id}:${input.operationId}`, scope: "execution" as const };
     const attemptDir = path.join(this.options.workRoot, input.attemptId);
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
     // 执行边界核对封存镜像身份：工程冻结时的 runtimeImage 必须与宿主当前固定镜像一致，
     // 不默认 tag 不变、不自动换镜像；不匹配即如实失败。
@@ -492,49 +518,49 @@ export class LocalRenderPort implements MediaExecutionPort {
       return this.terminal(input.attemptId, "failed",
         `工程封存于执行镜像 ${content.runtimeImage}，当前宿主是 ${image}；环境不匹配，本工程不能在此宿主执行。`);
     }
-    let output: Buffer;
+    const temporary = path.join(attemptDir, "output.part");
+    const finalFile = path.join(attemptDir, codeProjectOutputFile(parameters));
     let executionTail = Buffer.alloc(0);
     let stage = "恢复工程";
     try {
       for (const file of content.files) {
         stage = `恢复文件 ${file.relativePath}`;
         const blob = this.blobs.get(run.owner_id, file.blobId);
-        assertCreativeWriteFits(file.relativePath, blob.size_bytes, `操作「${input.operationId}」冻结文件「${file.relativePath}」`);
-        await this.creative.writeFile(workspace, file.relativePath, readFileSync(this.blobs.filePath(blob.digest)));
+        assertCreativeFileFits(file.relativePath, blob.size_bytes, `操作「${input.operationId}」冻结文件「${file.relativePath}」`);
+        await this.creative.transferFile(workspace, "import_file", file.relativePath, this.blobs.filePath(blob.digest), this.blobs.transferRoot);
       }
-      for (const resolved of input.resolvedInputs) {
+      const inputs = input.resolvedInputs.map(resolved => {
         stage = `输入落位（slot=${resolved.slot}）`;
         const blob = this.blobs.get(run.owner_id, resolved.blobId);
         const file = codeProjectInputPath(resolved.slot, blob.mime_type as MediaContent["mimeType"]);
-        assertCreativeWriteFits(file, blob.size_bytes, `操作「${input.operationId}」输入槽位 ${resolved.slot}：`);
-        await this.creative.writeFile(workspace, file, readFileSync(this.blobs.filePath(blob.digest)));
-      }
+        assertCreativeFileFits(file, blob.size_bytes, `操作「${input.operationId}」输入槽位 ${resolved.slot}：`);
+        this.blobs.verify(blob);
+        return { alias: path.basename(file), file: this.blobs.filePath(blob.digest) };
+      });
+      if (inputs.length) await this.creative.prepareInputs(workspace, inputs, this.blobs.transferRoot);
       // 冻结工程的 entrypoint 是执行权威：argv 逐项直传进程，不经 shell 重新解释。
       stage = "执行入口";
       const execution = await this.creative.executeArgv(workspace, content.entrypoint.argv,
-        { timeout: Math.ceil((this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000), ...(signal ? { signal } : {}),
+        { timeout: Math.ceil((this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1000), inputAliases: inputs.map(input => input.alias), ...(signal ? { signal } : {}),
           // 宿主已合流 stdout/stderr；只留本次执行尾部供 read_run 展开，不新增日志协议。
           onData: chunk => { executionTail = Buffer.concat([executionTail, chunk]).subarray(-8192); } });
       if (execution.exitCode !== 0) {
         return this.terminal(input.attemptId, "failed", `工程入口命令未成功结束（exit=${execution.exitCode ?? "null"}），未生成成品。${executionTail.length ? `\n执行输出（末尾）：\n${executionTail.toString("utf8").trim()}` : ""}`);
       }
       stage = `读取声明输出 ${parameters.outputPath}`;
-      output = await this.creative.readFile(workspace, parameters.outputPath);
+      await this.creative.transferFile(workspace, "export_file", parameters.outputPath, temporary, this.blobs.transferRoot);
     } catch (error) {
       if (signal?.aborted) return this.terminal(input.attemptId, "cancelled", "本地渲染已停止。");
       return this.terminal(input.attemptId, "failed", `代码工程${stage}失败：${error instanceof Error ? error.message : String(error)}；当前无法确认输出，尚未交付。${executionTail.length ? `\n执行输出（末尾）：\n${executionTail.toString("utf8").trim()}` : ""}`);
-    }
-    // 成品先按声明媒体类型校验，再原子落盘与登记；规格不符如实失败。
-    const temporary = path.join(attemptDir, "output.part");
-    const finalFile = path.join(attemptDir, codeProjectOutputFile(parameters));
-    writeFileSync(temporary, output);
+    } finally { await this.creative.destroyWorkspace(workspace, this.blobs.transferRoot); }
+    // 导出完成后已可归还执行卷。最终文件保留到成品收据写入。
     let verified: { mimeType: MediaContent["mimeType"]; durationMs: number | null };
     try { verified = await this.verifyCodeProjectOutput(parameters, temporary); }
     catch (error) {
       return this.terminal(input.attemptId, "failed", `代码工程输出不可用：${error instanceof Error ? error.message : String(error)}`);
     }
-    renameSync(temporary, finalFile);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, output, verified.mimeType, verified.durationMs);
+    await rename(temporary, finalFile);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, verified.mimeType, verified.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), input.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
     return this.succeeded(input.attemptId, blob.id, blob.digest, verified.mimeType);
@@ -560,7 +586,7 @@ export class LocalRenderPort implements MediaExecutionPort {
     }
     const facts = await probeVideoFile(file, this.options.ffprobePath);
     if (facts.mimeType !== "video/mp4") throw new Error("输出不是 MP4 视频。");
-    if (facts.width !== parameters.width || facts.height !== parameters.height || facts.frameRate !== parameters.fps) {
+    if (facts.width !== parameters.width || facts.height !== parameters.height || !isMatchingFrameRate(facts, parameters.fps)) {
       throw new Error(`输出规格 ${facts.width}x${facts.height}@${facts.frameRate ?? "?"}fps 与声明 ${parameters.width}x${parameters.height}@${parameters.fps}fps 不符。`);
     }
     return { mimeType: "video/mp4", durationMs: facts.durationMs };
@@ -573,7 +599,11 @@ export class LocalRenderPort implements MediaExecutionPort {
     return spec.kind === "render" && spec.parameters?.assembly === "code_project" ? spec.parameters : null;
   }
 
-  async query(query: RecoveryQuery): Promise<ExecutionObservation> {
+  query(query: RecoveryQuery): Promise<ExecutionObservation> {
+    return withAttemptFiles(this.db, this.options.workRoot, query.attemptId, () => this.recover(query));
+  }
+
+  private async recover(query: RecoveryQuery): Promise<ExecutionObservation> {
     const run = runRow(this.db, query.runId);
     const receipt = attemptOutput(this.db, query.attemptId);
     if (receipt?.blob_id && receipt.digest) {
@@ -596,11 +626,9 @@ export class LocalRenderPort implements MediaExecutionPort {
       // 成品尚不可读：稳定 unknown，保留本地占用，不自动重新渲染。
       return this.stableUnknown(query.attemptId, "本地执行没有退出证据；保留本地执行占用，不会重新渲染或重新提交。");
     }
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, "video/mp4", facts.durationMs);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "video/mp4", facts.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), query.attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(query.attemptId, blob.id, blob.digest);
   }
 
@@ -615,11 +643,9 @@ export class LocalRenderPort implements MediaExecutionPort {
       }
       throw error;
     }
-    const blob = await this.blobs.persistFromFile(run.owner_id, run.conversation_id, finalFile, verified.mimeType, verified.durationMs);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, verified.mimeType, verified.durationMs);
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId,
       { blobId: blob.id, digest: blob.digest, exitKind: "completed" }))();
-    // 回执落库后才归还尝试目录的源文件：此前中断，恢复仍能从原位读到同一份数据。
-    this.blobs.release(finalFile);
     return this.succeeded(attemptId, blob.id, blob.digest, verified.mimeType);
   }
 
@@ -643,8 +669,8 @@ export class LocalRenderPort implements MediaExecutionPort {
 
   // —— 内部 ——
 
-  private async runFfmpeg(attemptId: string, args: string[], signal?: AbortSignal): Promise<{ kind: "completed" } | { kind: "failed" | "terminated"; detail?: string }> {
-    const child = spawn(this.options.ffmpegPath ?? "ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+  private async runFfmpeg(attemptId: string, args: string[], signal?: AbortSignal,cwd?: string): Promise<{ kind: "completed" } | { kind: "failed" | "terminated"; detail?: string }> {
+    const child = spawn(this.options.ffmpegPath ?? "ffmpeg", args, { cwd,stdio: ["ignore", "ignore", "pipe"] });
     const stop = () => { child.kill("SIGTERM"); };
     signal?.addEventListener("abort", stop, { once: true });
     let stderr = "";

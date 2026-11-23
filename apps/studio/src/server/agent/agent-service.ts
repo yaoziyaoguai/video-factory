@@ -1,17 +1,29 @@
-import { readProviderConnections, saveProviderConnection, listAvailableProviderModels } from "./provider-connections.js";
+import { frozenArchive } from "./export-bundle.js";
+import { exportTimeline } from "./edit-timeline.js";
+import { StudioAccountsStore } from "./studio-accounts.js";
+import {createSubtitle,editSubtitles,renderedCues,validateSubtitleCommand} from "./subtitle-service.js";
+import {subtitleText} from "./subtitle-track.js";
+import {frozenEdit,readTimeline,remixIntent} from "./remix.js";
+import type {CreateSubtitleTrack,SaveSubtitleRevision,RemixCommand,LocalCreationReceipt} from "../../shared/agent/generated/contracts.js";
+import { videoImageSlots } from "./video-image-inputs.js";
+import type { Multipart } from "@fastify/multipart";
+import type { ProductionBlobs } from "./production-blobs.js";
+import { uploadConversationMedia, resolveUploads } from "./conversation-uploads.js";
+import type { MediaRetention } from "./media-retention.js";
+import { readProviderConnections, saveProviderConnection, listAvailableProviderModels, probeProviderConnection } from "./provider-connections.js";
 import type {
   AcceptProposal, ArtifactHead, ArtifactRevision, Bootstrap, CancelRun, Conversation, ConversationPage,
   ContentSource, CreateConversation, FeedbackInput, FeedbackReceipt, LibrarySelection, LibraryVideo, LibraryVideoPage, Message,
   MessageInput, MessagePage, MessageReferences, ModelBinding, Proposal, ProposalPage, RenameConversation,
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
   PrepareProposal, ProposalRef, SaveUserProfile, SaveUserProfileReceipt, UserProfile, Work, MaterialBatch, WorkPage,
-  FreeServiceSettings, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
+  FreeServiceSettings, FreeServiceSettingsDirectory, SaveFreeServiceSettingsReceipt, ImportedSettings, ProductionSpec,
   CreationBinding, ReviewApprovalHistoryPage, ReviewApprovalHistoryItem,
 } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
 import { type EventHub, insertEvent, maxEventSeq, readEventsAfter, toBusinessEventPayload } from "./event-log.js";
-import { decodeEventCursor, decodeListCursor, encodeEventCursor, encodeListCursor } from "./paging.js";
+import { decodeEventCursor, decodeListCursor, decodePhasedPos, encodeEventCursor, encodeListCursor, encodePhasedPos } from "./paging.js";
 import { validatorFor } from "./validate.js";
 import { canonicalJson, newAgentId, type AgentClock } from "./util.js";
 import {
@@ -24,13 +36,13 @@ import {
 import {
   feedbackNote, getArtifactRow, getProposalRow, getRevisionRow, insertRevision, listArtifactRows, listProposalRows,
   maxArtifactSeq, maxProposalSeq, rowToArtifactHead, rowToArtifactRevision, rowToProposal, productionAudioFacts,
-  applyPrepareProposal, requirePaidProduction, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
+  bindReviewedVideoImages, applyPrepareProposal, requirePaidProduction, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import { probeRenderInputs } from "./media-probe.js";
-import { getWorkRow, listWorkPageRows, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, withStandaloneApproval, workInFlight, workProjection } from "./creative-work.js";
+import { getWorkRow, listWorkPageRows, listWorkRows, parseCreationState, recordReviewConfirmation, requireWork, withStandaloneApproval, withStandaloneApprovals, workInFlight, workProjection } from "./creative-work.js";
 import { adoptPreview } from "./preview-adoption.js";
-import { listMaterialBatches, readMaterialBatch as readMaterialBatchRow } from "./material-store.js";
+import { openCandidateVideo, listMaterialBatches, readMaterialBatch as readMaterialBatchRow } from "./material-store.js";
 import { ConversationRunnerRegistry, recoverInterruptedRequests } from "./executor.js";
 import type { PiRuntimeHost } from "./pi-runtime.js";
 import type { SkillPackages } from "./skill-packages.js";
@@ -38,11 +50,11 @@ import type { CrashPointHook } from "./pi-tools.js";
 import type { ProductionService } from "./production-service.js";
 import { readUserProfile, saveUserProfile as saveUserProfileRow } from "./text-model-settings.js";
 import {
-  freeServiceIdOf, readFreeServiceSettings, saveKeyedServiceSettings, saveKeylessServiceSettings, saveNewsNowServiceSettings,
-  saveEdgeTtsServiceSettings,
+  freeServiceIdOf, readFreeServiceSettings, readFreeServiceSettingsDirectory, saveKeyedServiceSettings, saveKeylessServiceSettings,
+  saveNewsNowServiceSettings, saveEdgeTtsServiceSettings,
 } from "./free-service-settings.js";
-import type { SaveEdgeTtsSettings, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings } from "../../shared/agent/generated/contracts.js";
-import { toRun, runSegments, type RunRow } from "./production-store.js";
+import type { CleanupStorage, FrameHealth, SaveEdgeTtsSettings, SaveKeylessServiceSettings, SaveNewsNowSettings, SavePexelsSettings } from "../../shared/agent/generated/contracts.js";
+import { runRow, toRun, runSegments, type RunRow } from "./production-store.js";
 import { getScopedRunRow } from "./production-index.js";
 import { retainedVideoMaterials } from "./library-materials.js";
 
@@ -60,6 +72,7 @@ export function isExactConfirmation(text: string): boolean {
 }
 
 export interface AgentServiceOptions {
+  blobs?: ProductionBlobs;
   importedSettings?: ImportedSettings;
   providerConnections?: boolean;
   db: AgentDatabase;
@@ -77,6 +90,10 @@ export interface AgentServiceOptions {
   textModels?: () => Bootstrap["models"];
   /** 当前媒体目录条目；Bootstrap 合并静态与动态部分。 */
   mediaModels?: () => Bootstrap["models"];
+  retention?: MediaRetention;
+  stockFetch?: typeof fetch;
+  refreshMediaModels?: () => void;
+  runnerReachable?: () => Promise<boolean>;
   skills: () => Bootstrap["skills"];
   skillPackages?: SkillPackages;
   displayName: string;
@@ -85,11 +102,35 @@ export interface AgentServiceOptions {
 }
 
 export class AgentService {
+  readonly accounts:StudioAccountsStore;
   private sweepTimer: NodeJS.Timeout | null = null;
   private readonly crashPoint: CrashPointHook;
 
   constructor(private readonly options: AgentServiceOptions) {
+    this.accounts=new StudioAccountsStore(options.db,options.clock);
     this.crashPoint = options.crashPoint ?? (() => {});
+  }
+
+  async health(): Promise<FrameHealth> {
+    const db = this.options.db;
+    let database: FrameHealth["readiness"]["database"] = "unavailable";
+    if (db.open) {
+      const timeout = db.pragma("busy_timeout", { simple: true }) as number;
+      db.pragma("busy_timeout=0");
+      try {
+        // 只检验能否取得写锁，事务内没有 SQL 写操作。
+        db.transaction(() => {}).immediate();
+        database = "ready";
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (!code?.startsWith("SQLITE_")) throw error;
+        if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) database = "busy";
+      } finally { db.pragma(`busy_timeout=${timeout}`); }
+    }
+    const creativeRunner = this.options.runnerReachable ? (await this.options.runnerReachable() ? "ready" : "unavailable") : "not_configured";
+    return { status: database === "ready" && creativeRunner !== "unavailable" ? "ok" : "degraded",
+      liveness: "ok", product: "frame", runtime: "pi", readiness: { database, creativeRunner },
+      ...(process.env.RELEASE_SHA ? { release: process.env.RELEASE_SHA } : {}) };
   }
 
   // —— Bootstrap ——
@@ -175,6 +216,7 @@ export class AgentService {
   saveProviderConnection(ownerId: string, input: unknown) {
     if (!this.options.providerConnections) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口未启用供应商连接设置。");
     const result = saveProviderConnection(this.options.db, this.options.clock, ownerId, input);
+    this.options.refreshMediaModels?.();
     for (const id of result.changedConversations) this.options.hub.notifyCommitted(id);
     return result.receipt;
   }
@@ -182,6 +224,11 @@ export class AgentService {
   listAvailableProviderModels(connectionId: string) {
     if (!this.options.providerConnections) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口未启用供应商连接设置。");
     return listAvailableProviderModels(this.options.db, connectionId);
+  }
+
+  probeProviderConnection(connectionId: string) {
+    if (!this.options.providerConnections) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口未启用供应商连接设置。");
+    return probeProviderConnection(this.options.db, connectionId);
   }
 
   readImportedSettings(ownerId: string): ImportedSettings {
@@ -197,6 +244,11 @@ export class AgentService {
     return readFreeServiceSettings(this.options.db, freeServiceIdOf(serviceId));
   }
 
+  readFreeServiceSettingsDirectory(ownerId: string): FreeServiceSettingsDirectory {
+    void ownerId;
+    return readFreeServiceSettingsDirectory(this.options.db);
+  }
+
   saveFreeServiceSettings(ownerId: string, serviceId: string, input: unknown): SaveFreeServiceSettingsReceipt {
     const id = freeServiceIdOf(serviceId);
     if (id === "newsnow") return saveNewsNowServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveNewsNowSettings);
@@ -205,6 +257,18 @@ export class AgentService {
       return saveKeyedServiceSettings(this.options.db, this.options.clock, ownerId, id, input as SavePexelsSettings);
     }
     return saveKeylessServiceSettings(this.options.db, this.options.clock, ownerId, id, input as SaveKeylessServiceSettings);
+  }
+
+  storageUsage(ownerId: string) {
+    if (!this.options.retention) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口没有媒体存储。");
+    return this.options.retention.usage(ownerId);
+  }
+
+  cleanupStorage(ownerId: string, input: CleanupStorage) {
+    const verdict = validatorFor("CleanupStorage")(input);
+    if (!verdict.ok) throw new AgentError("INVALID_INPUT", verdict.message);
+    if (!this.options.retention) throw new AgentError("CAPABILITY_UNAVAILABLE", "当前入口没有媒体存储。");
+    return this.options.retention.sweepUnpinnedDraftBlobs(ownerId, input);
   }
 
   // —— 用户资料 ——
@@ -274,6 +338,10 @@ export class AgentService {
 
   // —— 快照与列表 ——
 
+  readConversation(ownerId: string, conversationId: string): Conversation {
+    return rowToConversation(requireConversation(this.options.db, ownerId, conversationId));
+  }
+
   snapshot(ownerId: string, conversationId: string): Snapshot {
     return this.options.db.transaction(() => {
       const conversation = rowToConversation(requireConversation(this.options.db, ownerId, conversationId));
@@ -297,6 +365,10 @@ export class AgentService {
   }
 
   // 批次详情与 Pi read_material_batch 共用同一只读内核；不让当前消息分页截断历史候选。
+  previewMaterialVideo(ownerId: string, batchId: string, candidateId: string, signal: AbortSignal) {
+    return openCandidateVideo(this.options.db, ownerId, batchId, candidateId, signal, this.options.stockFetch);
+  }
+
   readMaterialBatch(ownerId: string, batchId: string): MaterialBatch {
     const batch = readMaterialBatchRow(this.options.db, ownerId, batchId);
     if (!batch) throw new AgentError("NOT_FOUND", "没有找到这个素材批次。");
@@ -412,16 +484,18 @@ export class AgentService {
   // 新表行都晚于旧表行（迁移时新表为空），流序为新表在前；游标把阶段编进 p（src*2^32+pos）。
   listLibraryVideos(ownerId: string, cursor: string | undefined, limit: number | undefined): LibraryVideoPage {
     const pageSize = boundedPageSize(limit);
-    const beforePos = cursor === undefined ? undefined : decodeListCursor(cursor, ownerId, "library").p;
-    const phase = beforePos === undefined ? undefined : Math.floor(beforePos / 2 ** 32);
-    const newPos = beforePos === undefined ? null : phase === 1 ? 0 : beforePos;
-    const legacyPos = phase === 1 ? beforePos : null;
+    const before = cursor === undefined ? null : decodePhasedPos(decodeListCursor(cursor, ownerId, "library").p);
+    const newPos = before === null ? null : before.phase === 0 ? before.rowId : 0;
+    const legacyPos = before?.phase === 1 ? before.rowId : null;
     const db = this.options.db;
     const fetched = db.prepare(`
       SELECT * FROM (
         SELECT 0 AS src, rowid AS pos, conversation_id, work_id, subject_json, source_id, created_at
         FROM work_review_confirmations
         WHERE owner_id = ? AND subject_scope = 'work_item' AND action = 'finalize_video'
+          AND NOT EXISTS (SELECT 1 FROM work_stage_confirmations s WHERE s.owner_id = work_review_confirmations.owner_id
+            AND s.action = 'finalize_video'
+            AND json_extract(s.subject_json, '$.revisionId') = json_extract(work_review_confirmations.subject_json, '$.revisionId'))
           AND rowid = (SELECT MIN(f2.rowid) FROM work_review_confirmations f2
                        WHERE f2.owner_id = work_review_confirmations.owner_id AND f2.action = 'finalize_video'
                          AND json_extract(f2.subject_json, '$.revisionId') = json_extract(work_review_confirmations.subject_json, '$.revisionId'))
@@ -451,7 +525,7 @@ export class AgentService {
     return {
       items,
       nextCursor: fetched.length > pageSize
-        ? encodeListCursor({ v: 1, c: ownerId, k: "library", p: fetched[pageSize - 1]!.src * 2 ** 32 + fetched[pageSize - 1]!.pos, w: 0 })
+        ? encodeListCursor({ v: 1, c: ownerId, k: "library", p: encodePhasedPos(fetched[pageSize - 1]!.src, fetched[pageSize - 1]!.pos), w: 0 })
         : null,
     };
   }
@@ -520,10 +594,10 @@ export class AgentService {
         const content = projectRevision ? JSON.parse(projectRevision.content_json) as { format?: string; files?: { relativePath: string; blobId: string }[] } : null;
         if (content?.format !== "project") continue;
         for (const file of content.files ?? []) {
-          const blob = db.prepare("SELECT mime_type FROM production_blobs WHERE id=? AND owner_id=?")
-            .get(file.blobId, ownerId) as { mime_type: string } | undefined;
+          const blob = db.prepare("SELECT mime_type, size_bytes FROM production_blobs WHERE id=? AND owner_id=?")
+            .get(file.blobId, ownerId) as { mime_type: string; size_bytes: number } | undefined;
           if (blob) projectFiles.push({ project: { artifactId: projectRef.artifactId, revisionId: projectRef.revisionId },
-            relativePath: file.relativePath, mimeType: blob.mime_type });
+            relativePath: file.relativePath, mimeType: blob.mime_type, blobId: file.blobId, sizeBytes: blob.size_bytes });
         }
       }
     }
@@ -546,7 +620,7 @@ export class AgentService {
     const rows = fetched.slice(0, pageSize);
     const watermark = cursor === undefined ? maxEventSeq(this.options.db, conversationId) : decodeListCursor(cursor, conversationId, "artifacts").w;
     return {
-      items: rows.map(row => withStandaloneApproval(this.options.db, rowToArtifactHead(row))),
+      items: withStandaloneApprovals(this.options.db, rows.map(rowToArtifactHead)),
       nextCursor: pageCursor(fetched, pageSize, { v: 1, c: conversationId, k: "artifacts", w: watermark }),
       watermark: encodeEventCursor(conversationId, watermark),
     };
@@ -729,11 +803,15 @@ export class AgentService {
       const requestId = newAgentId("req");
       const messageId = newAgentId("msg");
       // 物化只读原修订/工程清单建立当前会话新副本，不写原会话 artifact head（§6）。
+      const uploads = input.uploads?.length ? resolveUploads(this.options.db, ownerId, conversationId, input.uploads) : [];
+      if ((input.librarySelections?.length ?? 0) + uploads.length > 24) throw new AgentError("INVALID_INPUT", "每条消息最多携带 24 份素材。");
+      references.artifacts.push(...uploads.map(upload => upload.source));
       if (libraryPlan) references.artifacts.push(...this.materializeLibrarySelections(ownerId, conversationId, now, requestId, libraryPlan));
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId,
         role: "user", kind: "chat", state: "queued", text: input.text, target: input.target,
         createdSeq: nextSeq(this.options.db, "messages", conversationId), references,
+        ...(uploads.length ? { uploads } : {}),
         ...(input.librarySelections?.length ? { librarySelections: input.librarySelections } : {}),
         reviewContext: input.reviewContext ?? null,
       });
@@ -766,6 +844,8 @@ export class AgentService {
     const db = this.options.db;
     const items: { kind: string; title: string; content: ArtifactRevision["content"] }[] = [];
     for (const selection of selections) {
+      const videoArtifact = getArtifactRow(db, ownerId, selection.sourceVideo.artifactId);
+      if (!videoArtifact) throw new AgentError("NOT_FOUND", "没有找到这件作品库视频。");
       const confirmed = db.prepare(`
         SELECT 1 AS ok FROM (
           SELECT subject_json FROM work_review_confirmations WHERE owner_id=? AND action='finalize_video'
@@ -774,9 +854,8 @@ export class AgentService {
         ) WHERE json_extract(subject_json,'$.revisionId')=? AND json_extract(subject_json,'$.artifactId')=?`)
         .get(ownerId, ownerId, selection.sourceVideo.revisionId, selection.sourceVideo.artifactId);
       if (!confirmed) throw new AgentError("INVALID_INPUT", "所选视频还没有定稿入库，不能作为作品库来源。");
-      const videoArtifact = getArtifactRow(db, ownerId, selection.sourceVideo.artifactId);
       const videoRevision = getRevisionRow(db, selection.sourceVideo.artifactId, selection.sourceVideo.revisionId);
-      if (!videoArtifact || !videoRevision || videoArtifact.kind !== "video") {
+      if (!videoRevision || videoArtifact.kind !== "video") {
         throw new AgentError("INVALID_INPUT", "作品库来源不是有效的视频修订。");
       }
       const retained = retainedVideoMaterials(db, ownerId, selection.sourceVideo);
@@ -794,7 +873,8 @@ export class AgentService {
           && item.source.runId === picked.runId && item.source.operationId === picked.operationId
           && item.source.inputIndex === picked.inputIndex && item.source.blobId === picked.blobId);
         if (!material) throw new AgentError("INVALID_INPUT", "所选原始素材不在这版成片实际采用的输入里。");
-        const blob = this.options.production!.blobs.get(ownerId, picked.blobId);
+        if (!this.options.production) throw new AgentError("CAPABILITY_UNAVAILABLE", "制作服务未装配，暂时无法引用原始素材。");
+        const blob = this.options.production.blobs.get(ownerId, picked.blobId);
         if (blob.mime_type !== "video/mp4" && blob.mime_type !== "video/webm" && blob.mime_type !== "image/png"
           && blob.mime_type !== "image/jpeg" && blob.mime_type !== "audio/mpeg" && blob.mime_type !== "audio/wav") {
           throw new AgentError("INVALID_INPUT", "所选原始素材不是可复用媒体。");
@@ -847,7 +927,9 @@ export class AgentService {
       ).run(artifactId, conversationId, ownerId, item.title, item.kind,
         nextSeq(this.options.db, "artifacts", conversationId), now, now);
       const revision = insertRevision(this.options.db, now, getArtifactRow(this.options.db, ownerId, artifactId)!, null,
-        { title: item.title, kind: item.kind, content: item.content }, requestId);
+        { title: item.title, kind: item.kind, content: item.content }, requestId, "library_import");
+      insertEvent(this.options.db, now, { ownerId, conversationId, kind: "artifact.delivered", entityId: artifactId,
+        entityVersion: revision.revision_number, notification: "new_output" });
       refs.push({ artifactId, revisionId: revision.id });
     }
     return refs;
@@ -855,7 +937,7 @@ export class AgentService {
 
   private async sendSteer(ownerId: string, conversationId: string, input: MessageInput): Promise<{ status: 202; receipt: RequestReceipt }> {
     const requestId = input.steerRequestId!;
-    const request = this.options.db.transaction(() => {
+    const requireRunning = () => {
       const row = getRequestRow(this.options.db, ownerId, requestId);
       if (!row || row.conversation_id !== conversationId) throw new AgentError("NOT_FOUND", "没有找到这个请求。");
       if (row.state !== "running" || row.stop_requested) throw new AgentError("REQUEST_NOT_RUNNING", "请求已结束，steer 必须绑定正在运行的回合。");
@@ -863,15 +945,17 @@ export class AgentService {
         throw new AgentError("TARGET_SCOPE_MISMATCH", "steer 不能改变请求绑定的目标。");
       }
       return row;
-    })();
+    };
+    requireRunning();
 
     const runner = this.options.registry.for(conversationId);
     let receipt: RequestReceipt | undefined;
-    let messageId: string | undefined;
-    const applied = await runner.steerActive(requestId, input.text, () => {
+    const key = { ownerId, operation: "sendMessage", targetId: conversationId, commandId: input.commandId };
+    const applied = await runner.steerActive(requestId, input.commandId, input.text, () => {
       receipt = this.options.db.transaction(() => {
+        const request = requireRunning();
         const now = this.options.clock();
-        messageId = newAgentId("msg");
+        const messageId = newAgentId("msg");
         insertMessage(this.options.db, now, {
           id: messageId, conversationId, ownerId, requestId,
           role: "user", kind: "chat", state: "running", text: input.text, target: input.target,
@@ -879,22 +963,17 @@ export class AgentService {
           reviewContext: input.reviewContext ?? null,
         });
         const result = { ...requestReceipt(request, false), messageId };
-        storeCommandReceipt(this.options.db, now, {
-          ownerId, operation: "sendMessage", targetId: conversationId, commandId: input.commandId,
-        }, input, result);
+        storeCommandReceipt(this.options.db, now, key, input, result);
         return result;
-      })();
-      return messageId!;
+      }).immediate();
+      return receipt.messageId;
+    }, () => {
+      const replay = checkCommandReceipt<RequestReceipt>(this.options.db, key, input);
+      if (replay.kind !== "replay") return false;
+      receipt = { ...replay.receipt, replayed: true };
+      return true;
     });
     if (applied !== "applied" || !receipt) {
-      if (messageId) this.options.db.transaction(() => {
-        this.options.db.prepare("UPDATE messages SET state='failed', revision=revision+1 WHERE id=?").run(messageId!);
-        const changed = getMessageRow(this.options.db, ownerId, messageId!)!;
-        insertEvent(this.options.db, this.options.clock(), { conversationId, ownerId, kind: "message.changed", entityId: messageId!, entityVersion: changed.revision });
-        this.options.db.prepare("UPDATE command_receipts SET receipt_json=? WHERE owner_id=? AND operation='sendMessage' AND target_id=? AND command_id=?")
-          .run(JSON.stringify({ ...receipt!, state: "failed" }), ownerId, conversationId, input.commandId);
-      })();
-      this.options.hub.notifyCommitted(conversationId);
       throw new AgentError("REQUEST_NOT_RUNNING", "请求刚好已结束，干预未生效，请作为新消息发送。");
     }
     this.options.hub.notifyCommitted(conversationId);
@@ -951,7 +1030,15 @@ export class AgentService {
     const artifact = getArtifactRow(this.options.db, ownerId, artifactId);
     const revision = artifact ? getRevisionRow(this.options.db, artifactId, revisionId) : undefined;
     if (!artifact || !revision) throw new AgentError("NOT_FOUND", "没有找到这个产物修订。");
-    return rowToArtifactRevision(revision);
+    const view = rowToArtifactRevision(revision);
+    const ids = view.content.format === "project" ? view.content.files.map(file => file.blobId)
+      : (view.content.format === "markdown" || view.content.format === "subtitles") ? [] : [view.content.blobId];
+    if (ids.length) {
+      const archived = this.options.db.prepare("SELECT max(purged_at) FROM production_blobs WHERE owner_id=? AND id IN (SELECT value FROM json_each(?))")
+        .pluck().get(ownerId, JSON.stringify(ids)) as string | null;
+      if (archived) view.archivedAt = archived;
+    }
+    return view;
   }
 
   // —— 反馈 ——
@@ -1008,12 +1095,13 @@ export class AgentService {
     const prior = checkCommandReceipt<Proposal>(this.options.db, key, input);
     if (prior.kind === "replay") return { status: 201, proposal: prior.receipt, replayed: true };
     requirePaidProduction(input.spec);
+    const intent = bindReviewedVideoImages(this.options.db,{ownerId,conversationId},input.spec);
     // 付费前探测：真实 render 目录（任一 assembly 分支）要求已有输入文件可读（事务外执行）。
     let probes: Map<string, RenderFileProbe> | undefined;
-    if (this.options.catalog()[RENDER_CATALOG_KEY]?.probeRenderInputs || this.options.catalog()[NARRATED_CATALOG_KEY]?.probeRenderInputs
+    if (intent.operations.some(op => op.kind === "video" && videoImageSlots(op.parameters).length) || this.options.catalog()[RENDER_CATALOG_KEY]?.probeRenderInputs || this.options.catalog()[NARRATED_CATALOG_KEY]?.probeRenderInputs
       || this.options.catalog()[TIMED_NARRATED_CATALOG_KEY]?.probeRenderInputs || this.options.catalog()["render:mixed_concat"]?.probeRenderInputs) {
       if (!this.options.production) throw new AgentError("CAPABILITY_UNAVAILABLE", "本地渲染能力未正确装配，不能准备这份提案。");
-      probes = await probeRenderInputs(this.options.db, this.options.production.blobs, { ownerId, conversationId }, input.spec);
+      probes = await probeRenderInputs(this.options.db, this.options.production.blobs, { ownerId, conversationId }, intent);
     }
     const result = this.options.db.transaction(() => {
       const replay = checkCommandReceipt<Proposal>(this.options.db, key, input);
@@ -1023,7 +1111,7 @@ export class AgentService {
       const now = this.options.clock(), requestId = newAgentId("req"), messageId = newAgentId("msg");
       const { proposal } = applyPrepareProposal(this.options.db, now, {
         ownerId, conversationId,
-      }, input.spec, this.options.catalog(), { requestId, messageId }, probes, input.replacesProposal);
+      }, intent, this.options.catalog(), { requestId, messageId }, probes, input.replacesProposal);
       insertMessage(this.options.db, now, {
         id: messageId, conversationId, ownerId, requestId,
         role: "system_notice", kind: "notice", state: "completed",
@@ -1062,6 +1150,74 @@ export class AgentService {
     throw new AgentError("CAPABILITY_UNAVAILABLE", "制作能力尚未接入，暂不能受理这份提案。");
   }
 
+  frozenArchive(owner:string,artifactId:string,revisionId:string,run?:string){
+    return frozenArchive(this.options.db,this.mediaService().blobs,owner,{artifactId,revisionId},run);
+  }
+  editingArchive(owner:string,runId:string,format:string,revisionId?:string){
+    return exportTimeline(this.options.db,this.mediaService().blobs,owner,runId,format,revisionId);
+  }
+  private mediaService() {
+    if(!this.options.production) throw new AgentError("CAPABILITY_UNAVAILABLE","媒体制作服务未装配。");
+    return this.options.production;
+  }
+
+  async createSubtitles(ownerId:string,workId:string,input:CreateSubtitleTrack){
+    const {db,clock,hub}=this.options;
+    const receipt=await createSubtitle(db,this.mediaService().blobs,clock,ownerId,workId,input);
+    hub.notifyCommitted(getWorkRow(db,ownerId,workId)!.conversation_id);
+    return receipt;
+  }
+
+  saveSubtitleRevision(ownerId:string,artifactId:string,input:SaveSubtitleRevision){
+    const artifact=getArtifactRow(this.options.db,ownerId,artifactId);
+    if(!artifact) throw new AgentError("NOT_FOUND","没有找到字幕稿。");
+    const receipt=editSubtitles(this.options.db,this.options.clock,artifact,input);
+    this.options.hub.notifyCommitted(artifact.conversation_id);
+    return receipt;
+  }
+
+  downloadSubtitles(ownerId:string,artifactId:string,revisionId:string,format:string){
+    if(format!=="srt" && format!=="vtt") throw new AgentError("INVALID_INPUT","请选择 SRT 或 WebVTT。");
+    const {db}=this.options, revision=this.readRevision(ownerId,artifactId,revisionId);
+    if(revision.content.format==="subtitles") return subtitleText(revision.content.cues,format);
+    const row=getRevisionRow(db,artifactId,revisionId)!;
+    if(revision.content.format!=="media" || !revision.content.subtitles || !row.run_id) throw new AgentError("NOT_FOUND","这一版没有字幕轨。");
+    const edit=frozenEdit(db,this.mediaService().blobs,ownerId,row.run_id,revisionId);
+    if(!edit) throw new AgentError("NOT_FOUND","无法读取字幕所用的剪辑版本。");
+    return subtitleText(renderedCues(db,edit.scope,edit.run.work_id,edit.parameters,edit.slots).cues,format);
+  }
+
+  remixTimeline(ownerId:string,runId:string,revisionId:string){return readTimeline(this.options.db,this.mediaService().blobs,ownerId,runId,revisionId);}
+
+  async remix(ownerId:string,runId:string,input:RemixCommand){
+    validateSubtitleCommand("RemixCommand",input);
+    const {db,clock,hub}=this.options,production=this.mediaService();
+    const key={ownerId,operation:"remixProposal",targetId:runId,commandId:input.commandId};
+    const prior=checkCommandReceipt<LocalCreationReceipt>(db,key,input);
+    if(prior.kind==="replay") return prior.receipt;
+    const edit=frozenEdit(db,production.blobs,ownerId,runId,input.baseRevisionId);
+    if(!edit) throw new AgentError("INVALID_INPUT","这版成片无法微调时间线。");
+    const intent=remixIntent(edit,input), conversationId=edit.scope.conversationId;
+    const probes=await probeRenderInputs(db,production.blobs,edit.scope,intent);
+    const receipt=db.transaction(()=>{
+      const replay=checkCommandReceipt<LocalCreationReceipt>(db,key,input);
+      if(replay.kind==="replay") return replay.receipt;
+      if(runRow(db,runId).revision!==input.expectedRevision) throw new AgentError("STALE_REVISION","原制作已变化。");
+      const now=clock(),requestId=newAgentId("req"),messageId=newAgentId("msg");
+      insertMessage(db,now,{id:messageId,conversationId,ownerId,requestId,role:"system_notice",kind:"notice",state:"completed",text:"已提交本地时间线微调。",target:null,createdSeq:nextSeq(db,"messages",conversationId),references:emptyReferences()});
+      insertQueuedRequest(db,now,{id:requestId,conversationId,ownerId,commandId:input.commandId,text:"",target:null,skillId:null,modelId:null,queueSeq:nextQueueSeq(db,conversationId),messageId});
+      db.prepare("UPDATE requests SET state='completed',delivery_closed=1 WHERE id=?").run(requestId);
+      const result=production.admitLocalRender(ownerId,conversationId,{requestId,messageId},intent,probes);
+      db.prepare("UPDATE production_runs SET remix_of_run_id=? WHERE id=?").run(runId,result.run.id);
+      result.run.remixOf=runId;
+      storeCommandReceipt(db,now,key,input,result);
+      touchConversation(db,now,conversationId);
+      return result;
+    })();
+    hub.notifyCommitted(conversationId);
+    return receipt;
+  }
+
   getRun(ownerId: string, runId: string) {
     if (this.options.production) return this.options.production.get(ownerId, runId);
     throw new AgentError("NOT_FOUND", "没有找到这个运行。");
@@ -1074,10 +1230,16 @@ export class AgentService {
     throw new AgentError("NOT_FOUND", "没有找到这个运行。");
   }
 
+  uploadMedia(ownerId: string, conversationId: string, parts: AsyncIterableIterator<Multipart>, signal: AbortSignal) {
+    if (!this.options.blobs) throw new AgentError("CAPABILITY_UNAVAILABLE", "本入口未配置素材存储。");
+    return uploadConversationMedia(this.options.db, this.options.blobs, this.options.clock, this.options.hub, ownerId, conversationId, parts, signal);
+  }
+
   readBlob(ownerId: string, blobId: string) {
-    if (this.options.production) {
-      const blob = this.options.production.blobs.get(ownerId, blobId);
-      return { ...blob, path: this.options.production.blobs.filePath(blob.digest) };
+    const blobs = this.options.blobs ?? this.options.production?.blobs;
+    if (blobs) {
+      const blob = blobs.get(ownerId, blobId);
+      return { ...blob, path: blobs.filePath(blob.digest) };
     }
     throw new AgentError("NOT_FOUND", "没有找到这个媒体对象。");
   }
@@ -1182,7 +1344,7 @@ function pageCursor(
 
 // 作品库投影行：确认表按 rowid（首次定稿位置）倒序去重后的最小行。
 interface LibraryConfirmationRow {
-  src: number;
+  src: 0 | 1;
   pos: number;
   conversation_id: string;
   work_id: string;

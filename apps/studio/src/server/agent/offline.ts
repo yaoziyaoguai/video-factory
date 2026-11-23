@@ -7,13 +7,15 @@ import type { FauxProviderHandle, FauxResponseStep } from "@earendil-works/pi-ai
 import { type AgentDatabase } from "./db.js";
 import { createAgentRuntime } from "./assembly.js";
 import type { ImportedSettings } from "../../shared/agent/generated/contracts.js";
-import { offlineScenarioFactory } from "./offline-scenario.js";
+import { offlineScenarioFactory, type DemoMediaAccess } from "./offline-scenario.js";
+import { seedDemoMedia, type DemoMediaSeeds } from "./offline-demo-media.js";
 import { PiRuntimeHost } from "./pi-runtime.js";
 import { type CrashPointHook } from "./pi-tools.js";
 import { AgentService } from "./agent-service.js";
 import { type AgentClock } from "./util.js";
 import { systemClock } from "./util.js";
 import { FauxMediaPort, type FauxMediaOptions } from "./faux-media.js";
+import type { ProductionBlobs } from "./production-blobs.js";
 import { initializeArkVideoSettings } from "./ark-video-settings.js";
 import type { ProductionService, ProductionCrashHook } from "./production-service.js";
 import type { ProductionWorker } from "./production-worker.js";
@@ -81,6 +83,7 @@ export interface OfflineAgentAssembly {
 }
 
 export async function assembleOfflineAgent(options: OfflineAgentOptions): Promise<OfflineAgentAssembly> {
+  let demoStore: { db: AgentDatabase; blobs: ProductionBlobs } | null = null;
   const runtime = await createAgentRuntime({
     dataDir: options.dataDir, skillsRoot: options.skillsRoot ?? defaultSkillsRoot,
     // 隔离装配同样启用连接设置：模型页走真实初始化/保存事务；文本执行仍用 Faux，不接真实供应商。
@@ -103,6 +106,8 @@ export async function assembleOfflineAgent(options: OfflineAgentOptions): Promis
       factory: (db, blobs) => {
         // 模型页保存事务只投影视频当前行（v11 后无旧图片/配音通道初始化）；执行仍走 Faux 端口。
         initializeArkVideoSettings(db, { clock: options.clock ?? systemClock });
+        // 演示口令的样片落库需要真实的 db 与 blobs；工厂在装配期即被调用，这里捕获供 onHostReady 使用。
+        demoStore = { db, blobs };
         return {
           port: new FauxMediaPort(options.dataDir, db, blobs, options.clock ?? systemClock,
             { ...options.media, fixtureRoot: path.join(studioRoot, "fixtures/agent") }),
@@ -120,7 +125,21 @@ export async function assembleOfflineAgent(options: OfflineAgentOptions): Promis
         host.faux.setResponses(options.fauxResponses);
       } else if (options.fauxScenario && host.faux) {
         // 场景工厂每次被消费前把自己补回队列（种子两份应对并发会话）。
-        const factory = offlineScenarioFactory({ selfAppend: () => host.faux?.appendResponses([factory]) });
+        // 演示口令的样片存取：plant 用媒体替身工厂捕获的 db/blobs 按会话落库并缓存；
+        // 装配顺序不保证工厂先于 onHostReady，未装媒体替身时 plant 如实返回 null。
+        const demoSeeds = new Map<string, DemoMediaSeeds>();
+        const demoMedia: DemoMediaAccess = {
+          seedsOf: conversationId => (conversationId ? demoSeeds.get(conversationId) ?? null : null),
+          plant: conversationId => {
+            const store = demoStore;
+            if (!store) return null;
+            const seeds = seedDemoMedia(store.db, store.blobs, options.clock ?? systemClock,
+              options.ownerId ?? "local-owner", conversationId, path.join(studioRoot, "src/client/agent/preview/assets"));
+            demoSeeds.set(conversationId, seeds);
+            return seeds;
+          },
+        };
+        const factory = offlineScenarioFactory({ selfAppend: () => host.faux?.appendResponses([factory]), demoMedia });
         host.faux.setResponses([factory, factory]);
       }
     },

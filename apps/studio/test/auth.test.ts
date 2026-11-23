@@ -40,7 +40,7 @@ describe("studio authentication", () => {
     assert.equal(await auth.authenticate("owner", "wrong-again", "127.0.0.1"), "rejected");
     assert.equal(await auth.authenticate("owner", "correct password", "127.0.0.1"), "limited");
     now += 1_001;
-    assert.equal(await auth.authenticate("owner", "correct password", "127.0.0.1"), "accepted");
+    assert.deepEqual(await auth.authenticate("owner", "correct password", "127.0.0.1"), { id: "owner", username: "owner", sessionVersion: 0 });
   });
 
   it("counts concurrent login attempts before async verification, keeping the per-window cap", async () => {
@@ -75,9 +75,9 @@ describe("studio authentication", () => {
     });
     const cookie = auth.createSessionCookie();
 
-    assert.equal(auth.authenticatedUsername(cookie), "owner");
+    assert.equal(auth.authenticatedAccount(cookie)?.username, "owner");
     now += 1_001;
-    assert.equal(auth.authenticatedUsername(cookie), undefined);
+    assert.equal(auth.authenticatedAccount(cookie)?.username, undefined);
   });
 
   it("revokes the session on logout; other sessions keep working", () => {
@@ -92,22 +92,22 @@ describe("studio authentication", () => {
     });
     const cookie = auth.createSessionCookie();
     const otherCookie = auth.createSessionCookie();
-    assert.equal(auth.authenticatedUsername(cookie), "owner");
+    assert.equal(auth.authenticatedAccount(cookie)?.username, "owner");
 
     // 登出吊销当前会话：同一签名 Cookie（含被复制的）立即失效，其他会话不受影响。
     auth.revokeSession(cookie);
-    assert.equal(auth.authenticatedUsername(cookie), undefined);
-    assert.equal(auth.authenticatedUsername(otherCookie), "owner");
+    assert.equal(auth.authenticatedAccount(cookie)?.username, undefined);
+    assert.equal(auth.authenticatedAccount(otherCookie)?.username, "owner");
 
     // 伪造/无关 Cookie 不影响吊销逻辑，也不产生副作用。
     auth.revokeSession(undefined);
     auth.revokeSession("vf_session=tampered.payload.sig");
-    assert.equal(auth.authenticatedUsername(otherCookie), "owner");
+    assert.equal(auth.authenticatedAccount(otherCookie)?.username, "owner");
 
     // 吊销记录随会话自然过期被清理：过期后再签发同名 nonce 不会被误伤（nonce 随机，此处验证清理不抛错且校验如常）。
     now += 3_600_001;
-    assert.equal(auth.authenticatedUsername(otherCookie), undefined);
+    assert.equal(auth.authenticatedAccount(otherCookie)?.username, undefined);
     const fresh = auth.createSessionCookie();
-    assert.equal(auth.authenticatedUsername(fresh), "owner");
+    assert.equal(auth.authenticatedAccount(fresh)?.username, "owner");
   });
 });

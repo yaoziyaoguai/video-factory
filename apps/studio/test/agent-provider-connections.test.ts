@@ -5,6 +5,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, test } from "node:test";
 import { MIGRATIONS, openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js";
+import { probeProviderConnection } from "../src/server/agent/provider-connections.js";
 import { initializeTextModelSettings, defaultTextBindingOf, readTextModelView, resolveTextBinding, textRegistrationOf } from "../src/server/agent/text-model-settings.js";
 import { initializeArkVideoSettings, readArkVideoCurrent, readLegacyArkConfig, resolveArkBinding } from "../src/server/agent/ark-video-settings.js";
 import { additionalMediaCatalog, additionalMediaModelViews, readAdditionalMediaCurrent, resolveAdditionalMediaBinding, resolveMinimaxSpeechBinding } from "../src/server/agent/additional-media-settings.js";
@@ -64,14 +65,17 @@ const wanConnection = (overrides: Partial<ProviderConnection> = {}): ProviderCon
   ...overrides,
 });
 
-test("O15 单一 OpenAI 连接：第二入口、OpenAI 视频与非 OpenAI 文本都在保存边界拒绝", () => {
+test("O15 单一 OpenAI 连接：拒绝第二入口与未适配的视频，兼容网关使用独立文本连接", () => {
   save(openai([{ ...text("sol"), isDefault: true }]));
   // 换 Key 是编辑该连接，不是第二个 OpenAI 连接。
   assert.throws(() => save({ ...openai([{ ...text("sol-2"), isDefault: true }]), id: "provider-openai-b", name: "另一个 OpenAI" }), /已存在 OpenAI 连接/);
   // OpenAI 连接不承载视频（Sora 已停用，视频保留原供应商）。
   assert.throws(() => save(openai([{ ...text("sol"), isDefault: true }, { ...text("sora"), kind: "video", contextWindowTokens: null, maxOutputTokens: null }])), /OpenAI 连接不承载视频/);
   // 连接保存时按当前的供应商与用途矩阵验收。
-  assert.throws(() => save({ ...openai([{ ...text("gw"), isDefault: true }]), protocol: "openai-chat-completions", baseUrl: "https://gateway.example.test/v1" }), /不能配置在此视频连接/);
+  save({ ...openai([text("gw", { isDefault: true })]), id: "provider-gw", protocol: "openai-chat-completions", baseUrl: "https://gateway.example.test/v1" });
+  const gateway = defaultTextBindingOf(db)!;
+  assert.equal(textRegistrationOf(db, gateway)?.protocol, "openai-completions");
+  assert.equal(textRegistrationOf(db, gateway)?.baseUrl, "https://gateway.example.test/v1");
   // 视频仍走原供应商连接（Ark），与 OpenAI 连接并存。
   save(arkVideo());
   const view = readProviderConnections(db);
@@ -216,7 +220,7 @@ test("OpenAI 目录同步：文本/图片/配音分类、Sora 退役、未知型
   await assert.rejects(listAvailableProviderModels(db, config.id, async () => Response.json({ result: [] })), /格式不受支持/);
 });
 
-test("非 OpenAI 目录只按视频分类：Seedance 命中、文本/向量不混入、lifecycle 退役", async () => {
+test("火山目录按实际任务区分文本与视频，排除向量并保留退役状态", async () => {
   const ark = arkVideo();
   save(ark);
   const result = await listAvailableProviderModels(db, ark.id, async () => Response.json({ data: [
@@ -234,7 +238,7 @@ test("非 OpenAI 目录只按视频分类：Seedance 命中、文本/向量不�
   assert.deepEqual(kinds.get("minimax-hailuo-08b-t2v"), ["video"]);
   assert.deepEqual(kinds.get("doubao-embedding-large"), []);
   assert.deepEqual(kinds.get("doubao-seedream-5-0-flash-260915"), ["image"]);
-  assert.deepEqual(kinds.get("some-chat-model"), [], "非 OpenAI 连接不再输出文本分类");
+  assert.deepEqual(kinds.get("some-chat-model"), ["text"], "厂商明确的 Chat 任务使用原生文本适配器");
 });
 
 test("视频冻结版本与启用状态沿用原语义：改 Key 生成未来版本，旧绑定解析原 Key", () => {
@@ -375,11 +379,14 @@ test("v11 迁移：旧通道退役、连接只留视频、退役协议不可执�
 
 test("M1 用途矩阵与跨供应商唯一当前：MiniMax 配音+视频、wan 仅视频、切换清旧行且切回可恢复", () => {
   const reason = (id: string) => readProviderConnections(db).modelStatuses.find(item => item.modelEntryId === id)!.unavailableReason;
-  // 保存边界矩阵：MiniMax 连接拒绝 text/image，wan 与历史协议连接拒绝一切非 video。
-  assert.throws(() => save(minimaxConnection({ models: [...minimaxConnection().models, text("mm-text", { modelId: "abab6.5s" })] })), /MiniMax 连接只承载配音与视频/);
-  assert.throws(() => save(minimaxConnection({ models: [...minimaxConnection().models, mediaModel("mm-image", "image", "any-image")] })), /MiniMax 连接只承载配音与视频/);
-  assert.throws(() => save(wanConnection({ models: [...wanConnection().models, mediaModel("wan-speech", "speech", "speech-2.8-turbo")] })), /不能配置在此视频连接/);
-  assert.throws(() => save(wanConnection({ models: [...wanConnection().models, text("wan-text")] })), /不能配置在此视频连接/);
+  // MiniMax 文本与媒体共用账户；万相仍只具有视频适配器。
+  save(minimaxConnection({ models: [...minimaxConnection().models, text("mm-text", { modelId: "MiniMax-M2", isDefault: true })] }));
+  const minimax = textRegistrationOf(db, defaultTextBindingOf(db)!)!;
+  assert.equal(minimax.protocol, "openai-completions");
+  assert.equal(minimax.baseUrl, "https://api.minimax.io/v1");
+  assert.throws(() => save(minimaxConnection({ models: [...minimaxConnection().models, mediaModel("mm-image", "image", "any-image")] })), /尚未接入该用途的执行适配器/);
+  assert.throws(() => save(wanConnection({ models: [...wanConnection().models, mediaModel("wan-speech", "speech", "speech-2.8-turbo")] })), /尚未接入该用途的执行适配器/);
+  assert.throws(() => save(wanConnection({ models: [...wanConnection().models, text("wan-text")] })), /尚未接入该用途的执行适配器/);
   // 已核实冻结集合内的 MiniMax/万相型号在对应主机上有 Key 即可执行（端口 M2 装配）。
   save(minimaxConnection());
   save(wanConnection());
@@ -684,4 +691,22 @@ test("F15 实际10/100/1000汉字报价：两输入形式同价，prepare/admit�
       assert.throws(() => service.accept("owner", old.id, { commandId: crypto.randomUUID(), proposalDigest: old.digest }), /模型配置或价格已变化/);
     }
   }
+});
+
+test("ISS-16 手动探活读取真实协议的账户目录；失败不修改已保存版本", async () => {
+  const connection: ProviderConnection = {...openai([]), protocol:"anthropic-messages",baseUrl:"https://api.anthropic.com"};
+  save(connection);
+  const before = readProviderConnections(db);
+  const receipt = await probeProviderConnection(db, connection.id, async (url, init) => {
+    assert.equal(String(url), "https://api.anthropic.com/v1/models?limit=1");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("x-api-key"), connection.apiKey);
+    assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    assert.equal(headers.get("authorization"), null);
+    return Response.json({data:[{id:"claude-private"}]});
+  });
+  assert.ok(Number.isFinite(Date.parse(receipt.checkedAt)));
+  await assert.rejects(probeProviderConnection(db, connection.id, async () => new Response(null,{status:401})), /401/);
+  await assert.rejects(probeProviderConnection(db, connection.id, async () => Response.json({data:{}})), /格式/);
+  assert.deepEqual(readProviderConnections(db), before);
 });

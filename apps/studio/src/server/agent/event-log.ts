@@ -1,4 +1,4 @@
-import type { AgentDatabase } from "./db.js";
+import { stmt, type AgentDatabase } from "./db.js";
 import { newAgentId } from "./util.js";
 
 export type BusinessEventKind = "message.changed" | "artifact.delivered" | "proposal.changed" | "run.changed" | "conversation.changed"
@@ -16,7 +16,7 @@ interface EventRow {
   created_at: string;
 }
 
-const insertStatement = (db: AgentDatabase) => db.prepare(
+const insertStatement = (db: AgentDatabase) => stmt(db,
   `INSERT INTO events(event_id, conversation_id, owner_id, kind, entity_id, entity_version, notification, created_at)
    VALUES (@event_id, @conversation_id, @owner_id, @kind, @entity_id, @entity_version, @notification, @created_at)`,
 );
@@ -48,19 +48,19 @@ export function insertEvent(db: AgentDatabase, now: string, draft: EventDraft): 
 }
 
 export function readEventsAfter(db: AgentDatabase, conversationId: string, afterSeq: number, limit: number): EventRow[] {
-  return db.prepare(
+  return stmt(db,
     `SELECT seq, event_id, conversation_id, owner_id, kind, entity_id, entity_version, notification, created_at
      FROM events WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
   ).all(conversationId, afterSeq, limit) as EventRow[];
 }
 
 export function minEventSeq(db: AgentDatabase, conversationId: string): number | null {
-  const row = db.prepare("SELECT MIN(seq) AS seq FROM events WHERE conversation_id = ?").get(conversationId) as { seq: number | null };
+  const row = stmt(db, "SELECT MIN(seq) AS seq FROM events WHERE conversation_id = ?").get(conversationId) as { seq: number | null };
   return row.seq;
 }
 
 export function maxEventSeq(db: AgentDatabase, conversationId: string): number {
-  const row = db.prepare("SELECT MAX(seq) AS seq FROM events WHERE conversation_id = ?").get(conversationId) as { seq: number | null };
+  const row = stmt(db, "SELECT MAX(seq) AS seq FROM events WHERE conversation_id = ?").get(conversationId) as { seq: number | null };
   return row.seq ?? 0;
 }
 

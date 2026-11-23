@@ -1,11 +1,13 @@
-import { closeSync, createWriteStream, fsyncSync, mkdirSync, openSync, readFileSync, renameSync } from "node:fs";
+import { StreamedVideoJson } from "./video-image-inputs.js";
+import { createWriteStream } from "node:fs";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import type { ExecutionObservation, OperationSpec } from "../../shared/agent/generated/contracts.js";
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
-import { recordAttemptOutput, runRow } from "./production-store.js";
+import { attemptOutput, completedUsage, recordAttemptOutput, runRow } from "./production-store.js";
 import { InvalidVideoFile, probeVideoFile, type VideoFileFacts } from "./media-probe.js";
 import { digestOf, type AgentClock } from "./util.js";
 
@@ -34,7 +36,7 @@ export async function providerRequestJson(method: "POST" | "GET", url: URL, apiK
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...(options.headers ?? {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(body instanceof StreamedVideoJson ? { body: body.stream(), duplex: "half" } : body ? { body: JSON.stringify(body) } : {}),
     });
     const text = await response.text();
     let parsed: unknown;
@@ -55,7 +57,7 @@ export const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 /** 确定性下载：先写 .part 再原子改名；带超时与字节上限，超限判非合规（完整事实，不是网络失败）。 */
 export async function downloadToFile(fetchImpl: typeof fetch, url: URL, attemptDir: string, finalFile: string,
   options: { downloadTimeoutMs?: number | undefined; maxDownloadBytes?: number | undefined } = {}): Promise<void> {
-  mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
+  await mkdir(attemptDir, { recursive: true, mode: 0o700 });
   const temporary = path.join(attemptDir, "download.part");
   const controller = new AbortController();
   const limit = options.maxDownloadBytes ?? DEFAULT_MAX_DOWNLOAD_BYTES;
@@ -73,15 +75,14 @@ export async function downloadToFile(fetchImpl: typeof fetch, url: URL, attemptD
       received += chunk.length;
       if (received > limit) controller.abort();
     });
-    await pipeline(capped, createWriteStream(temporary, { mode: 0o600 }));
-    const handle = openSync(temporary, "r+");
-    try { fsyncSync(handle); } finally { closeSync(handle); }
-    renameSync(temporary, finalFile);
+    await pipeline(capped, createWriteStream(temporary, { mode: 0o600, flush: true }));
+    await rename(temporary, finalFile);
   } catch (error) {
     if (received > limit) throw new NonCompliantOutput("文件超过下载大小上限。");
     throw error;
   } finally {
     clearTimeout(timer);
+    await rm(temporary, { force: true });
   }
 }
 
@@ -115,7 +116,7 @@ export class PortObservations {
     return {
       observationId: `obs-${digestOf({ attemptId, scope: this.scopeKey, state: "succeeded", blobId }).slice(0, 24)}`,
       attemptId, state: "succeeded", providerTaskId, blob: { id: blobId, digest, mimeType },
-      observedAt: this.stableTime(attemptId), message, billing: null,
+      observedAt: this.stableTime(attemptId), message, billing: null, ...completedUsage(this.db,attemptId),
     };
   }
 
@@ -149,7 +150,40 @@ export class PortObservations {
   }
 }
 
+// 崩溃恢复要能接管尚未记收据的完整成品。只有终态或成品收据允许删除整个尝试目录。
+async function releaseSettledAttempt(db: AgentDatabase, directory: string, attemptId: string): Promise<void> {
+  const receipt = attemptOutput(db, attemptId);
+  if (receipt?.blob_id || receipt?.exit_kind) await rm(directory, { recursive: true, force: true });
+}
+
+// 供应商 JSON 以 hex/base64 返回完整字符串；按编码单元分块解码，不再复制一整份媒体 Buffer。
+export function* decodedMediaChunks(encoded: string, encoding: "hex" | "base64"): Generator<Buffer> {
+  const step = 64 * 1024;
+  for (let offset = 0; offset < encoded.length; offset += step) yield Buffer.from(encoded.slice(offset, offset + step), encoding);
+}
+
+export async function withAttemptFiles<T>(db: AgentDatabase, workRoot: string, attemptId: string, action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  finally { await releaseSettledAttempt(db, path.join(workRoot, attemptId), attemptId); }
+}
+
+export async function sweepAttemptFiles(db: AgentDatabase, workRoot: string): Promise<void> {
+  let entries;
+  try { entries = await readdir(workRoot, { withFileTypes: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(workRoot, entry.name);
+    const state = db.prepare("SELECT state FROM production_attempts WHERE id=?").pluck().get(entry.name);
+    if (["succeeded", "failed", "cancelled"].includes(String(state)) ||
+      (state === undefined && (await stat(directory)).mtimeMs < Date.now() - 86400_000)) {
+      await rm(directory, { recursive: true, force: true });
+    } else await releaseSettledAttempt(db, directory, entry.name);
+  }
+}
+
 export interface SettleVideoParams {
+  usage?:import("../../shared/agent/generated/contracts.js").ProviderUsage;
   db: AgentDatabase;
   blobs: ProductionBlobs;
   observations: PortObservations;
@@ -182,9 +216,10 @@ export async function settleDownloadedVideo(params: SettleVideoParams): Promise<
     const reason = params.validate(facts, op);
     if (reason) return observations.nonCompliant(params.attemptId, params.providerTaskId, reason);
     const run = runRow(db, params.runId);
-    const blob = blobs.persist(run.owner_id, run.conversation_id, readFileSync(params.finalFile), "video/mp4", facts.durationMs);
+    const blob = await blobs.persistFromFileAsync(run.owner_id, run.conversation_id, params.finalFile, "video/mp4", facts.durationMs);
+    const usage={...params.usage,mediaDurationMs:facts.durationMs,width:facts.width,height:facts.height,resolution:op.parameters.resolution};
     db.transaction(() => recordAttemptOutput(db, observations.now(), params.attemptId,
-      { ...(params.providerTaskId ? { providerTaskId: params.providerTaskId } : {}), blobId: blob.id, digest: blob.digest }))();
+      { ...(params.providerTaskId ? { providerTaskId: params.providerTaskId } : {}), blobId: blob.id, digest: blob.digest,usage }))();
     return observations.deterministicSucceeded(params.attemptId, params.providerTaskId, blob.id, blob.digest);
   } catch (error) {
     if (error instanceof InvalidVideoFile || error instanceof NonCompliantOutput) {
@@ -198,7 +233,7 @@ export async function settleDownloadedVideo(params: SettleVideoParams): Promise<
       message: params.retryMessage,
       billing: null,
     };
-  }
+  } finally { await releaseSettledAttempt(db, params.attemptDir, params.attemptId); }
 }
 
 /** 时长容差：帧周期内视为与冻结秒数一致。 */

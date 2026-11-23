@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ const child = spawn(process.execPath, ["apps/studio/dist/server/server/main.js"]
   env: {
     ...process.env,
     STUDIO_DEV: "0",
+    FRAME_CREDENTIAL_SECRET: randomBytes(32).toString("base64"),
     STUDIO_HOST: "127.0.0.1",
     STUDIO_PORT: port,
     VIDEO_FACTORY_WORKSPACE: workspace, HOME: workspace, AGENT_UI_ORIGIN: "https://frame.example",
@@ -46,7 +48,7 @@ try {
   for (const route of ["/bootstrap", "/settings/model-connections"]) {
     assert.equal((await fetch(base + "/api/agent/v1" + route)).status, 401);
   }
-  const login = await fetch(base + "/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({username:"container-smoke",password:"isolated-smoke-only"})});
+  const login = await fetch(base + "/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json",Origin:"https://frame.example",Host:"frame.example","x-video-factory-request":"studio"}, body:JSON.stringify({username:"container-smoke",password:"isolated-smoke-only"})});
   assert.equal(login.status, 200);
   const cookie = login.headers.get("set-cookie").split(";")[0];
   const skills = await fetch(base + "/api/agent/v1/settings/skills", { headers: {cookie} });

@@ -1,6 +1,6 @@
 # Frame v1 的行为约定
 
-本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.46**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
+本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.59**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
 
 1. **会话、作品和版本分开。** 一个会话可容纳闲聊和多件作品。正式开始作品才建 work；选择素材、索要 Prompt、发布工程都不自动建作品或启动制作。`start_work` 的 title-only 调用保持原行为；用户明确开始视频并采用已有文稿时，可选 adoptContent:ContentSourceInput 引用准确已存在文本修订或消息。宿主核对归属和文本来源，以当前真实用户来源在同一事务创建 work、内容采用组/事项及该 work 的真实确认；不复制正文或创建文稿修订，不把独立稿 confirmationId 复用为 work 审批，也不自动制作。工具不能自报认可来源消息、身份或独立认可 ID。新 Work 只写有序 `reviewGroups`，每组有稳定 item 身份与准确 draft/approved。role 表示用途，媒体类型看 ArtifactHead.kind，不以标题猜类型。
 2. **认可精确到单项版本。** ReviewConfirmation / ToolConfirmReview 的旧 work 分支保持无 kind 的 workId/groupId/items/action 形状，显式列出 group、item 与 ContentSourceInput；不加整组版本锁阻止未变化单项。独立稿分支为 `kind=standalone_artifact, artifactId, revisionId, action=approve`，仅认可无 work 的独立 script；不伪造 work，不创建提案或运行。ArtifactHead 的可选只读 standaloneApproval 保存真实 confirmationId、revisionId、approvedAt；改稿后可继续指向已认可旧版，读取旧修订沿用 read_artifact。只提交本次实际认可的项，空 items 不是“继续”。认可不改其他项，也不把新 draft 自动加入确认区；调整组成员、required 或建议内容要发布用户可见的后继组版本。
@@ -32,3 +32,29 @@ SSE `request.progress` 是不带业务游标的暂态真实进展：requestId、
 0.1.47 执行记录：原始用户请求消息的可选 execution 保存开始时间、结束时间和有界的最近真实进展；刷新与重启可读取，终态按消息 state 判断。SSE request.progress 仍不推进业务游标，终态清除的是活动流，不再丢弃消息上的执行记录。运行中未取得新帧时可用已保存的进展；终态中遗留 running 的步骤表示结束前未取得完成回执，不能显示成功。旧历史无记录时不编造。
 
 新完成回合的 execution 会附带可选的 completionReason。自然完成、回合时限、工具调用上限分别记录为 finished、timeout、tool_limit。定位旧消息或刷新后沿此字段展示对应结果。历史记录缺值时展示本轮已结束。失败和停止继续按消息状态判断。
+
+0.1.48 在业务事务内保留修订创建与用户消息的先后次序。作品库选材和免费配音完成后发送现有的 `artifact.delivered`。事件历史裁剪后仍可认可此前的准确稿件。作品库游标可顺序翻完新旧定稿。
+
+0.1.49 的 Blob 读取按归属鉴权。媒体原件支持私有的 24 小时不可变缓存、ETag 和字节范围；`?download=1` 下载原件。工程文件作为附件，脚本按纯文本返回。Blob 路由设置 `nosniff` 和 `default-src 'none'; sandbox`。一次性工程执行只接收本轮选中的输入文件，只读目录为 `/inputs`；原有相对路径仍可使用。
+
+0.1.50 中，Skill 的本地目录在 Pi 安装前核验，远程 Git 通过公共 HTTPS。Skill 可在 frontmatter 的 `metadata.frame.requires` 下提供 `bins` 和 `pythonModules` 字符串列表。工作台分别显示发现状态和实际沙箱的依赖检查结果。工作台登录、登出与业务写入共用已配置的页面 Origin 及 `x-video-factory-request: studio` 校验。登录与登出也校验公开入口的 Host。
+
+0.1.51 中，用户带入的选材列在用户消息下。助手消息只列本轮正式交付或制作输出。已失去运行窗口的 steer 返回 409 REQUEST_NOT_RUNNING，消息、事件与命令回执均不落库。
+
+0.1.52 增加当前用户的空间统计和过期媒体清理命令。定稿、已认可、在用媒体及有效制作输入会保留。已归档修订提供 archivedAt，下载返回 410 MEDIA_ARCHIVED。公开 /api/health 分别报告进程、数据库和创作宿主状态，供应商密钥仅在服务端执行边界解密。
+
+0.1.53 开放 Pi 原生 Anthropic Messages 与 OpenAI 兼容 Chat Completions。连接保存只持久化配置。手动检查才向已保存的目录地址发送认证读取。普通 SSE 事件按实体版本合并，读回失败和断流恢复可重新取得快照。
+
+0.1.54 的四种内置合成支持逐段画幅适配与静帧运动。准备阶段可省略成对宽高，按视觉来源继承，受理快照保存实际规格。工程文件可分段读取与单独下载；批次内视频的预览须验证所有者且不登记采用。
+
+0.1.55 上传命令以文件摘要和版本核对重放。素材修订保存探测事实与用户权利声明，图片可通过 Pi 原生图片输入随消息提交。视频生成按槽位冻结首尾帧或有序参考图。
+
+视频操作单独支持 31 个输入槽。Seedance 2.5 参考图最多 30 张，首尾帧采用首帧画幅，MiniMax H3 参考图最多 9 张，万相 3.0 最多 10 张。
+
+0.1.56 新增基于来源边界的字幕审阅、导出与同一审阅事项的零费用本地微调。
+
+0.1.57 新增冻结工程与非编时间线 ZIP、团队账号与预算，实际用量和逐笔对账事实。跨账号的作品库游标、来源视频和导出均返回 404 NOT_FOUND。
+
+0.1.58 新增成员启停、角色调整与密码重置。成员列表修订递增，修改携带原修订与命令 ID。停用、重置密码或更换角色使该成员的旧登录失效。创作者通过 `GET /profile/budget` 读取个人和共享空间的预算用量，可附带自己的会话 ID。预算日、月按工作空间时区切分，在途预留跨期占用。附件响应包含 `nosniff` 和私有禁缓存头。
+
+0.1.59 新增 `GET /settings/services` 目录快照：一条响应按固定顺序返回全部 15 项免费服务的当前配置，设置页挂载单次读取；单服务读取保留给重试与保存后回读。

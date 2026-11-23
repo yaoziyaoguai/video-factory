@@ -59,7 +59,7 @@ export function adoptPreview(
       VALUES(?,?,?,?,'video',?,NULL,0,?,?,?)`)
       .run(artifactId, scope.conversationId, scope.ownerId, title, work.id, nextSeq(db, "artifacts", scope.conversationId), now, now);
     const revision = insertRevision(db, now, getArtifactRow(db, scope.ownerId, artifactId)!, null,
-      { title, kind: "video", content }, message.request_id, binding);
+      { title, kind: "video", content }, message.request_id, "delivered", binding);
     const subject: ContentSource = { kind: "artifact_revision", artifactId, revisionId: revision.id, digest: revision.digest };
     state.groups.push({ id: target.groupId, title: "成片", revision: 1, nextIntent: null,
       items: [{ id: target.itemId, label: "成片", role: "video", required: true, draft: subject,

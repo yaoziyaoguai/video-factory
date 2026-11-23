@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.47",
+  "title": "Frame contract payloads 0.1.59",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -22,6 +22,24 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/EdgeTtsSettings"
         }
       ]
+    },
+    "FreeServiceSettingsDirectory": {
+      "type": "object",
+      "description": "全部免费服务（15 项）的当前配置快照；数组顺序固定为 pexels、pixabay、unsplash、coverr、wikimedia、nasa、met、cleveland、archive、freetouse、incompetech、douyin-music、tiktok-sounds、newsnow、edge-tts。单项形状与单服务读取一致，不含 Key 明文。",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FreeServiceSettings"
+          },
+          "minItems": 15,
+          "maxItems": 15
+        }
+      },
+      "required": [
+        "services"
+      ],
+      "additionalProperties": false
     },
     "Id": {
       "type": "string",
@@ -253,15 +271,7 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/Digest"
         },
         "mimeType": {
-          "type": "string",
-          "enum": [
-            "video/mp4",
-            "video/webm",
-            "image/png",
-            "image/jpeg",
-            "audio/mpeg",
-            "audio/wav"
-          ]
+          "$ref": "#/$defs/UploadMime"
         },
         "durationMs": {
           "anyOf": [
@@ -313,7 +323,15 @@ export const contractsSchema: Record<string, unknown> = {
       "type": "object",
       "properties": {
         "provider": {
-          "$ref": "#/$defs/MaterialProvider"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaterialProvider"
+            },
+            {
+              "type": "string",
+              "const": "user_upload"
+            }
+          ]
         },
         "assetId": {
           "type": "string",
@@ -350,9 +368,16 @@ export const contractsSchema: Record<string, unknown> = {
           ]
         },
         "licenseUrl": {
-          "type": "string",
-          "minLength": 8,
-          "maxLength": 2048
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "acquiredAt": {
           "$ref": "#/$defs/Time"
@@ -399,7 +424,35 @@ export const contractsSchema: Record<string, unknown> = {
         "licenseUrl",
         "acquiredAt"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provider": {
+                "type": "string",
+                "const": "user_upload"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "licenseUrl": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "licenseUrl": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 2048
+              }
+            }
+          }
+        }
+      ]
     },
     "MediaReferenceContent": {
       "type": "object",
@@ -675,6 +728,9 @@ export const contractsSchema: Record<string, unknown> = {
           "type": "string",
           "pattern": "^[+-]\\d{1,3}%$",
           "description": "语速，如 +10% 或 -5%；省略为 +0%。"
+        },
+        "workId": {
+          "$ref": "#/$defs/Id"
         }
       },
       "required": [
@@ -716,6 +772,9 @@ export const contractsSchema: Record<string, unknown> = {
         "rate": {
           "type": "string",
           "pattern": "^[+-]\\d{1,3}%$"
+        },
+        "subtitle": {
+          "$ref": "#/$defs/RevisionRef"
         }
       },
       "required": [
@@ -976,7 +1035,9 @@ export const contractsSchema: Record<string, unknown> = {
         "CURSOR_EXPIRED",
         "REQUEST_NOT_RUNNING",
         "TEMPORARILY_UNAVAILABLE",
-        "TARGET_SCOPE_MISMATCH"
+        "TARGET_SCOPE_MISMATCH",
+        "MEDIA_ARCHIVED",
+        "BUDGET_LIMIT_EXCEEDED"
       ]
     },
     "Error": {
@@ -1123,7 +1184,7 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "text": {
           "type": "string",
-          "minLength": 1,
+          "minLength": 0,
           "maxLength": 32000
         },
         "target": {
@@ -1200,6 +1261,15 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
+        },
+        "uploads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RevisionRef"
+          },
+          "minItems": 0,
+          "maxItems": 24,
+          "uniqueItems": true
         }
       },
       "required": [
@@ -1395,6 +1465,42 @@ export const contractsSchema: Record<string, unknown> = {
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "uploads": {
+                "type": "array",
+                "minItems": 1
+              }
+            },
+            "required": [
+              "uploads"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "type": "string",
+                "const": "new"
+              },
+              "proposalRef": {
+                "type": "null"
+              },
+              "reviewConfirmation": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32000
+              }
+            }
+          }
         }
       ]
     },
@@ -1509,6 +1615,14 @@ export const contractsSchema: Record<string, unknown> = {
             }
           ],
           "description": "该条原始用户请求的执行记录；旧消息未采集时为空或省略。"
+        },
+        "uploads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UploadAttachment"
+          },
+          "minItems": 0,
+          "maxItems": 24
         }
       },
       "required": [
@@ -1820,15 +1934,7 @@ export const contractsSchema: Record<string, unknown> = {
           "$ref": "#/$defs/Id"
         },
         "mimeType": {
-          "type": "string",
-          "enum": [
-            "video/mp4",
-            "video/webm",
-            "image/png",
-            "image/jpeg",
-            "audio/mpeg",
-            "audio/wav"
-          ]
+          "$ref": "#/$defs/UploadMime"
         },
         "durationMs": {
           "anyOf": [
@@ -1853,6 +1959,12 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "dub": {
           "$ref": "#/$defs/DubbedSpeechMeta"
+        },
+        "upload": {
+          "$ref": "#/$defs/UploadFacts"
+        },
+        "subtitles": {
+          "$ref": "#/$defs/RenderSubtitles"
         }
       },
       "required": [
@@ -1881,6 +1993,10 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "path": {
           "$ref": "#/$defs/RelativeProjectPath"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
@@ -1951,6 +2067,9 @@ export const contractsSchema: Record<string, unknown> = {
             },
             {
               "$ref": "#/$defs/FileContent"
+            },
+            {
+              "$ref": "#/$defs/SubtitleTrack"
             }
           ]
         },
@@ -1966,6 +2085,11 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
+        },
+        "archivedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "本修订引用的媒体已归档时返回。修订的文本、摘要、来源与审阅历史保留。"
         }
       },
       "required": [
@@ -2265,7 +2389,7 @@ export const contractsSchema: Record<string, unknown> = {
             "ready",
             "unavailable"
           ],
-          "description": "独立于发现 status；未知依赖为 unchecked，ready 必须有对应实际探测证据。"
+          "description": "按 SKILL.md 的 metadata.frame.requires 声明核验创作沙箱。bins 列出命令，pythonModules 列出 Python 顶层模块。无依赖声明为 unchecked，全部实测可用为 ready，否则在 runtimeMissing 展示缺失项。"
         },
         "runtimeMissing": {
           "type": "array",
@@ -2403,7 +2527,7 @@ export const contractsSchema: Record<string, unknown> = {
           "type": "string",
           "minLength": 1,
           "maxLength": 2048,
-          "description": "Pi 原生包来源；本机目录是服务端目录。服务端拒绝 URL 内嵌凭据，SDK 负责解析来源与 manifest。"
+          "description": "服务器本机包目录、npm 注册表包名或公共 HTTPS Git 仓库。安装前核验目录边界或远端主机，Git 禁用文件协议和重定向。SDK 负责解析包与 manifest。"
         }
       },
       "required": [
@@ -2450,6 +2574,9 @@ export const contractsSchema: Record<string, unknown> = {
           },
           "minItems": 0,
           "maxItems": 200
+        },
+        "accountRole": {
+          "$ref": "#/$defs/StudioRole"
         }
       },
       "required": [
@@ -2860,6 +2987,27 @@ export const contractsSchema: Record<string, unknown> = {
             "none",
             "native"
           ]
+        },
+        "firstFrameSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "lastFrameSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "referenceImageSlots": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "minItems": 1,
+          "maxItems": 30,
+          "uniqueItems": true
         }
       },
       "required": [
@@ -2868,7 +3016,41 @@ export const contractsSchema: Record<string, unknown> = {
         "resolution",
         "audioMode"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "referenceImageSlots"
+            ],
+            "properties": {
+              "referenceImageSlots": {}
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "firstFrameSlot"
+                  ],
+                  "properties": {
+                    "firstFrameSlot": {}
+                  }
+                },
+                {
+                  "required": [
+                    "lastFrameSlot"
+                  ],
+                  "properties": {
+                    "lastFrameSlot": {}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     "ImageParameters": {
       "type": "object",
@@ -2926,40 +3108,29 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "string"
             },
             "width": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8192
+              "$ref": "#/$defs/RenderDimension"
             },
             "height": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8192
+              "$ref": "#/$defs/RenderDimension"
             },
             "fps": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 120
+              "$ref": "#/$defs/RenderFrameRate"
             },
             "assembly": {
               "const": "ordered_concat",
               "type": "string"
             },
             "audioMode": {
-              "type": "string",
-              "enum": [
-                "none",
-                "preserve"
-              ]
+              "$ref": "#/$defs/OrderedConcatAudioMode"
             },
             "segmentIds": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Id"
-              },
-              "minItems": 1,
-              "maxItems": 24,
-              "uniqueItems": true,
-              "description": "可选：与 inputs 的视觉顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+              "$ref": "#/$defs/OrderedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "visualStyles": {
+              "$ref": "#/$defs/OrderedConcatVisualStyles"
             }
           },
           "required": [
@@ -2979,50 +3150,36 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "string"
             },
             "width": {
-              "const": 1280,
-              "type": "integer"
+              "$ref": "#/$defs/RenderDimension"
             },
             "height": {
-              "const": 720,
-              "type": "integer"
+              "$ref": "#/$defs/RenderDimension"
             },
             "fps": {
-              "const": 24,
-              "type": "integer"
+              "$ref": "#/$defs/RenderFrameRate"
             },
             "assembly": {
               "const": "narrated_concat",
               "type": "string"
             },
             "videoInputSlots": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 23,
-              "uniqueItems": true,
-              "items": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 23
-              }
+              "$ref": "#/$defs/NarratedConcatVideoInputSlots"
             },
             "narrationInputSlot": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 23
+              "$ref": "#/$defs/NarratedConcatNarrationInputSlot"
             },
             "durationPolicy": {
               "const": "preserve_all",
               "type": "string"
             },
             "segmentIds": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Id"
-              },
-              "minItems": 1,
-              "maxItems": 24,
-              "uniqueItems": true,
-              "description": "可选：与 videoInputSlots 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+              "$ref": "#/$defs/NarratedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "visualStyles": {
+              "$ref": "#/$defs/OrderedConcatVisualStyles"
             }
           },
           "required": [
@@ -3045,100 +3202,32 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "string"
             },
             "width": {
-              "const": 1280,
-              "type": "integer"
+              "$ref": "#/$defs/RenderDimension"
             },
             "height": {
-              "const": 720,
-              "type": "integer"
+              "$ref": "#/$defs/RenderDimension"
             },
             "fps": {
-              "const": 24,
-              "type": "integer"
+              "$ref": "#/$defs/RenderFrameRate"
             },
             "assembly": {
               "const": "timed_narrated_concat",
               "type": "string"
             },
             "segments": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 24,
-              "items": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "video",
-                        "type": "string"
-                      },
-                      "inputSlot": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 23
-                      },
-                      "startMs": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 120000
-                      },
-                      "durationMs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 120000
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "inputSlot",
-                      "startMs",
-                      "durationMs"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "image",
-                        "type": "string"
-                      },
-                      "inputSlot": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 23
-                      },
-                      "durationMs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 120000
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "inputSlot",
-                      "durationMs"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              }
+              "$ref": "#/$defs/TimedNarratedConcatSegments"
             },
             "narrationInputSlot": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 23
+              "$ref": "#/$defs/NarratedConcatNarrationInputSlot"
             },
             "segmentIds": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Id"
-              },
-              "minItems": 1,
-              "maxItems": 24,
-              "uniqueItems": true,
-              "description": "可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+              "$ref": "#/$defs/TimedNarratedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "subtitles": {
+              "$ref": "#/$defs/RenderSubtitles"
             }
           },
           "required": [
@@ -3160,194 +3249,35 @@ export const contractsSchema: Record<string, unknown> = {
               "const": "mp4"
             },
             "width": {
-              "type": "integer",
-              "const": 1280
+              "$ref": "#/$defs/RenderDimension"
             },
             "height": {
-              "type": "integer",
-              "const": 720
+              "$ref": "#/$defs/RenderDimension"
             },
             "fps": {
-              "type": "integer",
-              "const": 24
+              "$ref": "#/$defs/RenderFrameRate"
             },
             "assembly": {
               "type": "string",
               "const": "mixed_concat"
             },
             "segments": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 24,
-              "items": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "video",
-                        "type": "string"
-                      },
-                      "inputSlot": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 23
-                      },
-                      "startMs": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 120000
-                      },
-                      "durationMs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 120000
-                      },
-                      "originalGain": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "inputSlot",
-                      "startMs",
-                      "durationMs"
-                    ],
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "properties": {
-                      "kind": {
-                        "const": "image",
-                        "type": "string"
-                      },
-                      "inputSlot": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 23
-                      },
-                      "durationMs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 120000
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "inputSlot",
-                      "durationMs"
-                    ],
-                    "additionalProperties": false
-                  }
-                ]
-              }
+              "$ref": "#/$defs/MixedConcatSegments"
             },
             "segmentIds": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Id"
-              },
-              "minItems": 1,
-              "maxItems": 24,
-              "uniqueItems": true,
-              "description": "可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+              "$ref": "#/$defs/TimedNarratedConcatSegmentIds"
             },
             "music": {
-              "type": "object",
-              "properties": {
-                "inputSlot": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 23
-                },
-                "candidateId": {
-                  "$ref": "#/$defs/Id",
-                  "description": "外部素材候选：仅在音乐来自素材库已采用文件时给出。本地已登记音频（如冻结工程渲染的程序音乐）作为音乐输入时不带本字段，也不得伪造外部候选 ID；来源事实由所引用的音频对象自身携带。"
-                },
-                "sourceStartMs": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 86400000
-                },
-                "sourceDurationMs": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 86400000
-                },
-                "timelineStartMs": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 120000
-                },
-                "playDurationMs": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 120000
-                },
-                "repeat": {
-                  "type": "boolean"
-                },
-                "gain": {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
-                },
-                "fadeInMs": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 120000
-                },
-                "fadeOutMs": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 120000
-                },
-                "duckUnderNarration": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "inputSlot",
-                "sourceStartMs",
-                "sourceDurationMs",
-                "timelineStartMs",
-                "playDurationMs",
-                "repeat",
-                "gain",
-                "fadeInMs",
-                "fadeOutMs",
-                "duckUnderNarration"
-              ],
-              "additionalProperties": false
+              "$ref": "#/$defs/MixedConcatMusic"
             },
             "narration": {
-              "type": "object",
-              "properties": {
-                "inputSlot": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 23
-                },
-                "timelineStartMs": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 120000
-                },
-                "gain": {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
-                }
-              },
-              "required": [
-                "inputSlot",
-                "timelineStartMs",
-                "gain"
-              ],
-              "additionalProperties": false
+              "$ref": "#/$defs/MixedConcatNarration"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "subtitles": {
+              "$ref": "#/$defs/RenderSubtitles"
             }
           },
           "required": [
@@ -3384,7 +3314,7 @@ export const contractsSchema: Record<string, unknown> = {
                 "$ref": "#/$defs/InputRef"
               },
               "minItems": 1,
-              "maxItems": 24
+              "maxItems": 31
             },
             "maxCreateAttempts": {
               "type": "integer",
@@ -4203,6 +4133,9 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "origin": {
           "$ref": "#/$defs/RunOrigin"
+        },
+        "remixOf": {
+          "$ref": "#/$defs/Id"
         }
       },
       "required": [
@@ -4559,6 +4492,7 @@ export const contractsSchema: Record<string, unknown> = {
       "additionalProperties": false
     },
     "BusinessEvent": {
+      "description": "作品库选材副本和免费配音产出也发送 artifact.delivered。裁剪通知不影响修订的认可资格。",
       "type": "object",
       "properties": {
         "eventId": {
@@ -5228,7 +5162,7 @@ export const contractsSchema: Record<string, unknown> = {
               "slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 23
+                "maximum": 30
               },
               "blobId": {
                 "$ref": "#/$defs/Id"
@@ -5245,7 +5179,7 @@ export const contractsSchema: Record<string, unknown> = {
             "additionalProperties": false
           },
           "minItems": 0,
-          "maxItems": 24
+          "maxItems": 31
         },
         "resolvedProject": {
           "type": "object",
@@ -5485,6 +5419,9 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             }
           ]
+        },
+        "usage": {
+          "$ref": "#/$defs/ProviderUsage"
         }
       },
       "required": [
@@ -5521,7 +5458,7 @@ export const contractsSchema: Record<string, unknown> = {
                 "$ref": "#/$defs/InputRef"
               },
               "minItems": 1,
-              "maxItems": 24
+              "maxItems": 31
             },
             "maxCreateAttempts": {
               "type": "integer",
@@ -5667,7 +5604,7 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             },
             "parameters": {
-              "$ref": "#/$defs/RenderParameters"
+              "$ref": "#/$defs/RenderInputParameters"
             }
           },
           "required": [
@@ -5780,6 +5717,7 @@ export const contractsSchema: Record<string, unknown> = {
       "type": "object",
       "properties": {
         "artifacts": {
+          "description": "用户消息列出带入的准确修订。助手消息列出本轮显式交付及制作产物修订，输入克隆与工具中间产物仅保留在相应作品和工具记录中。",
           "type": "array",
           "items": {
             "$ref": "#/$defs/RevisionRef"
@@ -6382,7 +6320,7 @@ export const contractsSchema: Record<string, unknown> = {
           "maxLength": 100
         },
         "protocol": {
-          "description": "openai 是唯一的 OpenAI 供应商连接，承载 text/image/speech 且共用 Key；minimax 承载 speech/video；ark 承载 image/video，wan 只承载 video（万相视频走其真实媒体端点，不是 OpenAI 文本兼容协议）。openai-chat-completions/anthropic-messages 是历史可读兼容串，不得重新登记退役的文本/图片/配音能力。",
+          "description": "OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。",
           "enum": [
             "openai",
             "openai-chat-completions",
@@ -7368,7 +7306,7 @@ export const contractsSchema: Record<string, unknown> = {
                 "$ref": "#/$defs/InputRef"
               },
               "minItems": 1,
-              "maxItems": 24
+              "maxItems": 31
             },
             "kind": {
               "const": "video",
@@ -7492,7 +7430,7 @@ export const contractsSchema: Record<string, unknown> = {
               "type": "null"
             },
             "parameters": {
-              "$ref": "#/$defs/RenderParameters"
+              "$ref": "#/$defs/RenderInputParameters"
             }
           },
           "required": [
@@ -8696,7 +8634,8 @@ export const contractsSchema: Record<string, unknown> = {
         "music",
         "clip",
         "video",
-        "other"
+        "other",
+        "subtitle"
       ]
     },
     "ReviewInput": {
@@ -9199,6 +9138,15 @@ export const contractsSchema: Record<string, unknown> = {
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
         }
       },
       "required": [
@@ -10115,7 +10063,7 @@ export const contractsSchema: Record<string, unknown> = {
           "maxItems": 24
         },
         "parameters": {
-          "$ref": "#/$defs/RenderParameters"
+          "$ref": "#/$defs/RenderInputParameters"
         },
         "target": {
           "$ref": "#/$defs/ReviewTarget"
@@ -10348,7 +10296,7 @@ export const contractsSchema: Record<string, unknown> = {
     },
     "LibrarySelection": {
       "type": "object",
-      "description": "持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。",
+      "description": "持久化准确已定稿来源视频和准确素材修订/工程文件/run_input 冻结坐标；不是 sourceId、当前 head 或临时路径。发送时核对 sourceVideo 归属、定稿事实及实际消费集合后建立使用引用，选择本身不启动 work/制作。来源视频属于其他账号或不存在时返回 NOT_FOUND。",
       "properties": {
         "sourceVideo": {
           "$ref": "#/$defs/RevisionRef"
@@ -10504,12 +10452,21 @@ export const contractsSchema: Record<string, unknown> = {
           "minLength": 3,
           "maxLength": 100,
           "description": "封存工程清单里该文件的登记 MIME；客户端据此区分媒体与文本文件。"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blobId": {
+          "$ref": "#/$defs/Id"
         }
       },
       "required": [
         "project",
         "relativePath",
-        "mimeType"
+        "mimeType",
+        "blobId",
+        "sizeBytes"
       ],
       "additionalProperties": false
     },
@@ -10696,6 +10653,1923 @@ export const contractsSchema: Record<string, unknown> = {
         "startedAt",
         "endedAt",
         "progress"
+      ],
+      "additionalProperties": false
+    },
+    "BlobDownloadFlag": {
+      "type": "string",
+      "const": "1",
+      "description": "下载可播放媒体。工程文件始终使用 attachment。"
+    },
+    "StorageUsage": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "finalBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "draftBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reclaimableBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "revision",
+        "finalBytes",
+        "draftBytes",
+        "reclaimableBytes"
+      ],
+      "additionalProperties": false,
+      "description": "当前用户可见媒体按内容摘要去重。finalBytes 与 draftBytes 互斥。reclaimableBytes 为草稿中本轮可释放的物理字节。revision 是显式清理命令版本。"
+    },
+    "CleanupStorage": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision"
+      ],
+      "additionalProperties": false
+    },
+    "StorageCleanupReceipt": {
+      "type": "object",
+      "properties": {
+        "usage": {
+          "$ref": "#/$defs/StorageUsage"
+        },
+        "freedBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "freedFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "usage",
+        "freedBytes",
+        "freedFiles"
+      ],
+      "additionalProperties": false
+    },
+    "FrameHealth": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "degraded"
+          ]
+        },
+        "product": {
+          "const": "frame"
+        },
+        "runtime": {
+          "const": "pi"
+        },
+        "liveness": {
+          "const": "ok"
+        },
+        "readiness": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "enum": [
+                "ready",
+                "busy",
+                "unavailable"
+              ]
+            },
+            "creativeRunner": {
+              "enum": [
+                "ready",
+                "unavailable",
+                "not_configured"
+              ]
+            }
+          },
+          "required": [
+            "database",
+            "creativeRunner"
+          ],
+          "additionalProperties": false
+        },
+        "release": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "product",
+        "runtime",
+        "liveness",
+        "readiness"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderConnectionProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkedAt"
+      ],
+      "properties": {
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "description": "主动检查已保存连接时供应商目录成功响应的时间。此操作不生成内容、不修改配置。"
+    },
+    "RenderFitMode": {
+      "type": "string",
+      "enum": [
+        "contain_pad",
+        "cover_crop",
+        "blur_backdrop"
+      ]
+    },
+    "StillMotion": {
+      "type": "string",
+      "enum": [
+        "none",
+        "zoom_in",
+        "zoom_out",
+        "pan"
+      ]
+    },
+    "RenderDimension": {
+      "type": "integer",
+      "minimum": 360,
+      "maximum": 2160,
+      "multipleOf": 2
+    },
+    "RenderFrameRate": {
+      "type": "integer",
+      "enum": [
+        24,
+        25,
+        30,
+        60
+      ]
+    },
+    "RenderInputParameters": {
+      "description": "可省略成对画幅，读取视觉素材主画幅。可省略帧率，沿用 24fps。冻结操作必含宽、高与帧率。",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "const": "mp4",
+              "type": "string"
+            },
+            "width": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "height": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "fps": {
+              "$ref": "#/$defs/RenderFrameRate"
+            },
+            "assembly": {
+              "const": "ordered_concat",
+              "type": "string"
+            },
+            "audioMode": {
+              "$ref": "#/$defs/OrderedConcatAudioMode"
+            },
+            "segmentIds": {
+              "$ref": "#/$defs/OrderedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "visualStyles": {
+              "$ref": "#/$defs/OrderedConcatVisualStyles"
+            }
+          },
+          "required": [
+            "format",
+            "assembly"
+          ],
+          "dependentRequired": {
+            "width": [
+              "height"
+            ],
+            "height": [
+              "width"
+            ]
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "const": "mp4",
+              "type": "string"
+            },
+            "width": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "height": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "fps": {
+              "$ref": "#/$defs/RenderFrameRate"
+            },
+            "assembly": {
+              "const": "narrated_concat",
+              "type": "string"
+            },
+            "videoInputSlots": {
+              "$ref": "#/$defs/NarratedConcatVideoInputSlots"
+            },
+            "narrationInputSlot": {
+              "$ref": "#/$defs/NarratedConcatNarrationInputSlot"
+            },
+            "durationPolicy": {
+              "const": "preserve_all",
+              "type": "string"
+            },
+            "segmentIds": {
+              "$ref": "#/$defs/NarratedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "visualStyles": {
+              "$ref": "#/$defs/OrderedConcatVisualStyles"
+            }
+          },
+          "required": [
+            "format",
+            "assembly",
+            "videoInputSlots",
+            "narrationInputSlot",
+            "durationPolicy"
+          ],
+          "dependentRequired": {
+            "width": [
+              "height"
+            ],
+            "height": [
+              "width"
+            ]
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "const": "mp4",
+              "type": "string"
+            },
+            "width": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "height": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "fps": {
+              "$ref": "#/$defs/RenderFrameRate"
+            },
+            "assembly": {
+              "const": "timed_narrated_concat",
+              "type": "string"
+            },
+            "segments": {
+              "$ref": "#/$defs/TimedNarratedConcatSegments"
+            },
+            "narrationInputSlot": {
+              "$ref": "#/$defs/NarratedConcatNarrationInputSlot"
+            },
+            "segmentIds": {
+              "$ref": "#/$defs/TimedNarratedConcatSegmentIds"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "subtitles": {
+              "$ref": "#/$defs/RenderSubtitles"
+            }
+          },
+          "required": [
+            "format",
+            "assembly",
+            "segments",
+            "narrationInputSlot"
+          ],
+          "dependentRequired": {
+            "width": [
+              "height"
+            ],
+            "height": [
+              "width"
+            ]
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "const": "mp4"
+            },
+            "width": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "height": {
+              "$ref": "#/$defs/RenderDimension"
+            },
+            "fps": {
+              "$ref": "#/$defs/RenderFrameRate"
+            },
+            "assembly": {
+              "type": "string",
+              "const": "mixed_concat"
+            },
+            "segments": {
+              "$ref": "#/$defs/MixedConcatSegments"
+            },
+            "segmentIds": {
+              "$ref": "#/$defs/TimedNarratedConcatSegmentIds"
+            },
+            "music": {
+              "$ref": "#/$defs/MixedConcatMusic"
+            },
+            "narration": {
+              "$ref": "#/$defs/MixedConcatNarration"
+            },
+            "fitMode": {
+              "$ref": "#/$defs/RenderFitMode"
+            },
+            "subtitles": {
+              "$ref": "#/$defs/RenderSubtitles"
+            }
+          },
+          "required": [
+            "format",
+            "assembly",
+            "segments",
+            "segmentIds"
+          ],
+          "dependentRequired": {
+            "width": [
+              "height"
+            ],
+            "height": [
+              "width"
+            ]
+          },
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/CodeProjectParameters"
+        }
+      ]
+    },
+    "OrderedConcatAudioMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "preserve"
+      ]
+    },
+    "OrderedConcatSegmentIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      },
+      "minItems": 1,
+      "maxItems": 24,
+      "uniqueItems": true,
+      "description": "可选：与 inputs 的视觉顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+    },
+    "OrderedConcatVisualStyles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": {
+        "type": "object",
+        "properties": {
+          "inputSlot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "fitMode": {
+            "$ref": "#/$defs/RenderFitMode"
+          }
+        },
+        "required": [
+          "inputSlot",
+          "fitMode"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "NarratedConcatVideoInputSlots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 23,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 23
+      }
+    },
+    "NarratedConcatNarrationInputSlot": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 23
+    },
+    "NarratedConcatSegmentIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      },
+      "minItems": 1,
+      "maxItems": 24,
+      "uniqueItems": true,
+      "description": "可选：与 videoInputSlots 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+    },
+    "TimedNarratedConcatSegments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "video",
+                "type": "string"
+              },
+              "inputSlot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 23
+              },
+              "startMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 120000
+              },
+              "durationMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120000
+              },
+              "fitMode": {
+                "$ref": "#/$defs/RenderFitMode"
+              }
+            },
+            "required": [
+              "kind",
+              "inputSlot",
+              "startMs",
+              "durationMs"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "inputSlot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 23
+              },
+              "durationMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120000
+              },
+              "fitMode": {
+                "$ref": "#/$defs/RenderFitMode"
+              },
+              "kenBurns": {
+                "$ref": "#/$defs/StillMotion"
+              }
+            },
+            "required": [
+              "kind",
+              "inputSlot",
+              "durationMs"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "TimedNarratedConcatSegmentIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id"
+      },
+      "minItems": 1,
+      "maxItems": 24,
+      "uniqueItems": true,
+      "description": "可选：与 segments 顺序一一对应，每项指向本方案一个 section id；长度一致性与引用对应在准备提案边界核对一次后冻结。"
+    },
+    "MixedConcatSegments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "video",
+                "type": "string"
+              },
+              "inputSlot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 23
+              },
+              "startMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 120000
+              },
+              "durationMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120000
+              },
+              "originalGain": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "fitMode": {
+                "$ref": "#/$defs/RenderFitMode"
+              }
+            },
+            "required": [
+              "kind",
+              "inputSlot",
+              "startMs",
+              "durationMs"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "inputSlot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 23
+              },
+              "durationMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120000
+              },
+              "fitMode": {
+                "$ref": "#/$defs/RenderFitMode"
+              },
+              "kenBurns": {
+                "$ref": "#/$defs/StillMotion"
+              }
+            },
+            "required": [
+              "kind",
+              "inputSlot",
+              "durationMs"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "MixedConcatMusic": {
+      "type": "object",
+      "properties": {
+        "inputSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "candidateId": {
+          "$ref": "#/$defs/Id",
+          "description": "外部素材候选：仅在音乐来自素材库已采用文件时给出。本地已登记音频（如冻结工程渲染的程序音乐）作为音乐输入时不带本字段，也不得伪造外部候选 ID；来源事实由所引用的音频对象自身携带。"
+        },
+        "sourceStartMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "sourceDurationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "timelineStartMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "playDurationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        },
+        "repeat": {
+          "type": "boolean"
+        },
+        "gain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "fadeInMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "fadeOutMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "duckUnderNarration": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "inputSlot",
+        "sourceStartMs",
+        "sourceDurationMs",
+        "timelineStartMs",
+        "playDurationMs",
+        "repeat",
+        "gain",
+        "fadeInMs",
+        "fadeOutMs",
+        "duckUnderNarration"
+      ],
+      "additionalProperties": false
+    },
+    "MixedConcatNarration": {
+      "type": "object",
+      "properties": {
+        "inputSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "timelineStartMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "gain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "inputSlot",
+        "timelineStartMs",
+        "gain"
+      ],
+      "additionalProperties": false
+    },
+    "UploadMime": {
+      "type": "string",
+      "enum": [
+        "video/mp4",
+        "video/webm",
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "audio/mpeg",
+        "audio/wav"
+      ]
+    },
+    "UploadRights": {
+      "type": "string",
+      "const": "owned_or_licensed"
+    },
+    "UploadForm": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "rights": {
+          "$ref": "#/$defs/UploadRights"
+        },
+        "file": {
+          "type": "string",
+          "contentMediaType": "application/octet-stream",
+          "description": "单个上传文件的原始字节。图片、音频、视频分别限 30、100、512 MiB。"
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "rights",
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "UploadFirstFrame": {
+      "type": "object",
+      "properties": {
+        "blobId": {
+          "$ref": "#/$defs/Id"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "required": [
+        "blobId",
+        "digest",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "UploadFacts": {
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "rights": {
+          "$ref": "#/$defs/UploadRights"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "sampleRate": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "hasAudio": {
+          "type": "boolean"
+        },
+        "firstFrame": {
+          "$ref": "#/$defs/UploadFirstFrame"
+        }
+      },
+      "required": [
+        "fileName",
+        "sizeBytes",
+        "rights"
+      ],
+      "additionalProperties": false
+    },
+    "UploadAttachment": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "blobId": {
+          "$ref": "#/$defs/Id"
+        },
+        "mimeType": {
+          "$ref": "#/$defs/UploadMime"
+        },
+        "durationMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "facts": {
+          "$ref": "#/$defs/UploadFacts"
+        }
+      },
+      "required": [
+        "source",
+        "blobId",
+        "mimeType",
+        "durationMs",
+        "facts"
+      ],
+      "additionalProperties": false
+    },
+    "UploadReceipt": {
+      "type": "object",
+      "properties": {
+        "conversation": {
+          "$ref": "#/$defs/Conversation"
+        },
+        "attachment": {
+          "$ref": "#/$defs/UploadAttachment"
+        }
+      },
+      "required": [
+        "conversation",
+        "attachment"
+      ],
+      "additionalProperties": false
+    },
+    "SubtitleStyle": {
+      "type": "string",
+      "enum": [
+        "clean_bottom",
+        "social_pop_center",
+        "cinema_bilingual"
+      ]
+    },
+    "SubtitleCue": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "speaker": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "id",
+        "startMs",
+        "endMs",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "SubtitleCues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SubtitleCue"
+      },
+      "minItems": 1,
+      "maxItems": 10000
+    },
+    "SubtitleTrack": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "subtitles"
+        },
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "alignment": {
+          "type": "string",
+          "enum": [
+            "tts_word",
+            "local_asr"
+          ]
+        },
+        "stylePreset": {
+          "$ref": "#/$defs/SubtitleStyle"
+        },
+        "cues": {
+          "$ref": "#/$defs/SubtitleCues"
+        }
+      },
+      "required": [
+        "format",
+        "source",
+        "alignment",
+        "stylePreset",
+        "cues"
+      ],
+      "additionalProperties": false
+    },
+    "RenderSubtitles": {
+      "type": "object",
+      "properties": {
+        "track": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "burn_in",
+            "soft"
+          ]
+        }
+      },
+      "required": [
+        "track",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "ToolCreateSubtitles": {
+      "type": "object",
+      "properties": {
+        "workId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "stylePreset": {
+          "$ref": "#/$defs/SubtitleStyle"
+        }
+      },
+      "required": [
+        "workId",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "CreateSubtitleTrack": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "stylePreset": {
+          "$ref": "#/$defs/SubtitleStyle"
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "source",
+        "stylePreset"
+      ],
+      "additionalProperties": false
+    },
+    "SaveSubtitleRevision": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "baseRevisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "stylePreset": {
+          "$ref": "#/$defs/SubtitleStyle"
+        },
+        "cues": {
+          "$ref": "#/$defs/SubtitleCues"
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "baseRevisionId",
+        "stylePreset",
+        "cues"
+      ],
+      "additionalProperties": false
+    },
+    "SubtitleReceipt": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/RevisionRef"
+        },
+        "revisionNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "workId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "artifact",
+        "revisionNumber",
+        "workId"
+      ],
+      "additionalProperties": false
+    },
+    "RemixCut": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        }
+      },
+      "required": [
+        "id",
+        "startMs",
+        "durationMs"
+      ],
+      "additionalProperties": false
+    },
+    "RemixSegment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "video",
+            "image"
+          ]
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        },
+        "sourceDurationMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "originalGain": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "kind",
+        "startMs",
+        "durationMs",
+        "sourceDurationMs",
+        "originalGain"
+      ],
+      "additionalProperties": false
+    },
+    "RemixTimeline": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "available": {
+              "const": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "available"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "available": {
+              "const": true,
+              "type": "boolean"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "base": {
+              "$ref": "#/$defs/RevisionRef"
+            },
+            "segments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RemixSegment"
+              },
+              "minItems": 1,
+              "maxItems": 24
+            },
+            "narrationGain": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "musicGain": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "duckUnderNarration": {
+              "type": "boolean"
+            },
+            "subtitles": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RenderSubtitles"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "revision",
+            "base",
+            "segments",
+            "narrationGain",
+            "musicGain",
+            "duckUnderNarration",
+            "subtitles"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RemixCommand": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "baseRevisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemixCut"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        },
+        "originalGain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "narrationGain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "musicGain": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "duckUnderNarration": {
+          "type": "boolean"
+        },
+        "subtitles": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenderSubtitles"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "baseRevisionId",
+        "segments"
+      ],
+      "additionalProperties": false
+    },
+    "StudioRole": {
+      "type": "string",
+      "enum": [
+        "admin",
+        "creator"
+      ]
+    },
+    "StudioAccount": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "$ref": "#/$defs/StudioRole"
+        },
+        "disabledAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "username",
+        "role",
+        "disabledAt"
+      ],
+      "additionalProperties": false
+    },
+    "StudioAccounts": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StudioAccount"
+          }
+        }
+      },
+      "required": [
+        "revision",
+        "accounts"
+      ],
+      "additionalProperties": false
+    },
+    "CreateStudioAccount": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "username": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+        },
+        "password": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 512,
+          "writeOnly": true
+        },
+        "role": {
+          "$ref": "#/$defs/StudioRole"
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "username",
+        "password",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "BudgetPolicy": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "user",
+            "workspace"
+          ]
+        },
+        "subjectId": {
+          "$ref": "#/$defs/Id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "conversationLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dayLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "monthLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "subjectId",
+        "revision",
+        "conversationLimitMinor",
+        "dayLimitMinor",
+        "monthLimitMinor"
+      ],
+      "additionalProperties": false
+    },
+    "BudgetPolicies": {
+      "type": "object",
+      "properties": {
+        "currency": {
+          "type": "string",
+          "const": "CNY"
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BudgetPolicy"
+          }
+        }
+      },
+      "required": [
+        "currency",
+        "policies"
+      ],
+      "additionalProperties": false
+    },
+    "SaveBudgetPolicy": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "user",
+            "workspace"
+          ]
+        },
+        "subjectId": {
+          "$ref": "#/$defs/Id"
+        },
+        "conversationLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dayLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "monthLimitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision",
+        "scope",
+        "subjectId",
+        "conversationLimitMinor",
+        "dayLimitMinor",
+        "monthLimitMinor"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderUsage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "characters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "mediaDurationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "resolution": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "providerReceiptId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "minProperties": 1
+    },
+    "StatementLine": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "providerId": {
+              "$ref": "#/$defs/Id"
+            },
+            "connectionId": {
+              "$ref": "#/$defs/Id"
+            },
+            "providerTaskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "requestIdentity": {
+              "$ref": "#/$defs/Id"
+            },
+            "fact": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "authoritative",
+                  "type": "string"
+                },
+                "billingFactId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "sourceRevision": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,39})$"
+                },
+                "netAmount": {
+                  "$ref": "#/$defs/Money"
+                },
+                "final": {
+                  "type": "boolean"
+                },
+                "evidenceId": {
+                  "$ref": "#/$defs/Id"
+                }
+              },
+              "required": [
+                "kind",
+                "billingFactId",
+                "sourceRevision",
+                "netAmount",
+                "final",
+                "evidenceId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "providerId",
+            "connectionId",
+            "fact",
+            "providerTaskId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "providerId": {
+              "$ref": "#/$defs/Id"
+            },
+            "connectionId": {
+              "$ref": "#/$defs/Id"
+            },
+            "providerTaskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "requestIdentity": {
+              "$ref": "#/$defs/Id"
+            },
+            "fact": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "authoritative",
+                  "type": "string"
+                },
+                "billingFactId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "sourceRevision": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,39})$"
+                },
+                "netAmount": {
+                  "$ref": "#/$defs/Money"
+                },
+                "final": {
+                  "type": "boolean"
+                },
+                "evidenceId": {
+                  "$ref": "#/$defs/Id"
+                }
+              },
+              "required": [
+                "kind",
+                "billingFactId",
+                "sourceRevision",
+                "netAmount",
+                "final",
+                "evidenceId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "providerId",
+            "connectionId",
+            "fact",
+            "requestIdentity"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "UpdateStudioAccount": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "role": {
+          "$ref": "#/$defs/StudioRole"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "password": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 512,
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedRevision"
+      ],
+      "minProperties": 3,
+      "additionalProperties": false
+    },
+    "BudgetPeriod": {
+      "type": "object",
+      "properties": {
+        "limitMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usedMinor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "remainingMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "limitMinor",
+        "usedMinor",
+        "remainingMinor"
+      ],
+      "additionalProperties": false
+    },
+    "BudgetUsage": {
+      "type": "object",
+      "properties": {
+        "conversation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BudgetPeriod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "day": {
+          "$ref": "#/$defs/BudgetPeriod"
+        },
+        "month": {
+          "$ref": "#/$defs/BudgetPeriod"
+        }
+      },
+      "required": [
+        "conversation",
+        "day",
+        "month"
+      ],
+      "additionalProperties": false
+    },
+    "BudgetSummary": {
+      "type": "object",
+      "properties": {
+        "currency": {
+          "type": "string",
+          "const": "CNY"
+        },
+        "timeZone": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "personal": {
+          "$ref": "#/$defs/BudgetUsage"
+        },
+        "workspace": {
+          "$ref": "#/$defs/BudgetUsage"
+        },
+        "effectiveRemainingMinor": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "currency",
+        "timeZone",
+        "conversationId",
+        "personal",
+        "workspace",
+        "effectiveRemainingMinor"
       ],
       "additionalProperties": false
     }

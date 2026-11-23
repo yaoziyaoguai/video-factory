@@ -7,9 +7,9 @@ import { mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { InMemoryCredentialStore, fauxProvider, type FauxProviderHandle, type Model } from "@earendil-works/pi-ai";
-import { findOpenAIChatModel, thinkingCapabilityOf } from "./text-model.js";
+import { findNativeTextModel, thinkingCapabilityOf } from "./text-model.js";
 import { AgentError } from "./errors.js";
-import { resizeImageForModel } from "./image-projection.js";
+import { HistoryImageCache } from "./image-projection.js";
 import {
   createAgentSession, DefaultResourceLoader, formatDimensionNote, formatSkillsForPrompt, ModelRuntime, SessionManager, SettingsManager,
   type AgentSession, type ToolDefinition,
@@ -57,6 +57,8 @@ export const AGENT_SYSTEM_PROMPT = `你是帧间 Frame 的创作助手。产品�
   已开始制作或成片的版本不改，新意见进入下一版，需要用户明确的开始动作。
 - 修改已有内容要精确按用户指名的对象与当前版本：没有预绑定 target 时用 read_artifact 核对真实修订，再用 deliver_artifacts 的 mode=revise 项交付修改；
   目标是哪一条不清楚时只问一次，不擅自改任一方。
+- 本条消息的上传附件是创作者已授权使用的准确素材；图片随 Pi 原生视觉输入发送，视音频附时长和引用。实拍视频的 firstFrame 可作为图生视频的已采用图片 blob。
+- 视频首帧、尾帧与角色参考图按 VideoParameters 的输入槽冻结。只选择本镜头实际采用的已认可角色、场景或分镜。选入的分镜可自动绑定首帧；角色和场景可单独作为参考图。一批多镜头有歧义时逐个指定槽位，分别准备首尾帧模式和参考图模式。
 - 阅读技能参考文件用 read_skill_file；阅读具体产物修订用 read_artifact；冻结工程或已有素材的纯本地拼接、配音轨混音用 render_project，直接交给现有后台制作，不创建零元费用确认卡。
   已有成片只改音轨时优先复制视频流，不重做画面。创作自检先用语法检查、元数据和 2～5 秒低分辨率样本验证关键路径；
   不为常规修改默认生成与正式作品等长的测试片、重复全长渲染或立即轮询刚提交的任务。确有全长验证必要时说明依据，正式制作交给后台执行。
@@ -112,6 +114,7 @@ export interface PiModelSelection {
 }
 
 export class PiRuntimeHost {
+  private readonly historyImages = new HistoryImageCache();
   private runtime: ModelRuntime | null = null;
   private fauxHandle: FauxProviderHandle | null = null;
   private readonly textProviders = new Set<string>();
@@ -165,24 +168,23 @@ export class PiRuntimeHost {
   private async ensureTextProvider(registration: PiTextRegistration): Promise<void> {
     if (!this.runtime) throw new Error("PiRuntimeHost 未初始化");
     if (this.textProviders.has(registration.providerId)) return;
-    const known = findOpenAIChatModel(registration.modelId, registration.baseUrl);
+    const known = findNativeTextModel(registration.protocol, registration.modelId, registration.baseUrl);
     // 已知型号的冻结档位必须是其原生支持列表之一；旧“全局 off”快照在必须推理的型号上
     // 如实失败并提示重发，不借 clamp 偷开用户未选的收费档位。
     if (known && !thinkingCapabilityOf(known)!.levels.includes(registration.thinkingLevel)) {
       throw new AgentError("INVALID_INPUT", `请求冻结的型号“${registration.modelId}”不支持“${registration.thinkingLevel}”推理档位（旧配置）；请重新发送消息使用当前推理设置。`);
     }
-    // Pi 原生 OpenAI Responses 接线（A3）：协议、compat、输入与档位映射都来自 SDK 的
-    // 精确模型目录，由 SDK 转换请求；不手抄模型名判断，也不叠加自写 provider。
+    // 协议序列化、工具交互及型号能力均交给 Pi 原生适配器。
     this.runtime.registerProvider(registration.providerId, {
       baseUrl: registration.baseUrl,
-      api: "openai-responses",
+      api: registration.protocol,
       models: [{ id: registration.modelId, name: registration.modelId, input: known?.input ?? ["text"], reasoning: known?.reasoning ?? false,
         ...(known?.thinkingLevelMap ? { thinkingLevelMap: known.thinkingLevelMap } : {}),
         ...(known?.inputLimits ? { inputLimits: known.inputLimits } : {}),
         contextWindow: registration.contextWindowTokens, maxTokens: registration.maxOutputTokens,
         // 精确官方型号保留 Pi 原生估价（含缓存/分档）；未知路由的 SDK 缺省值不表示免费。
         cost: known?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        compat: known?.compat ?? { maxTokensField: "max_tokens", supportsStore: false, supportsDeveloperRole: false },
+        ...(known?.compat ? { compat: known.compat } : registration.protocol !== "anthropic-messages" ? { compat: { maxTokensField: "max_tokens", supportsStore: false, supportsDeveloperRole: false } } : {}),
       }],
     });
     await this.runtime.setRuntimeApiKey(registration.providerId, registration.apiKey);
@@ -231,7 +233,7 @@ export class PiRuntimeHost {
             for (let index = 0; index < content.length; index++) {
               const block = content[index]!;
               if (block.type !== "image") continue;
-              const resized = await resizeImageForModel(Buffer.from(block.data, "base64"), block.mimeType);
+              const resized = await this.historyImages.read(block);
               if (resized.wasResized) {
                 // 旧 read/视频帧的说明可在同一文本块内；保留原画布，替换本次显示尺寸。
                 const previous = content[index - 1];

@@ -1,23 +1,32 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { StudioAuthenticator, type StudioAuthOptions } from "../auth.js";
-import { registerHttpMaintenance } from "../http-maintenance.js";
-import type { MaintenanceGate } from "../maintenance-gate.js";
-import { agentRoutes, type AgentPluginOptions } from "./routes.js";
+import { agentRoutes, mutationOriginError, type AgentPluginOptions } from "./routes.js";
 
-export function buildFrameApp(options: { agent: AgentPluginOptions; auth?: StudioAuthOptions; maintenanceGate?: MaintenanceGate; logger?: boolean }) {
+export function buildFrameApp(options: { agent: AgentPluginOptions; auth?: StudioAuthOptions; logger?: boolean }) {
   // 反代场景只信任显式配置的代理追加的 X-Forwarded-For，使 request.ip 是真实客户端地址，
   // 避免外部扫描者用伪造头把管理员锁出登录限流。默认按裸机/systemd 直反代取环回；
   // Docker Compose 发布端口时容器内对端是网桥网关，需经 STUDIO_TRUST_PROXY 显式放行对应网段。
   const trustProxy = process.env.STUDIO_TRUST_PROXY?.trim() || "127.0.0.1";
   const app = Fastify({ logger: options.logger ?? false, trustProxy });
-  const auth = options.auth ? new StudioAuthenticator(options.auth) : undefined;
-  registerHttpMaintenance(app, options.maintenanceGate);
+  const accounts=options.agent.service.accounts;
+  if(options.auth) accounts.bootstrap(options.auth.username,options.auth.passwordHash);
+  const auth=options.auth ? new StudioAuthenticator({...options.auth,findAccount:name=>accounts.find(name)}) : undefined;
   app.get("/api/auth/session", async request => {
     if (!auth) return { enabled: false, authenticated: true };
-    const username = auth.authenticatedUsername(request.headers.cookie);
-    return username ? { enabled: true, authenticated: true, username } : { enabled: true, authenticated: false };
+    const account = auth.authenticatedAccount(request.headers.cookie);
+    return account ? { enabled: true, authenticated: true, username: account.username, ownerId: account.id }
+      : { enabled: true, authenticated: false };
   });
-  app.post("/api/auth/login", async (request, reply) => {
+  const publicUrl = new URL(options.agent.uiOrigin);
+  const publicHosts = new Set([publicUrl.host]);
+  if (!publicUrl.port) publicHosts.add(publicUrl.hostname + (publicUrl.protocol === "https:" ? ":443" : ":80"));
+  const checkOrigin = async (request: FastifyRequest, reply: FastifyReply) => {
+    const rejection = mutationOriginError(request, options.agent.uiOrigin);
+    if (rejection) return reply.code(rejection.statusCode).send({ code: rejection.code, error: rejection.message });
+    const host = request.headers.host;
+    if (!host || !publicHosts.has(host.toLowerCase())) return reply.code(403).send({ code: "FORBIDDEN", error: "请从已配置的工作台地址登录或退出。" });
+  };
+  app.post("/api/auth/login", { onRequest: checkOrigin }, async (request, reply) => {
     if (!auth) return { enabled: false, authenticated: true };
     const input = request.body as { username?: unknown; password?: unknown } | null;
     if (!input || typeof input.username !== "string" || typeof input.password !== "string" || !input.username.trim() || !input.password || input.username.length > 128 || input.password.length > 512) {
@@ -26,12 +35,11 @@ export function buildFrameApp(options: { agent: AgentPluginOptions; auth?: Studi
     const result = await auth.authenticate(input.username.trim(), input.password, request.ip);
     if (result === "limited") return reply.code(429).send({ error: "登录尝试过多，请稍后再试。" });
     if (result === "rejected") return reply.code(401).send({ error: "用户名或密码不正确。" });
-    reply.header("set-cookie", auth.createSessionCookie());
-    return { enabled: true, authenticated: true, username: input.username.trim() };
+    reply.header("set-cookie", auth.createSessionCookie(result));
+    return { enabled: true, authenticated: true, username: result.username, ownerId: result.id };
   });
-  app.post("/api/auth/logout", async (request, reply) => {
-    if (auth && !auth.authenticatedUsername(request.headers.cookie)) return reply.code(401).send({ error: "请先登录。" });
-    if (request.headers["x-video-factory-request"] !== "studio") return reply.code(403).send({ error: "请求缺少安全校验。" });
+  app.post("/api/auth/logout", { onRequest: checkOrigin }, async (request, reply) => {
+    if (auth && !auth.authenticatedAccount(request.headers.cookie)) return reply.code(401).send({ error: "请先登录。" });
     if (auth) {
       auth.revokeSession(request.headers.cookie);
       reply.header("set-cookie", auth.clearSessionCookie());
@@ -39,9 +47,15 @@ export function buildFrameApp(options: { agent: AgentPluginOptions; auth?: Studi
     return reply.code(204).send();
   });
   app.register(agentRoutes, { prefix: "/api/agent/v1", ...options.agent,
-    resolveOwner: request => auth ? auth.authenticatedUsername(request.headers.cookie) : options.agent.resolveOwner(request), localOwnerOnly: !auth,
+    resolveOwner: request => {
+      if(!auth) return options.agent.resolveOwner(request);
+      return auth.authenticatedAccount(request.headers.cookie)?.id;
+    },isAdmin:ownerId=>!auth || options.agent.service.accounts.isAdmin(ownerId), localOwnerOnly: !auth,
     sessionAuthorization: auth ? { expiresAtMs: request => auth.sessionExpiryMs(request.headers.cookie), nowMs: () => auth.nowMs() } : undefined,
   });
-  app.get("/api/health", async () => ({ status: "ok", product: "frame", runtime: "pi", ...(process.env.RELEASE_SHA ? { release: process.env.RELEASE_SHA } : {}) }));
+  app.get("/api/health", async (_request, reply) => {
+    const health = await options.agent.service.health();
+    return reply.code(health.status === "ok" ? 200 : 503).send(health);
+  });
   return app;
 }

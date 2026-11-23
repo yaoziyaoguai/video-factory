@@ -55,7 +55,7 @@ export class PexelsClient {
   }
 
   /** 受控下载：固定媒体域名（含每次重定向）、字节上限、回调式落盘。 */
-  async download(url: string, maxBytes: number, sink: (stream: ReadableStream<Uint8Array>, response: Response) => Promise<void>, signal?: AbortSignal): Promise<void> {
+  async download(url: string, maxBytes: number, sink: import("./stock-http.js").StockDownloadSink, signal?: AbortSignal): Promise<void> {
     return downloadWithinBounds({ url, rules: { mediaHosts: PEXELS_MEDIA_HOSTS }, maxBytes, fetchImpl: this.fetchImpl, signal }, sink);
   }
 }

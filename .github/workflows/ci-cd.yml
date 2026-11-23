@@ -60,7 +60,7 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
-          base_hash="$(cat docker/base.Dockerfile docker/edge-tts-requirements.txt | sha256sum | cut -c1-16)"
+          base_hash="$(cat docker/base.Dockerfile docker/edge-tts-requirements.txt scripts/install-frame-asr.sh scripts/frame-transcribe.py | sha256sum | cut -c1-16)"
           base_tag="frame-base:$base_hash"
           origin=built
           if [[ -n "$ACR_REGISTRY" && -n "$ACR_NAMESPACE" && -n "$ACR_USERNAME" && -n "$ACR_PASSWORD" ]]; then

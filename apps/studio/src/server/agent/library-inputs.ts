@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import type { AgentDatabase } from "./db.js";
 import type { AgentClock } from "./util.js";
 import type { ProductionBlobs } from "./production-blobs.js";
@@ -28,7 +27,7 @@ export async function ensureLibraryInputs(
       if (!item || prepared.has(item.sourceKey)) continue;
       // 先落文件再记行：中途崩溃只会让下个回合重写同样字节，不会出现“已记录却没文件”。
       const blob = blobs.get(ownerId, item.blobId);
-      await creative.runner.writeFile(workspace, item.path, readFileSync(blobs.filePath(blob.digest)));
+      await creative.runner.transferFile(workspace, "import_file", item.path, blobs.filePath(blob.digest), blobs.transferRoot);
       db.prepare("INSERT INTO library_input_preparations(work_id, source_key, path, prepared_at) VALUES(?,?,?,?)")
         .run(workId, item.sourceKey, item.path, clock());
       prepared.add(item.sourceKey);

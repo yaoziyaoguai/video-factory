@@ -16,11 +16,9 @@ creative="frame-creative:release-$RELEASE_SHA"
 alias=frame-creative:pi-1.5-v1
 unit=/etc/systemd/system/frame-creative.service
 host_script=/opt/frame-creative/creative-runner-host.mjs
-maintenance=/etc/nginx/snippets/frame-release-maintenance.conf
+maintenance=/run/video-factory/frame.maintenance
 health=http://127.0.0.1:4317/api/health
 export AGENT_UI_ORIGIN="$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); assert p.scheme=="https" and p.hostname and not p.username; print("https://"+p.netloc)' "$PUBLIC_HEALTH_URL")"
-hostname="$(python3 -c 'import sys,urllib.parse as u; print(u.urlsplit(sys.argv[1]).hostname)' "$PUBLIC_HEALTH_URL")"
-site="${FRAME_NGINX_SITE:-/etc/nginx/sites-available/$hostname}"
 node="${FRAME_CREATIVE_NODE:-/usr/local/bin/node}"
 workspace_root="${FRAME_CREATIVE_WORKSPACE_ROOT:-/var/lib/frame-creative}"
 socket_directory="${FRAME_CREATIVE_SOCKET_DIRECTORY:-/var/lib/frame-creative/runtime}"
@@ -44,15 +42,16 @@ PY
 [[ ${#ids[@]} == 2 ]]
 app_id="${ids[0]}"; creative_id="${ids[1]}"
 [[ "$(uname -m)" == x86_64 ]]
-[[ -f "$repo/scripts/smoke-creative-container.mjs" && -f "$repo/docker/frame-creative.service" && -f "$site" ]]
-[[ ! -e "$PROJECT_PATH/.dogfood-maintenance.json" ]] || { printf '%s\n' 'A separate maintenance window is active; leaving the site unchanged.' >&2; exit 1; }
+[[ -f "$repo/scripts/smoke-creative-container.mjs" && -f "$repo/docker/frame-creative.service" && -f "$repo/scripts/frame-release-entry.sh" ]]
+[[ ! -e "$maintenance" ]] || { echo "Entry is already under maintenance." >&2; exit 1; }
 [[ ! -e "$backup" ]]
 ! docker inspect "$previous" >/dev/null 2>&1
 ! docker inspect "$failed" >/dev/null 2>&1
 docker network inspect video-factory-trends >/dev/null
 mount="$(docker volume inspect --format '{{.Mountpoint}}' "$volume")"
 [[ -d "$mount" && -S "$docker_socket" ]]
-command -v nginx >/dev/null
+nginx -t
+[[ -r /etc/nginx/snippets/frame-release-maintenance.conf ]] || { echo "Install the Frame Nginx snippet in every public server block first (docs/guides/deployment.md)." >&2; exit 1; }
 command -v systemctl >/dev/null
 [[ "$node" = /* && -x "$node" ]]
 [[ "$("$node" -p 'process.versions.node.split(".")[0]')" == 22 ]]
@@ -96,20 +95,25 @@ workspace_root="$(realpath "$workspace_root")"
 socket_directory="$(realpath "$socket_directory")"
 namespace="$(python3 -c 'import hashlib,sys; print("frame-creative-"+hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12])' "$workspace_root")"
 export FRAME_CREATIVE_SOCKET_DIRECTORY="$socket_directory"
+chmod 600 "$PROJECT_PATH/.env.docker.prod"
+source "$repo/scripts/frame-workspace-backup.sh"
+frame_backup_prepare "$PROJECT_PATH/.frame-backup-keys"
 compose=(docker compose --project-name "frame-${RELEASE_SHA:0:12}-${DEPLOY_RUN}" --env-file "$PROJECT_PATH/.env.docker.prod" -f "$repo/docker/docker-compose.prod.yml" -f "$repo/docker/creative.compose.yml")
 "${compose[@]}" config --quiet
 
 check_health() {
   curl --noproxy '*' -fsS --max-time 10 "$1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert (r.get("status"),r.get("product"),r.get("release"))==("ok",sys.argv[1],sys.argv[2])' "$2" "$3"
 }
-# reload只投递HUP，不能据其退出码认定新worker已接管；入口开关以实际HTTP响应为准。
+entry_write_status() {
+  curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Origin: $AGENT_UI_ORIGIN" -H 'x-video-factory-request: studio' -H 'Content-Type: application/json' -d '{}' "$AGENT_UI_ORIGIN/api/auth/login"
+}
 wait_entry_status() {
   local expected=$1 attempt
   for ((attempt=0;attempt<30;attempt++)); do
-    if [[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$AGENT_UI_ORIGIN/api/auth/login")" == "$expected" ]]; then return 0; fi
+    if [[ "$(entry_write_status)" == "$expected" ]]; then return 0; fi
     sleep 1
   done
-  printf 'Frame entry did not reach HTTP %s after nginx reload.\n' "$expected" >&2
+  printf 'Frame entry did not reach HTTP %s after changing the maintenance marker.\n' "$expected" >&2
   return 1
 }
 runner_image() {
@@ -125,7 +129,7 @@ old_container="$(docker inspect --format '{{.Id}}' "$container")"
 old_image="$(docker inspect --format '{{.Image}}' "$container")"
 old_product="$(curl --noproxy '*' -fsS --max-time 10 "$health" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="ok"; print(r["product"])')"
 old_release="$(curl --noproxy '*' -fsS --max-time 10 "$health" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"])')"
-old_write_status="$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' -X POST "$AGENT_UI_ORIGIN/api/auth/login")"
+old_write_status="$(entry_write_status)"
 [[ "$old_product" == frame ]]
 old_alias="$(docker image inspect --format '{{.Id}}' "$alias" 2>/dev/null || true)"
 old_runner=''
@@ -133,9 +137,8 @@ if [[ "$old_active" == active ]]; then old_runner="$(runner_image)"; [[ "$old_ru
 
 docker volume ls --format '{{.Name}}' --filter "name=$namespace-" | sort > /dev/null
 mkdir -m 700 -p "$backup"
+chmod 700 "$backup"
 cp "$RELEASE_MANIFEST" "$backup/release.json"
-cp -a "$site" "$backup/nginx-site"
-[[ ! -e "$maintenance" ]] || cp -a "$maintenance" "$backup/nginx-maintenance"
 [[ ! -e "$unit" ]] || cp -a "$unit" "$backup/runner-unit"
 [[ ! -e "$host_script" ]] || cp -a "$host_script" "$backup/runner-script"
 [[ ! -e "$PROJECT_PATH/.last-successful-release" ]] || cp -a "$PROJECT_PATH/.last-successful-release" "$backup/success-marker"
@@ -143,10 +146,7 @@ docker volume ls --format '{{.Name}}' --filter "name=$namespace-" | sort > "$bac
 printf '%s\n' "old_container=$old_container" "old_image=$old_image" "old_release=$old_release" "old_runner=$old_runner" "old_alias=$old_alias" "old_active=$old_active" "old_enabled=$old_enabled" "old_write_status=$old_write_status" "workspace_root=$workspace_root" "namespace=$namespace" > "$backup/original-state.txt"
 entry_changed=0; stopped=0; renamed=0; backed_up=0; runner_stopped=0; runner_changed=0; candidate_started=0; committed=0
 restore_entry() {
-  cp -a "$backup/nginx-site" "$site"
-  if [[ -e "$backup/nginx-maintenance" ]]; then cp -a "$backup/nginx-maintenance" "$maintenance"; else rm -f "$maintenance"; fi
-  nginx -t
-  systemctl reload nginx
+  sh "$repo/scripts/frame-release-entry.sh" open
   wait_entry_status "$old_write_status"
 }
 record_probe_volumes() {
@@ -182,7 +182,7 @@ restore() {
     if ((runner_changed)); then systemctl stop frame-creative.service; fi
     if ((backed_up && candidate_started)); then
       if [[ -d "$mount/agent" ]]; then mv "$mount/agent" "$backup/failed-agent"; fi
-      if [[ -e "$backup/had-agent" ]]; then tar xzf "$backup/workspace.tar.gz" -C "$mount" ./agent; fi
+      if [[ -e "$backup/had-agent" ]]; then frame_backup_decode "$backup/$frame_archive_name" | tar xzf - -C "$mount" ./agent; fi
     fi
     if ((runner_changed)); then
       if [[ -e "$backup/runner-script" ]]; then cp -a "$backup/runner-script" "$host_script"; else rm -f "$host_script"; fi
@@ -218,19 +218,9 @@ restore() {
 }
 trap restore EXIT
 
-# 第一次入口修改前已安装trap；只作用于本站location，保留真实GET健康与SSE。
+# 正式配置长期监听同一文件。先装好恢复 trap，再切换入口。
+sh "$repo/scripts/frame-release-entry.sh" close
 entry_changed=1
-install -m 600 "$repo/docker/frame-maintenance.nginx.conf" "$maintenance"
-python3 - "$site" "$maintenance" <<'PY'
-import pathlib,re,sys
-p=pathlib.Path(sys.argv[1]); text=p.read_text(); include='include '+sys.argv[2]+';'
-if include not in text:
-    text,n=re.subn(r'(location\s+/\s*\{)',lambda m:m[1]+'\n        '+include,text,count=1)
-    assert n==1, 'Frame location not found'
-    p.write_text(text)
-PY
-nginx -t
-systemctl reload nginx
 wait_entry_status 503
 docker exec "$container" node -e "$queue_check"
 stopped=1
@@ -248,9 +238,7 @@ docker run --rm --read-only --network none --tmpfs /tmp:rw,mode=1777 --mount "ty
 docker rename "$container" "$previous"; renamed=1
 if [[ "$old_active" == active ]]; then runner_stopped=1; systemctl stop frame-creative.service; fi
 [[ ! -d "$mount/agent" ]] || touch "$backup/had-agent"
-tar czf "$backup/workspace.tar.gz" -C "$mount" .
-gzip -t "$backup/workspace.tar.gz"
-tar tzf "$backup/workspace.tar.gz" > "$backup/workspace-files.txt"
+frame_backup_write "$mount" "$backup"
 backed_up=1
 # 写入口已隔离、队列已空，本轮仅新探针work写创作卷；原卷清单保留，不复制无关用户工程。
 runner_changed=1
@@ -295,8 +283,8 @@ docker volume ls --format '{{.Name}}' --filter "name=$namespace-" | sort > "$bac
 docker exec -i -e FRAME_CREATIVE_EXPECT_IMAGE="$creative_id" -e FRAME_CREATIVE_SMOKE_ID="release-$DEPLOY_RUN" "$container" node --input-type=module < "$repo/scripts/smoke-creative-container.mjs" | tee "$backup/creative-smoke.jsonl"
 record_probe_volumes
 check_health "$PUBLIC_HEALTH_URL" frame "$RELEASE_SHA"
-[[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' "$AGENT_UI_ORIGIN/api/agent/v1/settings/model-connections")" == 401 ]]
-curl --noproxy '*' -fsS --max-time 10 "$AGENT_UI_ORIGIN/agent" | grep -q '帧间 Frame'
+[[ "$(curl --noproxy '*' -sS --max-time 10 -o /dev/null -w '%{http_code}' "http://127.0.0.1:4317/api/agent/v1/settings/model-connections")" == 401 ]]
+curl --noproxy '*' -fsS --max-time 10 "http://127.0.0.1:4317/agent" | grep -q '帧间 Frame'
 cmp "$repo/scripts/creative-runner-host.mjs" "$host_script"
 [[ "$(runner_image)" == "$creative_id" ]]
 clean_probe_volumes

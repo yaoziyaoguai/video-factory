@@ -1,4 +1,4 @@
-import type { AgentDatabase } from "./db.js";
+import { stmt, type AgentDatabase } from "./db.js";
 import type { BillingFact, ExecutionObservation, Finance, LocalCreationSpec, MediaContent, OperationSpec, ProductionSpec, Run, RunOrigin, RunSegment } from "../../shared/agent/generated/contracts.js";
 import { canonicalJson } from "./util.js";
 import { AgentError } from "./errors.js";
@@ -7,6 +7,7 @@ import { productionAudioFacts, type ArtifactRevisionRow } from "./artifact-store
 export interface RunRow {
   id: string; owner_id: string; conversation_id: string; work_id: string; snapshot_id: string;
   proposal_id: string | null; source_request_id: string | null; title: string; frozen_target_json: string | null;
+  remix_of_run_id: string|null;
   state: Run["state"]; revision: number; created_seq: number;
   issue_json: string | null; lease_owner: string | null; execution_epoch: number; lease_until: string | null;
   created_at: string; updated_at: string;
@@ -26,14 +27,14 @@ export interface AttemptRow {
 export const terminal = (state: string): boolean => ["succeeded", "failed", "cancelled"].includes(state);
 export const quoteMinor = (op: OperationSpec): number => op.quotePerAttempt.amountMinor ?? 0;
 export function runRow(db: AgentDatabase, id: string): RunRow {
-  const row = db.prepare("SELECT * FROM production_runs WHERE id=?").get(id) as RunRow | undefined;
+  const row = stmt(db, "SELECT * FROM production_runs WHERE id=?").get(id) as RunRow | undefined;
   if (!row) throw new AgentError("NOT_FOUND", "没有找到这个运行。");
   return row;
 }
 // 快照双形状读取：旧付费快照无 type（按 paid_production 读）；本地运行是 local_creation。
 export type RunSnapshot = { kind: "paid"; spec: ProductionSpec } | { kind: "local"; spec: LocalCreationSpec };
 export function snapshotFor(db: AgentDatabase, run: RunRow): RunSnapshot {
-  const raw = JSON.parse((db.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json);
+  const raw = JSON.parse((stmt(db, "SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json);
   if (raw.type === "local_creation") return { kind: "local", spec: raw as LocalCreationSpec };
   return { kind: "paid", spec: raw as ProductionSpec };
 }
@@ -43,15 +44,15 @@ export function specFor(db: AgentDatabase, run: RunRow): ProductionSpec {
   return snapshot.spec;
 }
 export function operationsFor(db: AgentDatabase, runId: string): OperationRow[] {
-  return db.prepare("SELECT * FROM production_operations WHERE run_id=? ORDER BY rowid").all(runId) as OperationRow[];
+  return stmt(db, "SELECT * FROM production_operations WHERE run_id=? ORDER BY rowid").all(runId) as OperationRow[];
 }
 // 输出字节可被多操作复用，来源只沿发布事务记录的准确修订，不按 blob 或当前 head 反查。
 export function operationOutputRevision(db: AgentDatabase, runId: string, operationId: string): ArtifactRevisionRow | undefined {
-  return db.prepare(`SELECT r.* FROM production_operations o JOIN artifact_revisions r ON r.id=o.output_revision_id
+  return stmt(db, `SELECT r.* FROM production_operations o JOIN artifact_revisions r ON r.id=o.output_revision_id
     WHERE o.run_id=? AND o.id=?`).get(runId, operationId) as ArtifactRevisionRow | undefined;
 }
 export function attemptsFor(db: AgentDatabase, runId: string): AttemptRow[] {
-  return db.prepare("SELECT * FROM production_attempts WHERE run_id=? ORDER BY ordinal, rowid").all(runId) as AttemptRow[];
+  return stmt(db, "SELECT * FROM production_attempts WHERE run_id=? ORDER BY ordinal, rowid").all(runId) as AttemptRow[];
 }
 
 // —— C1 尝试效果收据 ——
@@ -68,19 +69,25 @@ export interface AttemptOutputRow {
   updated_at: string;
 }
 
+export function completedUsage(db: AgentDatabase, attemptId: string): Pick<ExecutionObservation,"usage"> {
+  const json=stmt(db,"SELECT usage_json FROM production_attempts WHERE id=?").pluck().get(attemptId) as string|null;
+  return json ? {usage:JSON.parse(json)} : {};
+}
+
 export function attemptOutput(db: AgentDatabase, attemptId: string): AttemptOutputRow | undefined {
-  return db.prepare("SELECT * FROM production_attempt_outputs WHERE attempt_id=?").get(attemptId) as AttemptOutputRow | undefined;
+  return stmt(db, "SELECT * FROM production_attempt_outputs WHERE attempt_id=?").get(attemptId) as AttemptOutputRow | undefined;
 }
 
 // 收据只前进不后退：已有身份/成品不被空值覆盖；唯一键 attemptId 定位未发布输出。
 export function recordAttemptOutput(
   db: AgentDatabase, now: string, attemptId: string,
   patch: {
-    providerTaskId?: string; blobId?: string; digest?: string;
+    providerTaskId?: string; blobId?: string; digest?: string; usage?:import("../../shared/agent/generated/contracts.js").ProviderUsage;
     exitCode?: number; exitKind?: "completed" | "failed" | "terminated"; detail?: string;
   },
 ): void {
-  db.prepare(
+  if(patch.usage) db.prepare("UPDATE production_attempts SET usage_json=json_patch(COALESCE(usage_json,'{}'),?) WHERE id=?").run(canonicalJson(patch.usage),attemptId);
+  stmt(db,
     `INSERT INTO production_attempt_outputs(attempt_id, provider_task_id, blob_id, digest, exit_code, exit_kind, detail, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(attempt_id) DO UPDATE SET
@@ -97,7 +104,7 @@ export function recordAttemptOutput(
 
 // 尚未确认退出的本地渲染尝试：跨重启继续占用本地并发名额，直到出现退出/成品收据。
 export function heldLocalAttemptRuns(db: AgentDatabase): { runId: string }[] {
-  return db.prepare(
+  return stmt(db,
     `SELECT DISTINCT a.run_id AS runId FROM production_attempts a
      JOIN production_operations o ON o.run_id = a.run_id AND o.id = a.operation_id
      JOIN production_runs r ON r.id = a.run_id
@@ -112,29 +119,29 @@ export function heldLocalAttemptRuns(db: AgentDatabase): { runId: string }[] {
 // 账单是累计净额，不能相加，也不能取 max（金钱更正可以向下）。原始观测另行保留。
 export function mergeBilling(db: AgentDatabase, attempt: AttemptRow, billing: BillingFact | null, local: boolean): void {
   if (local) {
-    db.prepare("UPDATE production_attempts SET billing_final=1, billed_minor=0 WHERE id=?").run(attempt.id);
+    stmt(db, "UPDATE production_attempts SET billing_final=1, billed_minor=0 WHERE id=?").run(attempt.id);
     return;
   }
   if (!billing || billing.kind !== "authoritative") return;
   const prior = attempt.billing_json ? JSON.parse(attempt.billing_json) as Extract<BillingFact, { kind: "authoritative" }> : null;
   if (prior) {
     if (prior.billingFactId !== billing.billingFactId) {
-      db.prepare("UPDATE production_attempts SET billing_conflict=1 WHERE id=?").run(attempt.id); return;
+      stmt(db, "UPDATE production_attempts SET billing_conflict=1 WHERE id=?").run(attempt.id); return;
     }
     const order = BigInt(billing.sourceRevision) - BigInt(prior.sourceRevision);
     if (order < 0n) return;
     if (order === 0n) {
       if (prior.netAmount.amountMinor !== billing.netAmount.amountMinor || prior.final !== billing.final) {
-        db.prepare("UPDATE production_attempts SET billing_conflict=1 WHERE id=?").run(attempt.id);
+        stmt(db, "UPDATE production_attempts SET billing_conflict=1 WHERE id=?").run(attempt.id);
       }
       return;
     }
   }
   // 同一账单的新版本可以更正金额，但不能解释另一个账单身份为何也属于本次尝试。
-  const identityConflict = db.prepare(`SELECT 1 FROM ledger_observations WHERE attempt_id=?
+  const identityConflict = stmt(db, `SELECT 1 FROM ledger_observations WHERE attempt_id=?
     AND json_extract(observation_json,'$.billing.kind')='authoritative'
     AND json_extract(observation_json,'$.billing.billingFactId')<>? LIMIT 1`).get(attempt.id, billing.billingFactId);
-  db.prepare("UPDATE production_attempts SET billing_json=?, billed_minor=?, billing_final=?, billing_conflict=? WHERE id=?")
+  stmt(db, "UPDATE production_attempts SET billing_json=?, billed_minor=?, billing_final=?, billing_conflict=? WHERE id=?")
     .run(canonicalJson(billing), billing.final ? billing.netAmount.amountMinor : attempt.billed_minor, Number(billing.final), Number(!!identityConflict), attempt.id);
 }
 
@@ -163,7 +170,7 @@ export function finances(db: AgentDatabase, run: RunRow): Finance {
 // media 只在输出落盘（output_blob_id）后给出真实媒体事实，不猜 RevisionRef。
 // mime_type 在写入 production_blobs 时已按合同校验，这里只做类型还原。
 function runOperations(db: AgentDatabase, runId: string): Run["operations"] {
-  const blobs = new Map((db.prepare("SELECT id, mime_type, duration_ms FROM production_blobs WHERE id IN (SELECT output_blob_id FROM production_operations WHERE run_id=? AND output_blob_id IS NOT NULL)").all(runId) as { id: string; mime_type: string; duration_ms: number | null }[]).map(row => [row.id, row]));
+  const blobs = new Map((stmt(db, "SELECT id, mime_type, duration_ms FROM production_blobs WHERE id IN (SELECT output_blob_id FROM production_operations WHERE run_id=? AND output_blob_id IS NOT NULL)").all(runId) as { id: string; mime_type: string; duration_ms: number | null }[]).map(row => [row.id, row]));
   return operationsFor(db, runId).map(operation => {
     const spec = JSON.parse(operation.spec_json) as OperationSpec;
     const blob = operation.output_blob_id ? blobs.get(operation.output_blob_id) : undefined;
@@ -185,7 +192,7 @@ export function runOrigin(row: RunRow): RunOrigin {
 
 // 快照里的实际输入修订：新付费 spec 取 inputSources 的 artifact_revision，旧快照读 inputRevisions。
 export function runInputRevisions(db: AgentDatabase, run: RunRow): Run["inputRevisions"] {
-  const raw = JSON.parse((db.prepare("SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json) as ProductionSpec | { inputRevisions: Run["inputRevisions"] };
+  const raw = JSON.parse((stmt(db, "SELECT spec_json FROM production_snapshots WHERE id=?").get(run.snapshot_id) as { spec_json: string }).spec_json) as ProductionSpec | { inputRevisions: Run["inputRevisions"] };
   if ("type" in raw) {
     return raw.inputSources.flatMap(source => source.kind === "artifact_revision" ? [{ artifactId: source.artifactId, revisionId: source.revisionId }] : []);
   }
@@ -193,7 +200,7 @@ export function runInputRevisions(db: AgentDatabase, run: RunRow): Run["inputRev
 }
 
 export function toRun(db: AgentDatabase, row: RunRow): Run {
-  const runOrder = (db.prepare("SELECT rowid AS ordinal FROM production_runs WHERE id=?").get(row.id) as { ordinal: number }).ordinal;
+  const runOrder = (stmt(db, "SELECT rowid AS ordinal FROM production_runs WHERE id=?").get(row.id) as { ordinal: number }).ordinal;
   const snapshot = snapshotFor(db, row);
   const origin = runOrigin(row);
   const audioSummary = productionAudioFacts(db, snapshot.spec, runOrder).audioSummary;
@@ -202,11 +209,11 @@ export function toRun(db: AgentDatabase, row: RunRow): Run {
     title: row.title, revision: row.revision, state: row.state,
     finance: origin.kind === "local_request" ? null : finances(db, row),
     inputRevisions: runInputRevisions(db, row),
-    outputRevisions: (db.prepare("SELECT artifact_id AS artifactId, id AS revisionId FROM artifact_revisions WHERE run_id=? ORDER BY rowid").all(row.id)) as Run["outputRevisions"],
+    outputRevisions: (stmt(db, "SELECT artifact_id AS artifactId, id AS revisionId FROM artifact_revisions WHERE run_id=? ORDER BY rowid").all(row.id)) as Run["outputRevisions"],
     operations: runOperations(db, row.id),
     segments: runSegments(db, row), ...(audioSummary ? { audioSummary } : {}),
     createdAt: row.created_at, updatedAt: row.updated_at, issue: row.issue_json ? JSON.parse(row.issue_json) as Run["issue"] : null,
-    origin,
+    origin, ...(row.remix_of_run_id ? {remixOf:row.remix_of_run_id} : {}),
   };
 }
 
@@ -228,7 +235,7 @@ export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
   if ("type" in spec) {
     for (const input of spec.reviewInputs) {
       if (input.source.kind !== "artifact_revision") continue;
-      const revisionRow0 = db.prepare("SELECT content_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+      const revisionRow0 = stmt(db, "SELECT content_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
         .get(input.source.artifactId, input.source.revisionId) as { content_json: string } | undefined;
       const content = revisionRow0 ? JSON.parse(revisionRow0.content_json) as { format?: string; sections?: unknown[] } : undefined;
       if (content?.format === "markdown" && Array.isArray(content.sections)) {
@@ -237,14 +244,14 @@ export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
       }
     }
   } else if (row.proposal_id) {
-    const proposal = db.prepare("SELECT plan_source_json FROM proposals WHERE id = ?").get(row.proposal_id) as { plan_source_json: string | null } | undefined;
+    const proposal = stmt(db, "SELECT plan_source_json FROM proposals WHERE id = ?").get(row.proposal_id) as { plan_source_json: string | null } | undefined;
     const planSource = proposal?.plan_source_json ? JSON.parse(proposal.plan_source_json) as { kind: string; artifactId?: string; revisionId?: string } : null;
     if (planSource?.kind === "artifact_revision" && planSource.artifactId && planSource.revisionId) {
       planRef = { artifactId: planSource.artifactId, revisionId: planSource.revisionId };
     }
   }
   if (!planRef) return [];
-  const planRevision = db.prepare("SELECT content_json, creation_binding_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+  const planRevision = stmt(db, "SELECT content_json, creation_binding_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
     .get(planRef.artifactId, planRef.revisionId) as { content_json: string; creation_binding_json: string | null } | undefined;
   if (!planRevision) return [];
   const planContent = JSON.parse(planRevision.content_json) as { format?: string; sections?: { id: string; title: string; sourceSectionIds?: string[] }[] };
@@ -259,7 +266,7 @@ export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
   const sectionsById = new Map(planContent.sections.map(section => [section.id, section]));
   const operationsById = new Map(operationsFor(db, row.id).map(operation => [operation.id, operation]));
   const blobFacts = (blobId: string): { mime_type: string; duration_ms: number | null } | undefined =>
-    db.prepare("SELECT mime_type, duration_ms FROM production_blobs WHERE id = ?").get(blobId) as { mime_type: string; duration_ms: number | null } | undefined;
+    stmt(db, "SELECT mime_type, duration_ms FROM production_blobs WHERE id = ?").get(blobId) as { mime_type: string; duration_ms: number | null } | undefined;
 
   // 视觉时间线与 renderSlotRole 同一事实来源：ordered=inputs 顺序；narrated=videoInputSlots；timed=segments。
   type SlotEntry = { slot: number; startMs: number | null; durationMs: number | null };
@@ -297,7 +304,7 @@ export function runSegments(db: AgentDatabase, row: RunRow): RunSegment[] {
       }
     } else if (input.kind === "artifact_revision") {
       revision = { artifactId: input.artifactId, revisionId: input.revisionId };
-      const revisionRow = db.prepare("SELECT content_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
+      const revisionRow = stmt(db, "SELECT content_json FROM artifact_revisions WHERE artifact_id = ? AND id = ?")
         .get(input.artifactId, input.revisionId) as { content_json: string } | undefined;
       const content = revisionRow ? JSON.parse(revisionRow.content_json) as { format?: string; blobId?: string; mimeType?: string; durationMs?: number | null } : undefined;
       if (content?.format === "media" && content.blobId) {

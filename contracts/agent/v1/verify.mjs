@@ -24,6 +24,13 @@ for (const [name, expected] of [
 
 const schema = JSON.parse(readFileSync(join(contractRoot, "contracts.schema.json"), "utf8"));
 const api = JSON.parse(readFileSync(join(contractRoot, "openapi.json"), "utf8"));
+const revision = api.info.version;
+if (schema.title !== `Frame contract payloads ${revision}`) throw new Error("OpenAPI 与 Schema 的当前修订不一致。");
+for (const file of ["agreement.md", "IMPORT.md"]) {
+  const heading = readFileSync(join(contractRoot, file), "utf8").split("\n")[2];
+  const version = /当前(?:契约)?修订(?:为)?\s*\*\*([\d.]+)\*\*/.exec(heading)?.[1];
+  if (version !== revision) throw new Error(`${file} 的当前修订应为 ${revision}。`);
+}
 const examples = JSON.parse(readFileSync(join(contractRoot, "examples.json"), "utf8"));
 const Ajv = localRequire("ajv/dist/2020.js").default;
 const ajv = new Ajv({ strict: true, allErrors: true, coerceTypes: false, useDefaults: false, removeAdditional: false });
@@ -89,7 +96,9 @@ for (const [path, pathItem] of Object.entries(api.paths)) {
       if (!operation.parameters?.some(p => p.in === "path" && p.name === match[1] && p.required)) throw new Error(`Missing path parameter: ${path}`);
     }
     if (["post", "patch"].includes(method)) {
-      const requestRef = operation.requestBody.content["application/json"].schema.$ref;
+      const formats = Object.entries(operation.requestBody.content);
+      if (formats.length !== 1 || !["application/json", "multipart/form-data"].includes(formats[0][0])) throw new Error(`Unexpected mutation encoding: ${operation.operationId}`);
+      const requestRef = formats[0][1].schema.$ref;
       const name = requestRef.split("/").at(-1);
       const payload = schema.$defs[name];
       // 原生包管理不产生命令回执；仅这两个精确操作/路径/写体例外，旧命令仍逐分支检查幂等身份。

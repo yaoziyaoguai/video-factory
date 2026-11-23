@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import http from "node:http";
 import { createReadStream, readFileSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { access, copyFile, symlink, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -72,6 +72,8 @@ interface HostExecution { workspaceId: string; command: string; argv: string[] |
 class LocalCreativeHost {
   private readonly server: http.Server;
   readonly executions: HostExecution[] = [];
+  exports = 0;
+  failedExportBytes: Buffer | null = null;
   fileFailure: { action: "write" | "read"; path: string; message: string } | null = null;
   private constructor(readonly socketPath: string, private readonly root: string) {
     this.server = http.createServer((request, response) => { void this.handle(request, response); });
@@ -105,8 +107,12 @@ class LocalCreativeHost {
       if (file.startsWith("/skills/")) return path.join(this.root, workspaceId, "skills", file.slice("/skills/".length));
       throw new Error(`宿主替身只接受容器内路径：${file}`);
     };
+    const transferRoot = path.join(this.root, "..", "app", "creative-transfer");
+    if (frame.action === "export_file") this.exports++;
+    const channel = frame.action === "import_file" ? "write" : frame.action === "export_file" ? "read" : frame.action;
     const failure = this.fileFailure;
-    if (failure && failure.action === frame.action && failure.path === frame.path) {
+    if (failure && failure.action === channel && failure.path === frame.path) {
+      if (frame.action === "export_file") this.failedExportBytes = await readFile(map(failure.path));
       this.fileFailure = null;
       throw new Error(failure.message);
     }
@@ -120,6 +126,19 @@ class LocalCreativeHost {
         }
         return {};
       }
+      case "import_file":
+      case "export_file": {
+        const local = path.join(transferRoot, workspaceId + "-" + frame.ticket, "payload");
+        const target = map(String(frame.path));
+        if (frame.action === "import_file") {
+          await mkdir(path.dirname(target), { recursive: true });
+          await copyFile(local, target);
+        } else await copyFile(target, local);
+        return {};
+      }
+      case "destroy":
+        assert.equal(frame.scope, "execution");
+        await rm(path.join(this.root, workspaceId), { recursive: true, force: true }); return {};
       case "write": {
         const target = map(frame.path as string);
         await mkdir(path.dirname(target), { recursive: true });
@@ -155,6 +174,10 @@ class LocalCreativeHost {
         const argv = (frame.argv as string[] | undefined) ?? null;
         const command = frame.command as string | undefined;
         await mkdir(workspaceDir, { recursive: true });
+        for (const alias of (frame.inputAliases ?? []) as string[]) {
+          await mkdir(path.join(workspaceDir, "inputs"), { recursive: true });
+          await symlink(path.join(transferRoot, workspaceId + "-inputs", alias), path.join(workspaceDir, "inputs", alias));
+        }
         const input = path.join(workspaceDir, "inputs", "0.png");
         this.executions.push({ workspaceId, command: command ?? JSON.stringify(argv), argv, inputBytes: await stat(input).then(s => s.size, () => null) });
         try {
@@ -377,10 +400,9 @@ it("DGR-R1.1 执行诊断：恢复文件和读取输出失败保留阶段与原�
       assert.doesNotMatch(failed.issue?.message ?? "", /没有产生声明的输出|没有生成输出/);
       assert.equal(world.host.executions.length - executionsBefore, failure.action === "write" ? 0 : 1);
       if (failure.action === "read") {
-        const runner = new CreativeRunner({ socketPath: world.host.socketPath });
-        const bytes = await runner.readFile({ conversationId: world.conversationId, workId: project.workId,
-          executionId: `${runId}:diagnostic-${index}` }, "out.png");
-        assert.ok(bytes.equals(makePng(46, 128, 110)), "读取通道失败时输出其实已存在，不能反推工程没有生成它");
+        assert.deepEqual(world.host.failedExportBytes, makePng(46, 128, 110), "传递失败前确实已经生成正确输出");
+        const id = creativeWorkspaceId({ conversationId: world.conversationId, workId: project.workId, executionId: `${runId}:diagnostic-${index}` });
+        await assert.rejects(access(path.join(world.directory, "creative-host", id)), { code: "ENOENT" });
       }
     }
     await send(world, [
@@ -1406,6 +1428,15 @@ it("G3-3 阶段退出：角色认可、场景未认可时 3 秒预览可受理�
   } finally { await world.close(); }
 });
 
+async function expectedFrozenFile(world: World, project: { artifactId: string; revisionId: string }, relativePath: string, mimeType: string) {
+  const { content } = world.runtime.service.readRevision("local-owner", project.artifactId, project.revisionId);
+  assert.ok(content.format === "project");
+  const file = content.files.find(entry => entry.relativePath === relativePath);
+  assert.ok(file, relativePath);
+  const blob = world.runtime.service.readBlob("local-owner", file.blobId);
+  return { project, relativePath, mimeType, blobId: file.blobId, sizeBytes: (await stat(blob.path)).size };
+}
+
 it("G4-2 跨会话选材工程文件：文本共享 blob 文件卡、媒体共享 blob，清单外拒绝", async () => {
   const world = await setup(); try {
     await send(world, [
@@ -1455,9 +1486,9 @@ it("G4-2 跨会话选材工程文件：文本共享 blob 文件卡、媒体共�
     assert.ok(entry);
     assert.deepEqual(entry.project, { artifactId: project.id, revisionId: project.revisionId });
     assert.deepEqual(entry.projectFiles, [
-      { project: { artifactId: project.id, revisionId: project.revisionId }, relativePath: "main.cjs", mimeType: "text/javascript" },
-      { project: { artifactId: project.id, revisionId: project.revisionId }, relativePath: "sample.mp4", mimeType: "video/mp4" },
-      { project: { artifactId: project.id, revisionId: project.revisionId }, relativePath: "model.bin", mimeType: "application/octet-stream" },
+      await expectedFrozenFile(world, { artifactId: project.id, revisionId: project.revisionId }, "main.cjs", "text/javascript"),
+      await expectedFrozenFile(world, { artifactId: project.id, revisionId: project.revisionId }, "sample.mp4", "video/mp4"),
+      await expectedFrozenFile(world, { artifactId: project.id, revisionId: project.revisionId }, "model.bin", "application/octet-stream"),
     ]);
     const projectContent = jsonField(world, "SELECT content_json FROM artifact_revisions WHERE artifact_id=? AND id=?", "content_json", project.id, project.revisionId) as { files: { relativePath: string; blobId: string }[] };
     const mp4BlobId = projectContent.files.find(file => file.relativePath === "sample.mp4")!.blobId;
@@ -1785,7 +1816,7 @@ it("G4-1 定稿事实冻结：finalize 只认最终视频，后继新稿/新工�
     assert.deepEqual(world.runtime.service.readRevision("local-owner", draftV1.artifactId, draftV1.revisionId).content, draftRevisionV1.content);
     assert.deepEqual(entries[0]!.project, { artifactId: projectV1.id, revisionId: projectV1.revisionId });
     assert.deepEqual(entries[0]!.projectFiles, [
-      { project: { artifactId: projectV1.id, revisionId: projectV1.revisionId }, relativePath: "main.cjs", mimeType: "text/javascript" },
+      await expectedFrozenFile(world, { artifactId: projectV1.id, revisionId: projectV1.revisionId }, "main.cjs", "text/javascript"),
     ], "S3：定稿工程只冻结源码清单，输出产物不混入封存文件");
   } finally { await world.close(); }
 });
@@ -2074,8 +2105,8 @@ if (fs.existsSync("inputs/0.mp4")) {
     assert.ok(entry);
     assert.deepEqual(entry.project, projectB, "最终主工程；没有则为 null，不猜上游工程");
     assert.deepEqual(entry.projectFiles, [
-      { project: projectB, relativePath: "main.cjs", mimeType: "text/javascript" },
-      { project: projectA, relativePath: "main.cjs", mimeType: "text/javascript" },
+      await expectedFrozenFile(world, projectB, "main.cjs", "text/javascript"),
+      await expectedFrozenFile(world, projectA, "main.cjs", "text/javascript"),
     ], "多工程清单按行 project 归属，主工程分组在前；同名 main.cjs 各自指向所属工程");
     assert.deepEqual(entry.materials, [
       { source: result.outputRevisions[0]!, label: "来源 v1 · 多工程成片 · 合成视频 1（现名）", kind: "video", provenance: [] },
@@ -2248,6 +2279,7 @@ it("C1 工程续版只认归属创作：跨作品续版拒绝且无残留；本�
       count(world, "FROM artifact_revisions WHERE artifact_id=?", artifactId);
 
     // 跨作品续版：B 的工程以 baseRevisionId 声明到 A 名下——拒绝，双方向都无残留。
+    const exportsBeforeRejection = world.host.exports;
     const beforeCounts = [revisionCount(projectA.artifactId), revisionCount(projectB.artifactId)];
     await send(world, [
       fauxAssistantMessage([fauxToolCall("publish_project", { workId: projectA.workId, artifactId: projectB.artifactId,
@@ -2261,6 +2293,7 @@ it("C1 工程续版只认归属创作：跨作品续版拒绝且无残留；本�
         return fauxAssistantMessage("需要各自封存。");
       },
     ], "把B的工程续到A名下。");
+    assert.equal(world.host.exports, exportsBeforeRejection, "跨作品封存拒绝在首个文件导出之前");
     assert.equal(revisionCount(projectA.artifactId), beforeCounts[0], "A 的工程无新修订");
     assert.equal(revisionCount(projectB.artifactId), beforeCounts[1], "B 的工程无新修订");
 
@@ -2416,26 +2449,26 @@ it("DD-10 已知输入和冻结文件逐份检查，拒绝超限不写受理事�
 
     // 合成尺寸元数据覆盖原线上同类风险，不分配或下载大文件。
     const oversized = world.blobs.persist("local-owner", world.conversationId, Buffer.from("large video fixture"), "video/mp4", 3200);
-    updateSize(oversized.id, 234_140_076);
+    updateSize(oversized.id, 600_000_000);
     const before = admissionState();
     assert.throws(() => admit({ ...draft, inputs: [reference(oversized)] }), {
-      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*234140076.*312186\d+.*134217728.*更小/,
+      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*600000000.*536870912.*更小/,
     });
     assert.deepEqual(admissionState(), before);
 
     const projectContent = jsonField(world, "SELECT content_json FROM artifact_revisions WHERE id=?", "content_json", revisionId) as CreativeProjectContent;
     const frozen = projectContent.files[0]!;
-    updateSize(frozen.blobId, 96 * 1024 * 1024);
+    updateSize(frozen.blobId, 512 * 1024 * 1024 + 1);
     assert.throws(() => admit(draft), {
-      code: "INVALID_INPUT", message: /frame-1.*冻结文件.*main\.cjs.*100663296.*134217\d+.*134217728/,
+      code: "INVALID_INPUT", message: /frame-1.*冻结文件.*main\.cjs.*536870913.*536870912/,
     });
     assert.deepEqual(admissionState(), before);
     updateSize(frozen.blobId, readFileSync(world.blobs.filePath(world.blobs.get("local-owner", frozen.blobId).digest)).length);
 
-    // 只按每次 write 传输计算，两个 60 MiB 文件各自合法。只验证受理，文件本身是小夹具。
+    // 只按每次 write 传输计算，234 MB 与 60 MiB 两个文件各自合法。只验证受理，文件本身是小夹具。
     const moderateA = world.blobs.persist("local-owner", world.conversationId, makePng(10, 30, 70), "image/png", null);
     const moderateB = world.blobs.persist("local-owner", world.conversationId, makePng(10, 30, 90), "image/png", null);
-    updateSize(moderateA.id, 60 * 1024 * 1024);
+    updateSize(moderateA.id, 234_140_076);
     updateSize(moderateB.id, 60 * 1024 * 1024);
     const separateWrites = admit({ ...draft, inputs: [reference(moderateA), reference(moderateB)] });
     assert.equal(separateWrites.run.state, "queued");
@@ -2444,7 +2477,7 @@ it("DD-10 已知输入和冻结文件逐份检查，拒绝超限不写受理事�
 
     // 非 code_project 继续采用原受理规则，即使同一 blob 的尺寸超过 runner 消息限制。
     const plain = admit({ ...draft, inputs: [reference(oversized)],
-      parameters: { assembly: "ordered_concat", format: "mp4", width: 160, height: 90, fps: 24, audioMode: "none" } });
+      parameters: { assembly: "ordered_concat", format: "mp4", width: 640, height: 360, fps: 24, audioMode: "none" } });
     assert.equal(plain.run.state, "queued");
     world.runtime.production!.cancel("local-owner", plain.run.id, { commandId: cmd(), expectedRevision: plain.run.revision });
     await drive(world, plain.run.id);
@@ -2458,10 +2491,10 @@ it("DD-10 已知输入和冻结文件逐份检查，拒绝超限不写受理事�
     const exact = world.runtime.service.readRevision("local-owner", output.artifactId, output.revisionId);
     assert.equal(exact.content.format, "media");
     const source = { kind: "artifact_revision" as const, artifactId: output.artifactId, revisionId: output.revisionId, digest: exact.digest };
-    updateSize(exact.content.blobId, 96 * 1024 * 1024);
+    updateSize(exact.content.blobId, 512 * 1024 * 1024 + 1);
     const beforeRevisionRef = admissionState();
     assert.throws(() => admit({ ...draft, inputs: [source] }, [source]), {
-      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*100663296.*更小/,
+      code: "INVALID_INPUT", message: /frame-1.*槽位 0.*536870913.*更小/,
     });
     assert.deepEqual(admissionState(), beforeRevisionRef);
   } finally { await world.close(); }
@@ -2476,7 +2509,7 @@ it("DD-10 旧队列与未知上游在执行时按真实文件大小拒绝，不�
     const admit = (operations: ToolRenderProject["operations"]) => world.runtime.production!.admitLocalRender("local-owner",
       world.conversationId, request, { workId: project.workId, title: "DD-10 执行边界", scope: "输入槽",
         purpose: "draft", inputSources: [], reviewInputs: [], operations });
-    const sizeBytes = 96 * 1024 * 1024;
+    const sizeBytes = 512 * 1024 * 1024 + 1;
     // 模拟受理规则升级前的素材，以及当前批次才知道大小的上游产物。
     // 稀疏文件从真实 PNG 尾部扩展，按新字节流重新计算摘要，生产 worker 仍真实核验文件。
     const makeLarge = async (blobId: string) => {
@@ -2494,7 +2527,7 @@ it("DD-10 旧队列与未知上游在执行时按真实文件大小拒绝，不�
       world.host.fileFailure = inputWriteTrap;
       const failed = await drive(world, receipt.run.id);
       assert.equal(failed.state, "failed");
-      assert.match(failed.issue?.message ?? "", new RegExp(`slot=0.*${operationId}.*100663296.*134217728`));
+      assert.match(failed.issue?.message ?? "", new RegExp(`slot=0.*${operationId}.*536870913.*536870912`));
       assert.deepEqual(failed.outputRevisions, previousOutputs);
       assert.equal(world.host.fileFailure, inputWriteTrap, "超限素材尚未发到 UDS");
       assert.equal(world.host.executions.length, executions, "超限后未执行入口");
@@ -2524,4 +2557,171 @@ it("DD-10 旧队列与未知上游在执行时按真实文件大小拒绝，不�
     await makeLarge(revision.content.blobId);
     await checkFailed(chain, "consumer", first.outputRevisions);
   } finally { await world.close(); }
+});
+
+it("ISS-03 发布工程再下载，脚本、HTML、SVG 和 Makefile 均为受隔离的附件", async () => {
+  const world = await setup();
+  const { buildFrameApp } = await import("../src/server/agent/app.js");
+  const app = buildFrameApp({ agent: { service: world.runtime.service, resolveOwner: () => "local-owner", uiOrigin: "http://127.0.0.1" } });
+  try {
+    const project = await authorProject(world);
+    const runner = new CreativeRunner({ socketPath: world.host.socketPath });
+    const workspace = editingWorkspace(world.conversationId, project.workId);
+    const files = ["entry.JS", "data.mjs", "data.cjs", "sample.html", "drawing.svg", "Makefile"];
+    for (const file of files) await runner.writeFile(workspace, file, "Fixture " + file);
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("publish_project", { workId: project.workId, title: "下载类型验证", files,
+        entrypoint: { argv: ["node", "entry.JS"] }, dependencyLocks: [], timelineFiles: [], sourceRevisions: [] })]),
+      fauxAssistantMessage("已封存。"),
+    ]);
+    const head = world.runtime.service.snapshot("local-owner", world.conversationId).artifacts.items.find(item => item.title === "下载类型验证")!;
+    const revision = world.runtime.service.readRevision("local-owner", head.id, head.revisionId);
+    assert.equal(revision.content.format, "project");
+    for (const file of revision.content.files) {
+      const response = await app.inject({ url: "/api/agent/v1/blobs/" + file.blobId + "/content" });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.headers["content-disposition"], "attachment");
+      assert.equal(response.headers["x-content-type-options"], "nosniff");
+      assert.equal(response.headers["content-security-policy"], "default-src 'none'; sandbox");
+      if (/\.(?:[mc]?js)$/i.test(file.relativePath)) assert.equal(response.headers["content-type"], "text/plain; charset=utf-8");
+      if (file.relativePath === "Makefile") assert.equal(response.headers["content-type"], "application/octet-stream");
+      assert.equal(response.body, "Fixture " + file.relativePath);
+    }
+  } finally { await app.close(); await world.close(); }
+});
+
+it("CAP-04 上传实拍和 WebP 原件在冻结代码工程中按实际槽位读取并交付视频", async () => {
+  const world = await setup();
+  const { buildFrameApp } = await import("../src/server/agent/app.js");
+  const app = buildFrameApp({
+    agent: { service: world.runtime.service, resolveOwner: () => "local-owner", uiOrigin: "http://upload.test" },
+  });
+  try {
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const film = path.join(world.directory, "source.mp4");
+    await run("ffmpeg", [
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=s=640x360:r=24:d=1",
+      "-pix_fmt",
+      "yuv420p",
+      film,
+    ]);
+    const movie = await readFile(film);
+    const logo = Buffer.from(
+      "UklGRj4AAABXRUJQVlA4TDEAAAAvf8JZAA/wS+zzsD90dv5jCWoaSYFwgH+11NTfRPR/AmphzejkP/7jv7HD//zP/w9EAA==",
+      "base64",
+    );
+    const refs = [];
+    for (const [name, mime, bytes] of [
+      ["source.mp4", "video/mp4", movie],
+      ["logo.webp", "image/webp", logo],
+    ] as const) {
+      const form = new FormData();
+      form.append("commandId", cmd());
+      form.append(
+        "expectedRevision",
+        String(world.runtime.service.snapshot("local-owner", world.conversationId).conversation.revision),
+      );
+      form.append("rights", "owned_or_licensed");
+      form.append("file", new Blob([Uint8Array.from(bytes)], { type: mime }), name);
+      const response = await fetch(address + "/api/agent/v1/conversations/" + world.conversationId + "/uploads", {
+        method: "POST",
+        headers: { origin: "http://upload.test", "x-video-factory-request": "studio" },
+        body: form,
+      });
+      const data = (await response.json()) as import("../src/shared/agent/generated/contracts.js").UploadReceipt;
+      assert.equal(response.status, 201, JSON.stringify(data));
+      refs.push({
+        kind: "artifact_revision" as const,
+        ...data.attachment.source,
+        digest: world.runtime.service.readRevision(
+          "local-owner",
+          data.attachment.source.artifactId,
+          data.attachment.source.revisionId,
+        ).digest,
+      });
+    }
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("start_work", { title: "实拍工程" })]),
+      fauxAssistantMessage("已创建。"),
+    ]);
+    const workId = works(world)[0]!.id;
+    const code =
+      'const fs=require("node:fs"), crypto=require("node:crypto");\n' +
+      'if (crypto.createHash("sha256").update(fs.readFileSync("inputs/1.webp")).digest("hex") !== ' +
+      JSON.stringify(createHash("sha256").update(logo).digest("hex")) +
+      ') throw new Error("标识图字节不一致");\n' +
+      'fs.copyFileSync("inputs/0.mp4","out.mp4");';
+    const entrypoint = { argv: ["node", "main.cjs"] };
+    await send(world, [
+      fauxAssistantMessage([fauxToolCall("write", { path: "main.cjs", content: code })]),
+      fauxAssistantMessage([
+        fauxToolCall("publish_project", {
+          workId,
+          title: "实拍源工程",
+          files: ["main.cjs"],
+          entrypoint,
+          dependencyLocks: [],
+          timelineFiles: [],
+          sourceRevisions: refs.map(({ artifactId, revisionId }) => ({ artifactId, revisionId })),
+        }),
+      ]),
+      fauxAssistantMessage("已冻结。"),
+    ]);
+    const projectRevision = latestProjectRevision(world);
+    assert.ok(projectRevision);
+    await send(world, [
+      fauxAssistantMessage([
+        fauxToolCall("render_project", {
+          workId,
+          title: "原片",
+          scope: "原件渲染",
+          purpose: "draft",
+          inputSources: refs,
+          reviewInputs: [],
+          operations: [
+            {
+              operationId: "passthrough",
+              outputSlot: "movie",
+              inputs: refs,
+              parameters: {
+                assembly: "code_project",
+                projectRevision,
+                entrypoint,
+                outputPath: "out.mp4",
+                expectedMediaKind: "video",
+                format: "mp4",
+                width: 640,
+                height: 360,
+                fps: 24,
+              },
+              target: {
+                group: { mode: "create", key: "final", title: "样片", nextIntent: null },
+                item: { mode: "create", key: "movie", label: "实拍样片", role: "video", required: true },
+              },
+            },
+          ],
+        }),
+      ]),
+      fauxAssistantMessage("已受理。"),
+    ]);
+    const row = world.runtime.database
+      .prepare("SELECT id FROM production_runs WHERE conversation_id=?")
+      .get(world.conversationId) as { id: string } | undefined;
+    assert.ok(
+      row,
+      JSON.stringify(world.runtime.database.prepare("SELECT tool_name,result_json FROM tool_invocations").all()),
+    );
+    const result = await drive(world, row.id);
+    assert.equal(result.state, "succeeded", JSON.stringify(result.issue));
+    assert.deepEqual(outputBytes(world, result.outputRevisions[0]!.revisionId), movie);
+  } finally {
+    await app.close();
+    await world.close();
+  }
 });

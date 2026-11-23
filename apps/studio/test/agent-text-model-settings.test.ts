@@ -16,7 +16,8 @@ import { assembleOfflineAgent } from "../src/server/agent/offline.js";
 import { defaultTextBindingOf, initializeTextModelSettings, textModelsView, textRegistrationOf } from "../src/server/agent/text-model-settings.js";
 import { canonicalJson } from "../src/server/agent/util.js";
 import { turnDiagnostics, type TurnDiagnostic } from "../src/server/agent/turn-diagnostics.js";
-import type { AgentDatabase } from "../src/server/agent/db.js";
+import Sqlite from "better-sqlite3";
+import { MIGRATIONS, openAgentDatabase, type AgentDatabase } from "../src/server/agent/db.js";
 import type { ConnectionModel, ProviderConnection } from "../src/shared/agent/generated/contracts.js";
 
 // T2（OpenAI 收敛后）：统一连接入口的文本执行生命周期——冻结绑定、换 Key、重启恢复、
@@ -597,3 +598,104 @@ function insertQueuedRequest(db: AgentDatabase, conversationId: string, requestI
      VALUES(?,?,?,?, 'user','chat','queued',?,'{"artifacts":[],"proposalIds":[],"runIds":[]}',?,?,?)`,
   ).run(`msg-${requestId}`, conversationId, OWNER, requestId, message, messageSeq, now, now);
 }
+
+for (const protocol of ["anthropic-messages", "openai-chat-completions", "ark"] as const) {
+  it(`ISS-16 ${protocol} 从设置进入真实 Pi 工具循环，逐轮回送两条实际结果`, async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "frame-native-text-"));
+    const calls: { url: string; headers: http.IncomingHttpHeaders; body: { model: string; messages: unknown[] } }[] = [];
+    const anthropic = protocol === "anthropic-messages";
+    const provider = http.createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const step = calls.length;
+      calls.push({ url: request.url!, headers: request.headers, body });
+      const tool = step < 2;
+      const toolId = `tool_${step}`;
+      const args = JSON.stringify({ kind: step === 0 ? "proposals" : "runs" });
+      const text = "已读取两个制作索引。";
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      if (anthropic) {
+        const event = (type: string, data: object) => response.write(`event: ${type}\ndata: ${JSON.stringify({type, ...data})}\n\n`);
+        event("message_start", { message: {id: `msg_${step}`, type:"message", role:"assistant", model:body.model, content:[], stop_reason:null, stop_sequence:null, usage:{input_tokens:24,output_tokens:0}} });
+        event("content_block_start", {index:0, content_block: tool ? {type:"tool_use",id:toolId,name:"list_production",input:{}} : {type:"text",text:""}});
+        event("content_block_delta", {index:0, delta: tool ? {type:"input_json_delta",partial_json:args} : {type:"text_delta",text}});
+        event("content_block_stop", {index:0});
+        event("message_delta", {delta:{stop_reason: tool ? "tool_use" : "end_turn",stop_sequence:null},usage:{output_tokens:8}});
+        event("message_stop", {});
+      } else {
+        const event = (delta: object, finish_reason: string | null) => response.write(`data: ${JSON.stringify({id:`chatcmpl-${step}`,object:"chat.completion.chunk",created:1,model:body.model,choices:[{index:0,delta,finish_reason}]})}\n\n`);
+        event(tool ? {role:"assistant",tool_calls:[{index:0,id:toolId,type:"function",function:{name:"list_production",arguments:args}}]} : {role:"assistant",content:text}, null);
+        event({}, tool ? "tool_calls" : "stop");
+        response.write("data: [DONE]\n\n");
+      }
+      response.end();
+    });
+    await new Promise<void>(resolve => provider.listen(0, "127.0.0.1", resolve));
+    const origin = "http://127.0.0.1:3009";
+    const local = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`;
+    const app = await assembleTextApp(directory, origin, local + (anthropic ? "" : "/v1"));
+    try {
+      const modelId = anthropic ? "claude-private-deployment" : protocol === "ark" ? "ep-staging-text" : "private-chat";
+      const baseUrl = anthropic ? "https://api.anthropic.com" : protocol === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : "https://gateway.example.test/v1";
+      const connection = { ...openaiConnection([text("test-text", {modelId, isDefault:true})]), protocol, baseUrl, id:`cfg-${protocol}` };
+      const post = (url: string, payload: object) => app.app.inject({method:"POST",url:"/api/agent/v1"+url,
+        headers:{origin,"x-video-factory-request":"studio"},payload});
+      const saved = await post("/settings/model-connections", {commandId:crypto.randomUUID(),expectedRevision:0,connection});
+      assert.equal(saved.statusCode, 200, saved.body);
+      assert.equal(calls.length, 0, "保存不得发起供应商请求");
+      const created = await post("/conversations", {commandId:crypto.randomUUID(),title:"原生协议验证"});
+      assert.equal(created.statusCode, 201, created.body);
+      const conversation = created.json<{id:string}>();
+      const response = await post(`/conversations/${conversation.id}/messages`, {commandId:crypto.randomUUID(),text:"核对提案和运行记录",target:null,skillId:null,proposalRef:null,mode:"new",steerRequestId:null});
+      assert.equal(response.statusCode, 202, response.body);
+      const {requestId} = response.json<{requestId:string}>();
+      const state = await waitTerminalVia(app.db, requestId);
+      const messages = (await app.app.inject({url:`/api/agent/v1/conversations/${conversation.id}/messages`})).json<{items:{text:string}[]}>();
+      assert.equal(state, "completed", JSON.stringify(messages));
+      assert.equal(calls.length, 3);
+      assert.ok(messages.items.some(item => item.text === "已读取两个制作索引。"));
+      for (const call of calls) {
+        assert.equal(call.body.model, modelId);
+        assert.match(call.url, anthropic ? /^\/v1\/messages(\?|$)/ : /^\/v1\/chat\/completions$/);
+        assert.equal(anthropic ? call.headers["x-api-key"] : call.headers.authorization, anthropic ? connection.apiKey : `Bearer ${connection.apiKey}`);
+      }
+      for (const [index, kind] of ["proposals","runs"].entries()) {
+        const wire = JSON.stringify(calls[index+1]!.body.messages);
+        assert.ok(wire.includes(`tool_${index}`) && wire.includes(kind) && wire.includes("nextCursor"), "下一轮含真实工具回执");
+      }
+    } finally {
+      await app.close();
+      await new Promise<void>(resolve => provider.close(() => resolve()));
+      await rm(directory, {recursive:true,force:true});
+    }
+  });
+}
+
+it("ISS-16 实际 v29 数据库升级保留可执行 Responses 与退役绑定的不同授权", async t => {
+  const directory = await mkdtemp(path.join(tmpdir(), "frame-text-v29-"));
+  t.after(() => rm(directory, {recursive:true,force:true}));
+  const old = new Sqlite(path.join(directory,"agent.db"));
+  const now = staticClock();
+  old.exec("CREATE TABLE agent_schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  for (const migration of MIGRATIONS.filter(item => item.version <= 29)) old.transaction(() => {
+    for (const statement of migration.statements) old.exec(statement);
+    migration.data?.(old);
+    old.prepare("INSERT INTO agent_schema_migrations VALUES (?,?)").run(migration.version,now);
+  })();
+  const bindings = ["openai-responses","anthropic-messages"].map(protocol => {
+    const binding = {providerId:protocol,modelId:"historical",connectionId:protocol,configurationRevisionId:protocol};
+    const config = {protocol,modelId:"historical",baseUrl:"https://models.example.test",contextWindowTokens:16000,maxOutputTokens:2000};
+    old.prepare("INSERT INTO text_model_versions(configuration_revision_id,binding_json,configuration_json,api_key,created_at) VALUES(?,?,?,?,?)")
+      .run(protocol,canonicalJson(binding),canonicalJson(config),"migration-fixture",now);
+    return binding;
+  });
+  old.close();
+  const db = openAgentDatabase(directory);
+  try {
+    assert.deepEqual(db.prepare("SELECT binding_format FROM text_model_versions ORDER BY configuration_revision_id").pluck().all(),[1,1]);
+    assert.equal(textRegistrationOf(db,bindings[0]!)?.protocol,"openai-responses");
+    assert.equal(textRegistrationOf(db,bindings[1]!),null);
+    assert.equal(db.prepare("SELECT COUNT(*) FROM agent_schema_migrations WHERE version=30").pluck().get(),1);
+  } finally { db.close(); }
+});

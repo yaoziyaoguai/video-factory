@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.47",
+    "version": "0.1.59",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [
@@ -107,6 +107,42 @@
     }
   },
   "paths": {
+    "/settings/services": {
+      "get": {
+        "operationId": "readFreeServiceSettingsDirectory",
+        "description": "一次返回全部免费服务的当前公开配置快照（顺序固定：图库、无 Key 素材、热歌榜、NewsNow、配音）；供设置页挂载单次读取，替代逐服务请求。已保存 Key 只回显配置事实，不含明文。",
+        "responses": {
+          "200": {
+            "description": "全部免费服务的当前设置",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/FreeServiceSettingsDirectory"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
     "/settings/services/{serviceId}": {
       "get": {
         "operationId": "getFreeServiceSettings",
@@ -413,6 +449,53 @@
       }
     },
     "/conversations/{conversationId}": {
+      "get": {
+        "operationId": "readConversation",
+        "description": "读取这条会话的当前标题、版本与更新时间。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Conversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
       "patch": {
         "operationId": "renameConversation",
         "description": "",
@@ -529,7 +612,7 @@
     "/conversations/{conversationId}/messages": {
       "post": {
         "operationId": "sendMessage",
-        "description": "先持久化再派发。reviewConfirmation 对准确单项/组版本记真实认可；按钮 approve_and_continue 只排一次普通请求，finalize_video 只定稿。librarySelections 保留准确来源并建立使用引用，不自动建 work/制作，确认命令不同时携带选材。现有绑定提案确认仍可原子受理付费 run。",
+        "description": "先持久化再派发。reviewConfirmation 对准确单项/组版本记真实认可；按钮 approve_and_continue 只排一次普通请求，finalize_video 只定稿。librarySelections 保留准确来源并建立使用引用，不自动建 work/制作，确认命令不同时携带选材。现有绑定提案确认仍可原子受理付费 run。steer 只在目标请求仍在运行且 Pi 接受干预时记录消息和回执。失去运行窗口返回 409 REQUEST_NOT_RUNNING，可改为新消息发送。作品库来源视频不在本人空间时返回 404 NOT_FOUND。",
         "responses": {
           "202": {
             "description": "Accepted or replayed result",
@@ -1066,7 +1149,7 @@
     "/conversations/{conversationId}/proposals": {
       "post": {
         "operationId": "prepareProposal",
-        "description": "Normalize/validate and quote using local verified metadata; no paid provider call. No Work creation.",
+        "description": "Normalize/validate and quote using local verified metadata; no paid provider call. No Work creation. 图生视频按冻结型号核对数量；Seedance 2.5 可传 30 张角色参考图。",
         "responses": {
           "201": {
             "description": "Success",
@@ -1505,7 +1588,7 @@
     "/blobs/{blobId}/content": {
       "get": {
         "operationId": "readBlob",
-        "description": "鉴权读取不可变媒体或工程文件，核对归属并支持 Range；不暴露宿主路径、不提供上传。源码以受控类型下载，JS/HTML/SVG 不作为顶层同源可执行页面。",
+        "description": "读取已鉴权的不可变媒体或工程文件。受控媒体支持 Range、私有缓存与 ETag。源码作为附件。",
         "parameters": [
           {
             "name": "blobId",
@@ -1521,6 +1604,27 @@
             "schema": {
               "type": "string",
               "pattern": "^bytes=[0-9]*-[0-9]*$"
+            }
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/BlobDownloadFlag"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -1543,10 +1647,25 @@
                 }
               },
               "X-Content-Type-Options": {
-                "description": "禁止浏览器猜测可执行类型。",
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -1569,10 +1688,25 @@
                 }
               },
               "X-Content-Type-Options": {
-                "description": "禁止浏览器猜测可执行类型。",
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -1590,10 +1724,61 @@
             "$ref": "#/components/responses/Error404"
           },
           "416": {
-            "description": "Unsatisfiable range"
+            "description": "Unsatisfiable range",
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              }
+            }
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          },
+          "304": {
+            "description": "媒体摘要与客户端缓存一致。",
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "历史媒体已按保留策略归档。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1929,7 +2114,7 @@
     "/settings/skills": {
       "get": {
         "operationId": "readSkillPackages",
-        "description": "读取本应用当前已配置包、实际发现的 Skill、解析诊断与当前 mutation；只读，不安装、不升级。列表反映当前配置与发现结果，不能证明依赖命令从未执行。 发现 status 与 runtimeStatus 分开；unchecked 不宣称执行可用，ready 有实际探测证据。",
+        "description": "读取本应用当前已配置包、实际发现的 Skill、解析诊断与当前 mutation；只读，不安装、不升级。列表反映当前配置与发现结果，不能证明依赖命令从未执行。 发现 status 与 runtimeStatus 分开；unchecked 不宣称执行可用，ready 表示创作沙箱中已验证所有声明的命令与 Python 模块，unavailable 给出缺失项。",
         "responses": {
           "200": {
             "description": "当前 Skill 包目录",
@@ -1966,7 +2151,7 @@
     "/settings/skills/install": {
       "post": {
         "operationId": "installSkillPackage",
-        "description": "使用 Pi 原生来源语义安装 npm、Git 或服务端本机目录包；拒绝 URL 内嵌凭据。相同已安装来源回读当前结果，不重跑安装；修改版本须先卸载。仅加载 Skill，安装不等于调用。前台有 queued/running 请求或已有管理操作时返回 409 RUN_BUSY、retryAction=wait；后台媒体运行不算前台忙。成功后目录与空闲会话已刷新；不返回 command receipt、不承诺 exactly-once。响应丢失或失败时先 GET 回读，不自动重发；实际状态不可回读时如实报错，不声明回滚。",
+        "description": "使用 Pi 原生来源语义安装 npm、公共 HTTPS Git 或服务端本机目录包；先核验目录与数据区边界或远程主机。Git 拒绝内嵌凭据、文件协议与重定向。相同已安装来源回读当前结果，不重跑安装；修改版本须先卸载。仅加载 Skill，安装不等于调用。前台有 queued/running 请求或已有管理操作时返回 409 RUN_BUSY、retryAction=wait；后台媒体运行不算前台忙。成功后目录与空闲会话已刷新；不返回 command receipt、不承诺 exactly-once。响应丢失或失败时先 GET 回读，不自动重发；实际状态不可回读时如实报错，不声明回滚。",
         "responses": {
           "200": {
             "description": "安装、持久化与目录刷新完成后的当前视图",
@@ -2312,7 +2497,7 @@
     "/library/videos": {
       "get": {
         "operationId": "listLibraryVideos",
-        "description": "仅 finalize_video 的准确视频修订入库；返回冻结 project/materials/reviewSources，历史缺项为 null/[] 且 provenanceStatus=not_recorded。",
+        "description": "新旧定稿可沿同一游标顺序翻完，按准确视频修订去重。返回冻结的 project/materials/reviewSources，历史缺项为 null/[] 且 provenanceStatus=not_recorded。使用其他账号的作品库游标返回 404 NOT_FOUND。",
         "responses": {
           "200": {
             "description": "Success",
@@ -2463,16 +2648,74 @@
                   "format": "binary"
                 }
               }
+            },
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "304": {
-            "description": "封面未变更"
+            "description": "封面未变更",
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "type": "string",
+                  "const": "default-src 'none'; sandbox"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Error401"
           },
           "404": {
             "$ref": "#/components/responses/Error404"
+          },
+          "410": {
+            "description": "历史媒体已按保留策略归档。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -2540,6 +2783,1143 @@
             "$ref": "#/components/responses/Error404"
           }
         }
+      }
+    },
+    "/storage": {
+      "get": {
+        "operationId": "getStorageUsage",
+        "description": "读取当前用户还能占用磁盘的定稿、草稿及可清理字节。",
+        "responses": {
+          "200": {
+            "description": "当前公开设置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/StorageUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/storage/cleanup": {
+      "post": {
+        "operationId": "cleanupStorage",
+        "description": "重新核对当前保护关系，回收过期且未使用的草稿媒体。检查 expectedRevision 并按 commandId 重放。",
+        "responses": {
+          "200": {
+            "description": "成功回执",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/StorageCleanupReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/CleanupStorage"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "servers": [
+          {
+            "url": "/api"
+          }
+        ],
+        "operationId": "getFrameHealth",
+        "description": "公开进程存活、SQLite 写锁与已配置创作宿主通道的就绪状态。",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "健康诊断",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/FrameHealth"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "健康诊断",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/FrameHealth"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/model-connections/{connectionId}/probe": {
+      "get": {
+        "operationId": "probeProviderConnection",
+        "description": "仅按用户点击，使用已保存的凭据访问真实的只读型号接口。只返回响应时间，不发送生成请求。没有可核实目录的协议返回能力不可用。",
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/ProviderConnectionProbe"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "connectionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/material-batches/{batchId}/candidates/{candidateId}/preview": {
+      "get": {
+        "operationId": "previewMaterialVideo",
+        "description": "归属批次的视频候选按需流式预览。播放不登记采用，不签发供应商凭据。",
+        "responses": {
+          "200": {
+            "description": "所选候选的视频字节",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "video/webm": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "batchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "candidateId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{conversationId}/uploads": {
+      "post": {
+        "operationId": "uploadConversationMedia",
+        "description": "流式登记一件用户有权使用的图片、视频或音频。命令身份包含实际文件摘要。返回当前会话准确素材修订。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Accepted or replayed result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/UploadReceipt"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          },
+          {
+            "name": "X-Video-Factory-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "studio"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/UploadForm"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/works/{workId}/subtitle-tracks": {
+      "post": {
+        "operationId": "createSubtitleTrack",
+        "description": "从已登记音视频的词边界或离线语音转写生成字幕初稿。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SubtitleReceipt"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "workId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/CreateSubtitleTrack"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/artifacts/{artifactId}/subtitle-revisions": {
+      "post": {
+        "operationId": "saveSubtitleRevision",
+        "description": "校对当前字幕并交付同一事项的新版本。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/SubtitleReceipt"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/SaveSubtitleRevision"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/artifacts/{artifactId}/revisions/{revisionId}/subtitles": {
+      "get": {
+        "operationId": "downloadSubtitles",
+        "description": "字幕稿使用源媒体时钟，成片使用实际剪辑后的时间线。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "字幕文件",
+            "content": {
+              "application/x-subrip": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/vtt": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "revisionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "srt",
+                "vtt"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/runs/{runId}/remix-timeline": {
+      "get": {
+        "operationId": "getRemixTimeline",
+        "description": "读取所审成片和源素材就绪状况。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/RemixTimeline"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revisionId",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/runs/{runId}/remix-proposals": {
+      "post": {
+        "operationId": "remixRun",
+        "description": "复用冻结输入与成片审阅项，直接提交零供应商费用的本地重合成。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/LocalCreationReceipt"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/RemixCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/accounts": {
+      "get": {
+        "operationId": "listStudioAccounts",
+        "description": "读取团队账号，限管理员。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/StudioAccounts"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      },
+      "post": {
+        "operationId": "createStudioAccount",
+        "description": "创建账号并分配独立空间。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/StudioAccounts"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/CreateStudioAccount"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settings/budgets": {
+      "get": {
+        "operationId": "listBudgetPolicies",
+        "description": "读取已配置的预算。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/BudgetPolicies"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      },
+      "post": {
+        "operationId": "saveBudgetPolicy",
+        "description": "更新一个账号或共享空间的预算。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/BudgetPolicy"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/SaveBudgetPolicy"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/artifacts/{artifactId}/revisions/{revisionId}/archive.zip": {
+      "get": {
+        "operationId": "downloadFrozenProject",
+        "description": "流式下载冻结文件与记录的媒体。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "ZIP archive",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "revisionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "runId",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/runs/{runId}/export": {
+      "get": {
+        "operationId": "exportEditingTimeline",
+        "description": "流式下载冻结文件与记录的媒体。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "ZIP archive",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "fcpxml",
+                "otio",
+                "jianying"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "revisionId",
+            "required": false,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
+      }
+    },
+    "/settings/accounts/{username}": {
+      "patch": {
+        "operationId": "updateStudioAccount",
+        "description": "管理员更新成员角色、账号启停或密码。工作空间至少保留一名可用管理员。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/StudioAccounts"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/UpdateStudioAccount"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/profile/budget": {
+      "get": {
+        "operationId": "readBudgetSummary",
+        "description": "读取自己及共享空间的预算用量。提供会话 ID 时限制为当前登录者拥有的会话。已结算按空间自然日和月归属，在途金额跨期保留。",
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/BudgetSummary"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "query",
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          }
+        ]
       }
     }
   },

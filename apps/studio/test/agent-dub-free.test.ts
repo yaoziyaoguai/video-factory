@@ -1,5 +1,6 @@
+import { writeStubInterpreter } from "./helpers/edge-tts-fixture.js";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -78,27 +79,7 @@ async function rejection(action: () => Promise<unknown>): Promise<any> {
   assert.fail("应当被拒绝");
 }
 
-// 桩解释器：与真 python 客户端同形（stdin JSON → stdout JSON / stderr+非零退出），
-// 并把收到的请求原样写到 requestFile 供断言 voice/rate 透传。
-async function writeStubInterpreter(
-  directory: string, requestFile: string,
-  payload: { audioB64: string; boundaries: unknown[] } | { failStderr: string; failCode: number },
-): Promise<string> {
-  const file = path.join(directory, `stub-${path.basename(requestFile, ".json")}.mjs`);
-  const action = "failStderr" in payload
-    ? `process.stderr.write(${JSON.stringify(payload.failStderr)}); process.exit(${payload.failCode});`
-    : `process.stdout.write(JSON.stringify({ audioB64: ${JSON.stringify(payload.audioB64)}, boundaries: ${JSON.stringify(payload.boundaries)} }));`;
-  await writeFile(file, `#!/usr/bin/env node
-const fs = await import("node:fs");
-const chunks = [];
-process.stdin.on("data", chunk => chunks.push(chunk));
-process.stdin.on("end", () => {
-  fs.writeFileSync(${JSON.stringify(requestFile)}, Buffer.concat(chunks));
-  ${action}
-});
-`, { mode: 0o755 });
-  return file;
-}
+
 
 test("G3-2 设置：默认缺省、非法形状拒绝、保存/重放/冲突（零网络）", async t => {
   const a = await dubFixture(t);
@@ -217,6 +198,8 @@ test("G3-2 工具：桩配音生成→正式交付→read_artifact 保留同字�
   useInterpreter(t, stub);
 
   const result: DubFreeResult = await a.tools.dubFree(a.context("call-2"), { text: "你好世界" });
+  assert.deepEqual(a.db.prepare("SELECT entity_version,notification FROM events WHERE entity_id=? AND kind='artifact.delivered'").all(result.artifactId),
+    [{ entity_version: 1, notification: "new_output" }]);
   assert.equal(result.granularity, "word");
   assert.equal(result.boundaryCount, 2);
   assert.equal(result.voice, "zh-CN-XiaoxiaoNeural");
@@ -262,10 +245,10 @@ test("G3-2 工具：桩配音生成→正式交付→read_artifact 保留同字�
     licenseUrl: "https://example.org/license", acquiredAt: systemClock() }];
   const sourcedContent: MediaContent = { ...content, sources };
   const sourced = insertRevision(a.db, systemClock(), getArtifactRow(a.db, "local-owner", result.artifactId)!, result.revisionId,
-    { title: "带已有来源记录的配音", kind: "audio", content: sourcedContent }, "req-dub");
+    { title: "带已有来源记录的配音", kind: "audio", content: sourcedContent }, "req-dub", "delivered");
   const bareContent: MediaContent = { format: "media", blobId: content.blobId, mimeType: content.mimeType, durationMs: content.durationMs };
   const bare = insertRevision(a.db, systemClock(), getArtifactRow(a.db, "local-owner", result.artifactId)!, sourced.id,
-    { title: "未记录配音信息的同字节媒体", kind: "audio", content: bareContent }, "req-dub");
+    { title: "未记录配音信息的同字节媒体", kind: "audio", content: bareContent }, "req-dub", "delivered");
   const references = [{ artifactId: result.artifactId, revisionId: sourced.id }, result, override,
     { artifactId: result.artifactId, revisionId: bare.id }];
   const receipt = await a.tools.deliverArtifacts(a.context("deliver-audio"), {

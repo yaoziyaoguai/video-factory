@@ -1,10 +1,21 @@
 import Database from "better-sqlite3";
+import { configureCredentialCipher } from "./credential-cipher.js";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 
 // A 增量业务库：一个 SQLite 连接责任边界。WAL + FULL + 外键 + busy_timeout，
 // 短事务；模型与网络调用一律在事务外。库不可用时直接抛错，不回退内存/JSON。
 export type AgentDatabase = Database.Database;
+
+const statements = new WeakMap<AgentDatabase, Map<string, Database.Statement>>();
+
+export function stmt(db: AgentDatabase, sql: string): Database.Statement {
+  let cache = statements.get(db);
+  if (!cache) { cache = new Map(); statements.set(db, cache); }
+  let prepared = cache.get(sql);
+  if (!prepared) { prepared = db.prepare(sql); cache.set(sql, prepared); }
+  return prepared;
+}
 
 // 版本化 DDL：可重复执行；已应用版本跳过，重复迁移不毁数据。
 // MIGRATIONS 同时是测试 fixture 的事实来源（按历史版本截取构建 C1 形状库），不另建第二份 SQL。
@@ -763,6 +774,113 @@ export const MIGRATIONS: readonly {
     `CREATE INDEX work_stage_confirmations_revision ON work_stage_confirmations(json_extract(subject_json, '$.revisionId'))`,
     `CREATE INDEX work_review_confirmations_standalone_artifact ON work_review_confirmations(json_extract(subject_json, '$.artifactId')) WHERE subject_scope = 'standalone_artifact' AND action = 'approve'`,
   ] },
+  { version: 27, statements: [
+    "CREATE INDEX idx_production_blobs_scope_digest ON production_blobs(owner_id, conversation_id, digest)",
+    "CREATE INDEX idx_production_blobs_digest ON production_blobs(digest)",
+    "CREATE INDEX idx_tool_invocations_request ON tool_invocations(request_id)",
+    "CREATE INDEX idx_material_search_batches_request ON material_search_batches(request_id)",
+    "CREATE INDEX idx_artifact_revisions_run ON artifact_revisions(run_id) WHERE run_id IS NOT NULL",
+    "ALTER TABLE conversations ADD COLUMN causal_seq INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE conversations ADD COLUMN legacy_message_seq INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE messages ADD COLUMN causal_seq INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE artifact_revisions ADD COLUMN created_seq INTEGER NOT NULL DEFAULT 0",
+    // 消息原有 created_seq 是公开分页位置。独立的会话时钟只用于比较消息与修订。
+    `UPDATE conversations SET
+      causal_seq = COALESCE((SELECT MAX(seq) FROM events WHERE conversation_id = conversations.id), 0),
+      legacy_message_seq = COALESCE((SELECT MAX(created_seq) FROM messages WHERE conversation_id = conversations.id), 0)`,
+    `WITH first_delivery AS MATERIALIZED (
+      SELECT owner_id, conversation_id, entity_id, entity_version, MIN(seq) AS seq FROM events
+      WHERE kind = 'artifact.delivered' GROUP BY owner_id, conversation_id, entity_id, entity_version)
+      UPDATE artifact_revisions AS r SET created_seq = e.seq
+      FROM first_delivery e JOIN artifacts a ON a.id = e.entity_id AND a.owner_id = e.owner_id AND a.conversation_id = e.conversation_id
+      WHERE r.artifact_id = a.id AND r.revision_number = e.entity_version`,
+    `WITH first_message AS MATERIALIZED (
+      SELECT owner_id, conversation_id, entity_id, MIN(seq) AS seq FROM events
+      WHERE kind = 'message.changed' AND entity_version = 1 GROUP BY owner_id, conversation_id, entity_id)
+      UPDATE messages AS m SET causal_seq = e.seq FROM first_message e
+      WHERE m.id = e.entity_id AND m.owner_id = e.owner_id AND m.conversation_id = e.conversation_id`,
+    // 所有入口（含制作 Worker 的直接 INSERT）在同一写事务内取序。修改消息、再次广播均不重新取序。
+    `CREATE TRIGGER assign_message_causal_seq AFTER INSERT ON messages BEGIN
+      UPDATE conversations SET causal_seq = causal_seq + 1 WHERE id = NEW.conversation_id;
+      UPDATE messages SET causal_seq = (SELECT causal_seq FROM conversations WHERE id = NEW.conversation_id) WHERE id = NEW.id;
+    END`,
+    `CREATE TRIGGER assign_revision_created_seq AFTER INSERT ON artifact_revisions BEGIN
+      UPDATE conversations SET causal_seq = causal_seq + 1 WHERE id = (SELECT conversation_id FROM artifacts WHERE id = NEW.artifact_id);
+      UPDATE artifact_revisions SET created_seq = (SELECT c.causal_seq FROM conversations c
+        JOIN artifacts a ON a.conversation_id = c.id WHERE a.id = NEW.artifact_id) WHERE id = NEW.id;
+    END`,
+  ] },
+  { version: 28, statements: [
+    `ALTER TABLE artifact_revisions ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'delivered'
+      CHECK(origin_kind IN ('delivered','library_import','tool_auxiliary','production_output'))`,
+    "UPDATE artifact_revisions SET origin_kind='production_output' WHERE run_id IS NOT NULL",
+    `UPDATE artifact_revisions SET origin_kind='tool_auxiliary' WHERE request_id IS NOT NULL AND run_id IS NULL
+      AND (json_extract(content_json,'$.format')='project' OR json_type(content_json,'$.dub')='object')`,
+    // 显式交付可复用配音或封存内容，须按回执中的修订身份区分同字节的独立修订。
+    `UPDATE artifact_revisions SET origin_kind='delivered' WHERE (request_id,id,artifact_id) IN
+      (SELECT d.request_id,json_extract(ref.value,'$.revisionId'),json_extract(ref.value,'$.artifactId')
+       FROM request_deliveries d,json_each(d.receipt_json,'$.revisions') ref)`,
+    `UPDATE artifact_revisions SET origin_kind='library_import' WHERE (request_id,id,artifact_id) IN
+      (SELECT m.request_id,json_extract(ref.value,'$.revisionId'),json_extract(ref.value,'$.artifactId')
+       FROM messages m,json_each(m.references_json,'$.artifacts') ref
+       WHERE m.role='user' AND m.library_selections_json IS NOT NULL)`,
+    `WITH removed AS MATERIALIZED (
+       SELECT m.id,ref.key FROM messages m,json_each(m.references_json,'$.artifacts') ref
+       JOIN artifact_revisions r ON r.id=json_extract(ref.value,'$.revisionId')
+       WHERE m.role='assistant' AND r.request_id=m.request_id AND r.artifact_id=json_extract(ref.value,'$.artifactId')
+         AND r.origin_kind IN ('library_import','tool_auxiliary')
+     ) UPDATE messages AS m SET revision=revision+1, references_json=json_set(references_json,'$.artifacts',
+       (SELECT json_group_array(json(ref.value) ORDER BY ref.key) FROM json_each(m.references_json,'$.artifacts') ref
+        WHERE NOT EXISTS (SELECT 1 FROM removed WHERE removed.id=m.id AND removed.key=ref.key)))
+       WHERE id IN (SELECT id FROM removed)`,
+  ] },
+  { version: 29, statements: [
+    "ALTER TABLE production_blobs ADD COLUMN purged_at TEXT",
+    "CREATE INDEX production_blobs_live_digest ON production_blobs(digest) WHERE purged_at IS NULL",
+    "CREATE INDEX production_blobs_live_owner_age ON production_blobs(owner_id,created_at) WHERE purged_at IS NULL",
+    "CREATE TABLE storage_cleanups(owner_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision >= 0))",
+    `CREATE TABLE credential_encryption_state(id INTEGER PRIMARY KEY CHECK(id=1),
+      verifier TEXT NOT NULL, needs_scrub INTEGER NOT NULL CHECK(needs_scrub IN (0,1)))`,
+  ] },
+  { version: 30, statements: [
+    // 第一版绑定只授权 Responses。历史中已经退役的其它协议不会在升级时重新启用。
+    "ALTER TABLE text_model_versions ADD COLUMN binding_format INTEGER NOT NULL DEFAULT 1 CHECK(binding_format IN (1,2))",
+  ] },
+  { version: 31, statements: [
+    "ALTER TABLE artifact_revisions RENAME COLUMN origin_kind TO origin_before_upload",
+    `ALTER TABLE artifact_revisions ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'delivered'
+      CHECK(origin_kind IN ('delivered','library_import','tool_auxiliary','production_output','user_upload'))`,
+    "UPDATE artifact_revisions SET origin_kind=origin_before_upload",
+    "ALTER TABLE artifact_revisions DROP COLUMN origin_before_upload",
+    "ALTER TABLE messages ADD COLUMN uploads_json TEXT",
+  ] },
+  { version: 32, statements: [
+    "ALTER TABLE production_runs ADD COLUMN remix_of_run_id TEXT REFERENCES production_runs(id)",
+  ] },
+  { version: 33, statements: [
+    "CREATE TABLE studio_users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, role TEXT NOT NULL CHECK(role IN ('admin','creator')), password_hash TEXT NOT NULL)",
+    "CREATE TABLE budget_policies(scope TEXT NOT NULL CHECK(scope IN ('user','workspace')),subject_id TEXT NOT NULL,revision INTEGER NOT NULL,conversation_limit INTEGER CHECK(conversation_limit>=0),day_limit INTEGER CHECK(day_limit>=0),month_limit INTEGER CHECK(month_limit>=0),PRIMARY KEY(scope,subject_id))",
+    "ALTER TABLE production_attempts ADD COLUMN usage_json TEXT",
+    "CREATE TABLE pending_reconciliation(attempt_id TEXT PRIMARY KEY REFERENCES production_attempts(id),due_at TEXT NOT NULL)",
+    "CREATE INDEX production_attempts_provider_task ON production_attempts(provider_task_id) WHERE provider_task_id IS NOT NULL",
+    "CREATE INDEX pending_reconciliation_due ON pending_reconciliation(due_at,attempt_id)",
+    "CREATE INDEX production_runs_budget_owner ON production_runs(owner_id,created_at) WHERE proposal_id IS NOT NULL",
+    "INSERT INTO pending_reconciliation(attempt_id,due_at) SELECT a.id,r.updated_at FROM production_attempts a JOIN production_runs r ON r.id=a.run_id JOIN production_operations o ON o.run_id=a.run_id AND o.id=a.operation_id WHERE r.proposal_id IS NOT NULL AND a.phase<>'prepared' AND (a.billing_final=0 OR a.billing_conflict=1) AND a.state IN ('succeeded','failed','cancelled','unknown') AND json_extract(o.spec_json,'$.kind')<>'render'",
+  ] },
+  { version: 34, statements: [
+    "ALTER TABLE studio_users ADD COLUMN disabled_at TEXT",
+    "ALTER TABLE studio_users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0 CHECK(session_version>=0)",
+    "CREATE TABLE studio_account_settings(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL CHECK(revision>=0))",
+    "INSERT INTO studio_account_settings SELECT 1,CASE WHEN count(*)=0 THEN 0 ELSE count(*)+1 END FROM studio_users",
+    // v33 的创建回执按 rowid 排序，末项是当次创建的账号。保留原密码的加盐校验值以支持重放。
+    `UPDATE command_receipts SET receipt_json=json_object(
+      'result',json_set(receipt_json,'$.accounts',(
+        SELECT json_group_array(json_set(member.value,'$.disabledAt',NULL) ORDER BY member.key)
+        FROM json_each(command_receipts.receipt_json,'$.accounts') member)),
+      'passwordVerifier',(SELECT password_hash FROM studio_users
+        WHERE id=json_extract(command_receipts.receipt_json,'$.accounts[#-1].id')))
+      WHERE operation='createStudioAccount'`,
+  ] },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {
@@ -772,8 +890,14 @@ export function openAgentDatabase(dataDir: string): AgentDatabase {
   db.pragma("synchronous = FULL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
-  migrate(db);
-  return db;
+  db.pragma("secure_delete = ON");
+  let opened = false;
+  try {
+    migrate(db);
+    configureCredentialCipher(db, process.env.FRAME_CREDENTIAL_SECRET);
+    opened = true;
+    return db;
+  } finally { if (!opened) db.close(); }
 }
 
 // 版本化 DDL：可重复执行；已应用版本跳过，重复迁移不毁数据。

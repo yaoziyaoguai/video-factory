@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -656,7 +657,7 @@ test("Oracle 回归：下载结束后的取消不再探测、登记；ffprobe �
     creatorName: "A", creatorUrl: "https://www.pexels.com/@a/", licenseUrl: "https://www.pexels.com/license/",
   } }]);
   const client = new StockClient({ pexels: { enabled: true, apiKey: "fixture" } });
-  client.download = async (_provider, _url, _maxBytes, save) => { const response = new Response(new Uint8Array(imageBytes("png", 4, 3))); await save(response.body!, response); controller.abort(); };
+  client.download = async (_provider, _url, _maxBytes, save) => { await save((async function* () { yield imageBytes("png", 4, 3); })()); controller.abort(); };
   await assert.rejects(importMaterial(a.db, systemClock, new ProductionBlobs(a.db, a.directory, systemClock), path.join(a.directory, "work"),
     client, scope, { executionEpoch: a.context("cancel").executionEpoch }, "cancel-candidate", controller.signal), { name: "AbortError" });
   assert.equal((a.db.prepare("SELECT COUNT(*) AS n FROM production_blobs").get() as { n: number }).n, 0);
@@ -1132,7 +1133,12 @@ test("M1 v14 音频迁移保留旧候选、批次顺序、blob、索引与外键
       licenseUrl: "https://www.pexels.com/license/",
     },
   }))).batch;
-  const blob = new ProductionBlobs(legacy, directory, systemClock).persist("local-owner", "conv-old", Buffer.from("old bytes"), "image/jpeg", null);
+  // 先按 v14 的实际列和磁盘命名准备旧卷，再交给当前应用迁移。
+  const bytes = Buffer.from("old bytes"), blob = { id: "blob-old", digest: createHash("sha256").update(bytes).digest("hex") };
+  await mkdir(path.join(directory, "blobs"), { recursive: true });
+  await writeFile(path.join(directory, "blobs", blob.digest), bytes);
+  legacy.prepare("INSERT INTO production_blobs(id,owner_id,conversation_id,digest,mime_type,size_bytes,duration_ms,created_at) VALUES(?,'local-owner','conv-old',?,'image/jpeg',?,NULL,?)")
+    .run(blob.id,blob.digest,bytes.length,systemClock());
   legacy.prepare("UPDATE material_candidates SET imported_blob_id=? WHERE id='candidate-old-0'").run(blob.id);
   legacy.prepare("INSERT INTO production_snapshots VALUES('snapshot-old',?,?,?)").run('{"old":"frozen"}', "old-digest", systemClock());
   const oldRows = legacy.prepare("SELECT * FROM material_candidates ORDER BY rowid").all();

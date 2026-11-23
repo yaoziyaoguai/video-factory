@@ -1,4 +1,8 @@
+import { videoImageSlots } from "./video-image-inputs.js";
+import { resolvedSubtitle } from "./subtitle-service.js";
+import { projectCues } from "./subtitle-track.js";
 import type { AgentDatabase } from "./db.js";
+import { resolveRenderCanvas } from "./render-inputs.js";
 import { AgentError } from "./errors.js";
 import { insertEvent } from "./event-log.js";
 import type { RequestRow } from "./conversation-store.js";
@@ -10,7 +14,7 @@ import type {
   Target, ToolDelivery, ToolProductionIntent, VideoParameters, RevisionRef, ProposalRef, InputRef,
 } from "../../shared/agent/generated/contracts.js";
 import { blobSources, mergeSources, resolveMediaReference, readAdoptedAudioSource } from "./material-store.js";
-import { assertCreativeWriteFits, CODE_PROJECT_INPUT_EXTENSIONS, codeProjectInputPath, MEDIA_INPUT_EXTENSION } from "./creative-runner.js";
+import { assertCreativeFileFits, CODE_PROJECT_INPUT_EXTENSIONS, codeProjectInputPath, MEDIA_INPUT_EXTENSION } from "./creative-runner.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { operationOutputRevision } from "./production-store.js";
 import { speechText, markdownSectionMap, markdownTotalLength } from "../../shared/agent/markdown.js";
@@ -75,6 +79,15 @@ export function listArtifactRows(db: AgentDatabase, conversationId: string, limi
   return (beforeSeq === undefined
     ? db.prepare(sql).all(conversationId, limit)
     : db.prepare(sql).all(conversationId, beforeSeq, limit)) as ArtifactRow[];
+}
+
+/** 一次联读当前头与其不可变摘要，避免每个稿件再访问一次修订表。 */
+export function batchReadRevisionDigests(db: AgentDatabase, conversationId: string, ownerId: string, limit: number) {
+  return db.prepare(`SELECT a.id AS artifactId,a.title,a.kind,a.work_id AS workId,a.head_revision_id AS headRevisionId,
+    a.head_revision_number AS headRevisionNumber,r.digest
+    FROM artifacts a LEFT JOIN artifact_revisions r ON r.id=a.head_revision_id AND r.artifact_id=a.id
+    WHERE a.conversation_id=? AND a.owner_id=? ORDER BY a.created_seq DESC LIMIT ?`).all(conversationId, ownerId, limit) as
+    { artifactId: string; title: string; kind: ArtifactHead["kind"]; workId: string | null; headRevisionId: string | null; headRevisionNumber: number; digest: string | null }[];
 }
 
 export function maxArtifactSeq(db: AgentDatabase, conversationId: string): number {
@@ -163,11 +176,145 @@ export function verifyReviewInput(
   return { groupId: input.groupId, itemId: input.itemId, source, confirmationId: input.confirmationId };
 }
 
+// 只采用本次制作明确选入的已认可图稿，其他作品与本作品未选的修订不会混入镜头。
+export function bindReviewedVideoImages(
+  db: AgentDatabase,
+  scope: { ownerId: string; conversationId: string },
+  intent: ProductionIntent,
+): ProductionIntent {
+  const shots = intent.operations.filter(
+    (op) => op.kind === "video" && videoImageSlots(op.parameters).length === 0 && op.inputs.length === 1,
+  );
+  if (!shots.length || !intent.workId || !intent.reviewInputs.length) return intent;
+  const state = parseCreationState(requireWork(db, scope.ownerId, scope.conversationId, intent.workId));
+  const pictures = intent.reviewInputs.flatMap((input) => {
+    const item = state.groups
+      .find((group) => group.id === input.groupId)
+      ?.items.find((entry) => entry.id === input.itemId);
+    if (
+      !item ||
+      !["storyboard", "character", "scene"].includes(item.role) ||
+      input.source.kind !== "artifact_revision" ||
+      getArtifactRow(db, scope.ownerId, input.source.artifactId)?.kind !== "image"
+    )
+      return [];
+    const approved = verifyReviewInput(db, scope, input, { workId: intent.workId! }).source;
+    return approved.kind === "artifact_revision" ? [{ role: item.role, source: approved }] : [];
+  });
+  if (!pictures.length) return intent;
+  const boards = pictures.filter((entry) => entry.role === "storyboard");
+  if (boards.length > 1 && boards.length !== shots.length)
+    throw new AgentError("INVALID_INPUT", "请为每个镜头明确选择一张首帧分镜。");
+  const inputSources = [...intent.inputSources];
+  const operations = intent.operations.map((op) => {
+    const index = shots.findIndex((shot) => shot.operationId === op.operationId);
+    if (op.kind !== "video" || index < 0) return op;
+    const chosen = boards.length ? [boards[boards.length === 1 ? 0 : index]!] : pictures;
+    const inputs: typeof op.inputs = [...op.inputs];
+    const slots = chosen.map(({ source }) => {
+      if (
+        !inputSources.some(
+          (item) =>
+            item.kind === "artifact_revision" &&
+            item.artifactId === source.artifactId &&
+            item.revisionId === source.revisionId,
+        )
+      )
+        inputSources.push(source);
+      return inputs.push(source) - 1;
+    });
+    if (inputs.length > 31 || inputSources.length > 64)
+      throw new AgentError("INVALID_INPUT", "参考图超出本次制作的输入上限。");
+    return {
+      ...op,
+      inputs,
+      parameters: {
+        ...op.parameters,
+        ...(boards.length ? { firstFrameSlot: slots[0]! } : { referenceImageSlots: slots as [number, ...number[]] }),
+      },
+    };
+  }) as ProductionIntent["operations"];
+  return { ...intent, operations, inputSources };
+}
+
+function unapprovedVideoImage(
+  db: AgentDatabase,
+  owner: string,
+  conversation: string,
+  spec: ProductionSpec,
+): string | null {
+  const inputs = spec.operations.flatMap((op) =>
+    op.kind === "video" ? videoImageSlots(op.parameters).map(({ slot }) => op.inputs[slot]!) : [],
+  );
+  if (inputs.length === 0) return null;
+  const work = spec.workId ? getWorkRow(db, owner, spec.workId) : null;
+  const groups = work ? parseCreationState(work).groups : [];
+  const confirmedItem = db.prepare(`SELECT 1 FROM work_review_confirmations
+    WHERE owner_id=? AND conversation_id=? AND work_id=? AND group_id=? AND item_id=?
+    AND subject_scope='work_item' AND json_extract(subject_json,'$.artifactId')=? AND json_extract(subject_json,'$.revisionId')=? LIMIT 1`);
+  for (const ref of inputs) {
+    if (ref.kind === "operation_output") continue;
+    if (ref.kind !== "blob" && ref.kind !== "artifact_revision") return "参考图片";
+    const rows =
+      ref.kind === "artifact_revision"
+        ? db
+            .prepare(
+              "SELECT r.id,r.artifact_id,r.origin_kind,r.creation_binding_json,a.title FROM artifact_revisions r JOIN artifacts a ON a.id=r.artifact_id WHERE a.id=? AND r.id=? AND a.owner_id=? AND a.conversation_id=?",
+            )
+            .all(ref.artifactId, ref.revisionId, owner, conversation)
+        : db
+            .prepare(
+              `SELECT r.id,r.artifact_id,r.origin_kind,r.creation_binding_json,a.title FROM revision_blob_links l JOIN artifact_revisions r ON r.id=l.revision_id
+        JOIN artifacts a ON a.id=r.artifact_id WHERE l.blob_id=? AND a.owner_id=? AND a.conversation_id=?`,
+            )
+            .all(ref.blobId, owner, conversation);
+    const images = rows as {
+      id: string;
+      artifact_id: string;
+      origin_kind: string;
+      creation_binding_json: string | null;
+      title: string;
+    }[];
+    let adopted = false;
+    for (const row of images) {
+      const binding = row.creation_binding_json ? (JSON.parse(row.creation_binding_json) as CreationBinding) : null;
+      for (const group of groups)
+        for (const item of group.items) {
+          if (!["storyboard", "character", "scene"].includes(item.role)) continue;
+          const assigned =
+            (binding?.workId === spec.workId && binding?.groupId === group.id && binding.itemId === item.id) ||
+            [item.draft, item.approved].some(
+              (s) => s?.kind === "artifact_revision" && s.artifactId === row.artifact_id && s.revisionId === row.id,
+            );
+          if (!assigned) continue;
+          if (!confirmedItem.get(owner, conversation, spec.workId, group.id, item.id, row.artifact_id, row.id))
+            return item.label;
+          adopted = true;
+        }
+      if (row.origin_kind === "user_upload" || row.origin_kind === "library_import") adopted = true;
+      // 后续草稿可能已替换审阅项指针；原版的准确认可仍有效。
+      if (!adopted)
+        adopted = !!db
+          .prepare(
+            `SELECT 1 FROM work_review_confirmations WHERE owner_id=? AND conversation_id=?
+        AND work_id=? AND json_extract(subject_json,'$.artifactId')=? AND json_extract(subject_json,'$.revisionId')=? LIMIT 1`,
+          )
+          .get(owner, conversation, spec.workId, row.artifact_id, row.id);
+    }
+    if (!adopted && ref.kind === "blob")
+      adopted =
+        !!db.prepare("SELECT 1 FROM material_candidates WHERE imported_blob_id=? LIMIT 1").get(ref.blobId) ||
+        blobSources(db, ref.blobId).some((source) => source.provider === "user_upload");
+    if (!adopted) return images[0]?.title ?? "参考图片";
+  }
+  return null;
+}
+
 // —— 必要认可推导（§11.5：实际输入与认可依据闭合） ——
 
 // render 不必然是视频：code_project 的产出类型按冻结的 expectedMediaKind 判定；
 // 媒体拼接组装仍只有视频。prepare/受理门/投影共用这一个口径。
-export function finalOutputIsVideo(final: { kind: OperationSpec["kind"]; parameters: OperationSpec["parameters"] } | undefined): boolean {
+export function finalOutputIsVideo(final: Pick<OperationRequest, "kind" | "parameters"> | undefined): boolean {
   if (!final) return false;
   if (final.kind === "video") return true;
   if (final.kind !== "render") return false;
@@ -402,6 +549,7 @@ function resolveReviewTargets(
         });
       }
       // 角色约束交付类型：配音/音乐只收音频，剪辑/成片只收视频。
+      if(itemRole==="subtitle") throw new AgentError("INVALID_INPUT","请使用字幕工具生成或校对带时间码的字幕稿。");
       const constraint = roleKindConstraint(itemRole);
       if (constraint && itemKind !== constraint) {
         throw new AgentError("INVALID_INPUT", `角色 ${itemRole} 的草稿必须是 ${constraint === "audio" ? "音频" : "视频"}产物。`);
@@ -563,7 +711,7 @@ export function applyDelivery(
       const artifact = getArtifactRow(db, request.owner_id, artifactId)!;
       const source = resolvedSources.get(index);
       const binding = bound ? source ? adoptedCreationBinding(db, source, bound.binding) : bound.binding : null;
-      const revision = insertRevision(db, now, artifact, null, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, binding);
+      const revision = insertRevision(db, now, artifact, null, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, "delivered", binding);
       if (binding) db.prepare("UPDATE artifacts SET work_id = ? WHERE id = ?").run(binding.workId, artifactId);
       newRevisions[index] = revision;
       continue;
@@ -603,7 +751,7 @@ export function applyDelivery(
       : inheritedBinding(db, artifact, scope);
     const source = resolvedSources.get(index);
     const binding = targetBinding && source ? adoptedCreationBinding(db, source, targetBinding) : targetBinding;
-    const revision = insertRevision(db, now, artifact, item.baseRevisionId, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, binding);
+    const revision = insertRevision(db, now, artifact, item.baseRevisionId, { title: item.title, kind: item.kind, content: resolvedContents.get(index)! }, request.id, "delivered", binding);
     newRevisions[index] = revision;
   }
 
@@ -695,13 +843,15 @@ export function resolveLocalOutput(
     : db.prepare("SELECT mime_type, duration_ms FROM production_blobs WHERE id = ? AND owner_id = ? AND conversation_id = ?")
       .get(blobId, scope.ownerId, scope.conversationId)) as { mime_type: string; duration_ms: number | null } | undefined;
   if (!blob) throw new AgentError("INVALID_INPUT", "引用的输出媒体不存在。");
-  const expected = kind === "video" ? ["video/mp4", "video/webm"] : kind === "audio" ? ["audio/mpeg", "audio/wav"] : ["image/png", "image/jpeg"];
+  const expected = kind === "video" ? ["video/mp4", "video/webm"] : kind === "audio" ? ["audio/mpeg", "audio/wav"] : ["image/png", "image/jpeg", "image/webp"];
   if (!expected.includes(blob.mime_type)) {
     throw new AgentError("INVALID_INPUT", `输出媒体类型 ${blob.mime_type} 与交付类型不一致。`);
   }
+  // 运行输出未沿发布修订带入署名时（如离线演示样片运行），回退读 blob 级素材来源，交付修订仍完整携带署名。
+  const sources = sourceMedia?.sources ?? (source.kind === "run_output" ? blobSources(db, blobId) : undefined);
   return { content: { format: "media", blobId, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms,
     ...(sourceMedia?.dub ? { dub: sourceMedia.dub } : {}),
-    ...(sourceMedia?.sources ? { sources: sourceMedia.sources } : {}),
+    ...(sources?.length ? { sources } : {}),
   }, sourceRevision };
 }
 
@@ -741,15 +891,16 @@ function inheritedBinding(
 export function insertRevision(
   db: AgentDatabase, now: string, artifact: ArtifactRow, baseRevisionId: string | null,
   item: { title: string; kind: string; content: ArtifactRevision["content"] }, requestId: string | null,
+  origin: "delivered" | "library_import" | "tool_auxiliary" | "production_output" | "user_upload",
   binding: CreationBinding | null = null, runId: string | null = null,
 ): ArtifactRevisionRow {
   const revisionId = newAgentId("rev");
   const revisionNumber = artifact.head_revision_number + 1;
   const content = item.content;
   db.prepare(
-    `INSERT INTO artifact_revisions(id, artifact_id, revision_number, base_revision_id, request_id, run_id, digest, content_json, creation_binding_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(revisionId, artifact.id, revisionNumber, baseRevisionId, requestId, runId, digestOf(content), canonicalJson(content),
+    `INSERT INTO artifact_revisions(id, artifact_id, revision_number, base_revision_id, request_id, run_id, origin_kind, digest, content_json, creation_binding_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(revisionId, artifact.id, revisionNumber, baseRevisionId, requestId, runId, origin, digestOf(content), canonicalJson(content),
     binding ? canonicalJson(binding) : null, now);
   // 媒体修订与作品库文件卡修订共享 blob、不复制字节；blob 关联同事务写入，文本修订没有 blob。
   if (content.format === "media" || content.format === "file") {
@@ -864,9 +1015,9 @@ export type TrustedOperationInput =
 
 // 付费前对已有渲染输入文件的探测结果（按 blobId 索引）；T6 起按槽位角色区分视频/音频事实。
 export type RenderFileProbe =
-  | { ok: true; kind: "video"; width: number; height: number; durationMs: number; videoDurationMs: number; hasAudio: boolean }
-  | { ok: true; kind: "audio"; durationMs: number }
-  | { ok: true; kind: "image"; width: number; height: number }
+  | { ok: true; kind: "video"; width: number; height: number; displayWidth?: number; displayHeight?: number; durationMs: number; videoDurationMs: number; hasAudio: boolean }
+  | { ok: true; kind: "audio"; durationMs: number; mimeType?: "audio/mpeg" | "audio/wav" }
+  | { ok: true; kind: "image"; width: number; height: number; sizeBytes?: number }
   | { ok: false; reason: string };
 
 export interface CatalogValidationContext {
@@ -942,6 +1093,8 @@ export function acceptanceBlockerFor(db: AgentDatabase, ownerId: string, row: Pr
   const final = spec.operations.find(op => op.operationId === spec.finalOutput.operationId && op.outputSlot === spec.finalOutput.outputSlot);
   const finalIsVideo = finalOutputIsVideo(final);
   if ("type" in spec) {
+    const unapproved = unapprovedVideoImage(db, ownerId, row.conversation_id, spec);
+    if (unapproved) return { code: "INPUT_APPROVAL_REQUIRED", message: `请先认可本镜头采用的「${unapproved}」这一版参考图。`, action: "review_inputs" };
     // 输入失效只看冻结修订是否仍存在且摘要一致（§11.5.5）：head 被后继稿推进不是失效事实，
     // 明确引用已认可旧版的报价保持可受理。
     const changed = spec.inputSources.some(source => source.kind === "artifact_revision" && (() => {
@@ -999,12 +1152,16 @@ export function rowToProposal(row: ProposalRow, db: AgentDatabase, catalog?: Quo
   const spec = JSON.parse(row.spec_json) as ProductionSpec;
   const runOrder = row.accepted_run_id ? (db.prepare("SELECT rowid AS ordinal FROM production_runs WHERE id=?").get(row.accepted_run_id) as { ordinal: number }).ordinal : Number.MAX_SAFE_INTEGER;
   const audioSummary = productionAudioFacts(db, spec, runOrder).audioSummary;
+  return projectProposal(row, spec, audioSummary, catalog ? acceptanceBlockerFor(db, row.owner_id, row, catalog) : null);
+}
+
+export function projectProposal(row: ProposalRow, spec: ProductionSpec, audioSummary: AudioSummary | undefined, acceptanceBlocker: AcceptanceBlocker | null): Proposal {
   return {
     id: row.id, conversationId: row.conversation_id, digest: row.digest,
     spec, state: row.state, ...(audioSummary ? { audioSummary } : {}),
     priceDisclosure: row.price_disclosure, expiresAt: row.expires_at,
     acceptedRunId: row.accepted_run_id, revision: row.revision,
-    acceptanceBlocker: catalog ? acceptanceBlockerFor(db, row.owner_id, row, catalog) : null,
+    acceptanceBlocker,
   };
 }
 
@@ -1038,7 +1195,24 @@ interface AudioEvidence {
 // 只沿已有生产引用追溯，不读当前方案/默认型号，也不自动转写外部媒体。
 // 快照三种形状（付费新/付费旧/本地）在声音通道上同构，走同一遍历。
 export type AudioFactsSpec = ProductionIntent | ProductionSpec | LocalCreationSpec | LegacyProductionSpec;
-export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, runOrder = Number.MAX_SAFE_INTEGER): {
+type AudioRevision = Pick<ArtifactRevisionRow, "content_json" | "run_id">;
+type AudioProducer = { id: string; run_order: number; spec_json: string };
+export interface AudioInputs {
+  revision(artifactId: string, revisionId: string): AudioRevision | undefined;
+  producers(blobId: string, before: number, runId: string | null): AudioProducer[];
+  duration(blobId: string): number | null;
+}
+
+function audioInputs(db: AgentDatabase): AudioInputs {
+  return {
+    revision: (artifactId, revisionId) => getRevisionRow(db, artifactId, revisionId),
+    producers: (blobId, before, runId) => db.prepare(`SELECT o.id,r.rowid AS run_order,s.spec_json FROM production_operations o
+      JOIN production_runs r ON r.id=o.run_id JOIN production_snapshots s ON s.id=r.snapshot_id
+      WHERE o.output_blob_id=? AND r.rowid<? AND (? IS NULL OR r.id=?)`).all(blobId, before, runId, runId) as AudioProducer[],
+    duration: blobId => (db.prepare("SELECT duration_ms FROM production_blobs WHERE id=?").get(blobId) as { duration_ms: number | null } | undefined)?.duration_ms ?? null,
+  };
+}
+export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, runOrder = Number.MAX_SAFE_INTEGER, inputs: AudioInputs = audioInputs(db)): {
   narrationText: string | null; knownNarrationText: string | null; audioSummary?: AudioSummary;
   speechInMusic: boolean; stackedMusic: boolean;
 } {
@@ -1053,12 +1227,12 @@ export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, ru
     let blobId: string;
     let sourceRunId: string | null = null;
     if (input.kind === "artifact_revision") {
-      const revision = getRevisionRow(db, input.artifactId, input.revisionId);
+      const revision = inputs.revision(input.artifactId, input.revisionId);
       if (!revision) return unknown;
       const content = JSON.parse(revision.content_json) as ArtifactRevision["content"];
       if (content.format === "markdown") return { ...empty, texts: [speechText(content)] };
       // 工程修订的声音事实由代码运行时决定，静态不可追溯。
-      if (content.format === "project") return unknown;
+      if (content.format === "project" || content.format === "subtitles") return unknown;
       blobId = content.blobId;
       sourceRunId = revision.run_id;
     } else if (input.kind === "blob") {
@@ -1067,10 +1241,7 @@ export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, ru
       return unknown;
     }
     // 精确修订绑定原run；裸blob只接受此前一致的生产证据，不能挑最新同字节记录。
-    const producers = db.prepare(`SELECT o.id, r.rowid AS run_order, s.spec_json FROM production_operations o
-      JOIN production_runs r ON r.id = o.run_id JOIN production_snapshots s ON s.id = r.snapshot_id
-      WHERE o.output_blob_id = ? AND r.rowid < ? AND (? IS NULL OR r.id = ?)`)
-      .all(blobId, beforeRun, sourceRunId, sourceRunId) as { id: string; run_order: number; spec_json: string }[];
+    const producers = inputs.producers(blobId, beforeRun, sourceRunId);
     const evidence = producers.map(producer => readOperation(JSON.parse(producer.spec_json) as ProductionSpec, producer.id, producer.run_order));
     if (evidence.length === 0) return unknown;
     const first = evidence[0]!;
@@ -1113,9 +1284,9 @@ export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, ru
       if (gain > 0 && evidence.hasMusic && parameters.music && parameters.music.gain > 0) stackedMusic = true;
       let sourceDurationMs = 0;
       if (segment.kind === "video" && !evidence.unknown && gain > 0) {
-        if (input.kind === "blob") sourceDurationMs = (db.prepare("SELECT duration_ms FROM production_blobs WHERE id=?").get(input.blobId) as { duration_ms: number | null } | undefined)?.duration_ms ?? 0;
+        if (input.kind === "blob") sourceDurationMs = inputs.duration(input.blobId) ?? 0;
         else if (input.kind === "artifact_revision") {
-          const revision = getRevisionRow(db, input.artifactId, input.revisionId);
+          const revision = inputs.revision(input.artifactId, input.revisionId);
           const media = revision ? JSON.parse(revision.content_json) as ArtifactRevision["content"] : null;
           if (media?.format === "media") sourceDurationMs = media.durationMs ?? 0;
         } else if (input.kind === "operation_output") {
@@ -1244,6 +1415,7 @@ export function normalizeOperationInputs(
   catalog: QuoteCatalog,
   probes?: Map<string, RenderFileProbe>,
   localWriteBlobs?: ProductionBlobs,
+  workId?:string|null,
 ): {
   validation: CatalogValidationContext;
   renderParameters: Map<string, RenderParameters>;
@@ -1252,6 +1424,13 @@ export function normalizeOperationInputs(
   durationVerified: Map<string, boolean>;
   hasUnusedRevisions: boolean;
 } {
+  // 旁白 WAV 由上传或其他已登记源的实际解码事实准入。音乐槽沿用现有的程序音轨契约。
+  const acceptsAudio = (mimeType: string, blobId: string, music: boolean) => {
+    if (mimeType !== "audio/wav") return mimeType === "audio/mpeg";
+    if (music) return true;
+    const probe = probes?.get(blobId);
+    return probe?.ok && probe.kind === "audio" && probe.mimeType === "audio/wav";
+  };
   const revisions = new Map<string, string>();
   for (const source of inputSources) {
     if (source.kind !== "artifact_revision") continue;
@@ -1308,7 +1487,7 @@ export function normalizeOperationInputs(
     const checkLocalCodeInput = (slot: number, blob: { mime_type: string; size_bytes: number }) => {
       const mimeType = blob.mime_type as MediaContent["mimeType"];
       if (Object.hasOwn(MEDIA_INPUT_EXTENSION, mimeType)) {
-        assertCreativeWriteFits(codeProjectInputPath(slot, mimeType), blob.size_bytes, `操作「${op.operationId}」输入槽位 ${slot}：`);
+        assertCreativeFileFits(codeProjectInputPath(slot, mimeType), blob.size_bytes, `操作「${op.operationId}」输入槽位 ${slot}：`);
       }
     };
     if (codeParameters) {
@@ -1322,7 +1501,7 @@ export function normalizeOperationInputs(
       validateCodeProjectExecution(codeParameters, content, op.inputs);
       if (localWriteBlobs) for (const file of content.files) {
         const blob = localWriteBlobs.get(scope.ownerId, file.blobId);
-        assertCreativeWriteFits(file.relativePath, blob.size_bytes, `操作「${op.operationId}」冻结文件「${file.relativePath}」`);
+        assertCreativeFileFits(file.relativePath, blob.size_bytes, `操作「${op.operationId}」冻结文件「${file.relativePath}」`);
       }
     }
     if (parameters && parameters.assembly !== "code_project" && parameters.segmentIds) {
@@ -1373,9 +1552,8 @@ export function normalizeOperationInputs(
         if (!blob) throw new AgentError("INVALID_INPUT", "媒体输入不存在或不属于当前会话。");
         if (codeParameters && localWriteBlobs) checkLocalCodeInput(slot, blob);
         if (op.kind === "render" && !codeParameters) {
-          // 混音音乐槽额外接受本地登记的 WAV（如冻结工程渲染的程序音乐）；旁白槽仍是供应商 MP3 契约。
-          const accepted = music ? blob.mime_type === "audio/mpeg" || blob.mime_type === "audio/wav"
-            : audio ? blob.mime_type === "audio/mpeg"
+          // 上传的干声和配乐都可以是经过解码的 WAV。
+          const accepted = audio ? acceptsAudio(blob.mime_type, input.blobId, music)
             : image ? blob.mime_type.startsWith("image/") : blob.mime_type === "video/mp4" || blob.mime_type === "video/webm";
           if (!accepted) {
             throw new AgentError("INVALID_INPUT", music ? "音乐槽只接受音频素材。" : audio ? "旁白槽只接受音频素材。" : image ? "图片片段只接受图片素材。" : narrated ? "视频画面槽只接受视频片段。" : "有序拼接只接受视频片段。");
@@ -1426,8 +1604,7 @@ export function normalizeOperationInputs(
         }
         if (op.kind === "render" && !codeParameters) {
           if (content.format !== "media") throw new AgentError("INVALID_INPUT", audio ? "旁白槽只接受音频修订。" : image ? "图片片段只接受图片修订。" : "视频片段只接受视频修订。");
-          const accepted = music ? content.mimeType === "audio/mpeg" || content.mimeType === "audio/wav"
-            : audio ? content.mimeType === "audio/mpeg"
+          const accepted = audio ? acceptsAudio(content.mimeType, content.blobId, music)
             : image ? content.mimeType.startsWith("image/") : content.mimeType === "video/mp4" || content.mimeType === "video/webm";
           if (!accepted) throw new AgentError("INVALID_INPUT", music ? "音乐槽只接受音频修订。" : audio ? "旁白槽只接受音频修订。" : image ? "图片片段只接受图片修订。" : narrated ? "视频画面槽只接受视频修订。" : "有序拼接只接受视频片段。");
           sources.push(blobSources(db, content.blobId));
@@ -1458,6 +1635,8 @@ export function normalizeOperationInputs(
         }
       }
     }
+    const frozenParameters: RenderParameters | null = !parameters || parameters.assembly === "code_project" ? parameters
+      : { ...parameters, ...resolveRenderCanvas(parameters, op.inputs, facts, operations, renderParameters, probes) };
     if (timelineParameters) {
       // 视频裁切必须落在源文件真实时长内；图片只接受实际可解码的图片。
       for (const segment of timelineParameters.segments) {
@@ -1476,7 +1655,8 @@ export function normalizeOperationInputs(
         throw new AgentError("INVALID_INPUT", `旁白约 ${(narration / 1000).toFixed(1)}s，超过画面总长 ${(timedTargetMs / 1000).toFixed(1)}s；本策略不加速、不剪词、不延长画面，请修改方案。`);
       }
     }
-    if (mixedParameters) {
+    if (frozenParameters?.assembly === "mixed_concat") {
+      const mixedParameters = frozenParameters;
       if (mixedParameters.narration && mixedParameters.narration.timelineStartMs >= timedTargetMs) {
         throw new AgentError("INVALID_INPUT", "配音开始位置必须在画面时长内，且完整配音不能超出画面。");
       }
@@ -1563,7 +1743,16 @@ export function normalizeOperationInputs(
         ? timelineParameters.segments.every(segment => slotVerified[segment.inputSlot] === true)
         : allSlotsVerified);
     }
-    if (parameters && !mixedParameters) renderParameters.set(id, parameters);
+    if (frozenParameters && frozenParameters.assembly !== "mixed_concat") renderParameters.set(id, frozenParameters);
+    if(op.kind==="render" && (op.parameters.assembly==="mixed_concat" || op.parameters.assembly==="timed_narrated_concat") && op.parameters.subtitles){
+      if(!workId) throw new AgentError("INVALID_INPUT","字幕制作须指定所属作品。");
+      const {track,sourceBlob}=resolvedSubtitle(db,scope,workId,op.parameters.subtitles);
+      const key=op.parameters.subtitles.track.artifactId+":"+op.parameters.subtitles.track.revisionId;
+      if(revisions.has(key)) used.add(key);
+      const slots=new Map<number,string>();
+      facts.forEach((f,i)=>{if(f.kind==="blob")slots.set(i,f.blobId);else if(f.kind==="artifact_revision" && f.content.format==="media") slots.set(i,f.content.blobId);});
+      projectCues(track.cues,sourceBlob,op.parameters,slots);
+    }
     trusted.set(id, facts);
     visiting.delete(id); visited.add(id);
   };
@@ -1590,7 +1779,7 @@ export function applyPrepareProposal(
   const inputSources = intent.inputSources.map(source => resolveContentSource(db, scope, source));
   const reviewInputs = intent.reviewInputs.map(input =>
     verifyReviewInput(db, scope, input, intent.workId === null ? undefined : { workId: intent.workId }));
-  const { validation, renderParameters, musicSources, durationBounds, durationVerified, hasUnusedRevisions } = normalizeOperationInputs(db, scope, inputSources, intent.operations, catalog, probes);
+  const { validation, renderParameters, musicSources, durationBounds, durationVerified, hasUnusedRevisions } = normalizeOperationInputs(db, scope, inputSources, intent.operations, catalog, probes, undefined,intent.workId);
   if (hasUnusedRevisions) throw new AgentError("INVALID_INPUT", "输入来源中存在未被使用的修订。");
   const operations = new Map(intent.operations.map(op => [op.operationId, op]));
   const final = operations.get(intent.finalOutput.operationId);
@@ -1623,10 +1812,9 @@ export function applyPrepareProposal(
   } else if (intent.outputTarget != null) {
     throw new AgentError("INVALID_INPUT", "只有最终视频制作才声明输出目标。");
   }
-  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, validation);
+  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, validation, renderParameters);
   for (const operation of spec.operations) {
     if (operation.kind !== "render" || operation.parameters.assembly !== "mixed_concat") continue;
-    operation.parameters = renderParameters.get(operation.operationId)!;
     const musicSource = musicSources.get(operation.operationId);
     if (musicSource) operation.musicSource = musicSource;
   }
@@ -1712,6 +1900,7 @@ export function resolveSpec(
   inputSources: ContentSource[],
   reviewInputs: ReviewInput[],
   ctx: CatalogValidationContext,
+  renderParameters: Map<string, RenderParameters>,
 ): ProductionSpec {
   return {
     workId: intent.workId,
@@ -1724,8 +1913,12 @@ export function resolveSpec(
       if (op.model === null ? entry.binding !== null : !entry.binding || canonicalJson(entry.binding) !== canonicalJson(op.model)) {
         throw new AgentError("CAPABILITY_UNAVAILABLE", "模型绑定与本地目录不一致，不能准备制作提案。");
       }
-      entry.validate?.(op, ctx.trusted.get(op.operationId)!, ctx);
-      if (op.kind === "render") return { ...op, quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" };
+      if (op.kind === "render") {
+        const render = { ...op, parameters: renderParameters.get(op.operationId)! };
+        entry.validate?.(render, ctx.trusted.get(op.operationId), ctx);
+        return { ...render, quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" };
+      }
+      entry.validate?.(op, ctx.trusted.get(op.operationId), ctx);
       return {
         ...op,
         quotePerAttempt: { currency: "CNY" as const, amountMinor: operationQuoteMinor(entry, op, ctx.textCodepoints?.get(op.operationId)) },

@@ -1,5 +1,8 @@
+import { withAttemptFiles } from "./media-port-support.js";
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, type WriteStream } from "node:fs";
+import { mkdir, open, rename, rm } from "node:fs/promises";
+import { finished } from "node:stream/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,7 +11,7 @@ import type { ExecutionInput, ExecutionObservation, InputRef, MarkdownContent, M
 import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { consumeSubmitPermit } from "./submit-permit.js";
-import { attemptOutput, recordAttemptOutput, runRow } from "./production-store.js";
+import { attemptOutput, completedUsage, recordAttemptOutput, runRow } from "./production-store.js";
 import { InvalidAudioFile, probeAudioFile, type AudioFileFacts } from "./media-probe.js";
 import { digestOf, type AgentClock } from "./util.js";
 import { getRevisionRow } from "./artifact-store.js";
@@ -33,6 +36,8 @@ export interface RealtimeTransport {
   send(text: string): void;
   close(): void;
   terminate(): void;
+  pause?(): void;
+  resume?(): void;
   onMessage(listener: (text: string) => void): void;
   onError(listener: (message: string, httpStatus: number | null) => void): void;
   onClose(listener: () => void): void;
@@ -68,7 +73,7 @@ type SessionOutcome =
   | { kind: "notSent"; message: string }
   | { kind: "cancelled"; message: string }
   | { kind: "unknown"; message: string }
-  | { kind: "audio"; pcm: Buffer; transcript: string; usage: { inputTokens: number; outputTokens: number } };
+  | { kind: "audio"; pcmBytes: number; transcript: string; usage: { inputTokens: number; outputTokens: number } | null };
 
 export class OpenAISpeechPort implements MediaExecutionPort {
   readonly reconcileTerminalBilling = false;
@@ -91,24 +96,34 @@ export class OpenAISpeechPort implements MediaExecutionPort {
     // 这里直接读取原文发送，不删标题、不改写、不截断，也不重复整份执行对象校验。
     const ref = input.operation.inputs[0] as Extract<InputRef, { kind: "text" | "artifact_revision" }>;
     const text = ref.kind === "text" ? ref.text : speechText(JSON.parse(getRevisionRow(this.db, ref.artifactId, ref.revisionId)!.content_json) as MarkdownContent);
-    const outcome = await this.runSession(resolved.apiKey, text, resolved.profile, signal);
-    if (outcome.kind === "rejection") return this.preRefusal(input.attemptId, `供应商明确拒绝创建配音：${outcome.message}`);
-    if (outcome.kind === "failed") return this.nonCompliant(input.attemptId, outcome.message);
-    // notSent：生成指令从未送达，无输出也无费用，按提交前失败记录（exitKind=failed，零请求事实留在 detail）。
-    if (outcome.kind === "notSent") return this.preRefusal(input.attemptId, outcome.message);
-    if (outcome.kind === "cancelled") return this.deterministic(input.attemptId, "cancelled", outcome.message);
-    if (outcome.kind === "unknown") {
-      return this.unstableUnknown(input.attemptId, `配音会话结果未核实（${outcome.message}）；保留原身份核对，不会重新提交。`);
-    }
-    if (outcome.pcm.length === 0) return this.nonCompliant(input.attemptId, "供应商未返回任何音频。");
-    const durationMs = Math.round(outcome.pcm.length / PCM_BYTES_PER_SECOND * 1000);
-    if (durationMs > resolved.profile.speech.maxDurationMs) {
-      return this.nonCompliant(input.attemptId, `音频时长 ${(durationMs / 1000).toFixed(1)}s 超过本配置 120s 验收上限。`);
-    }
-    if (!transcriptMatches(outcome.transcript, text)) {
-      return this.nonCompliant(input.attemptId, "内容未通过：供应商转写与旁白不一致，不发布该音频。");
-    }
-    return this.settleBytes(input.attemptId, outcome.pcm, outcome.usage);
+    const { apiKey, profile } = resolved;
+    return this.blobs.withStagingDirectory(async directory => {
+      const pcmFile = path.join(directory, "narration.pcm");
+      const handle = await open(pcmFile, "wx", 0o600);
+      const pcm = handle.createWriteStream({ flush: true });
+      const flushed = finished(pcm).then(() => null, (error: Error) => error);
+      let outcome: SessionOutcome, writeError: Error | null;
+      try { outcome = await this.runSession(apiKey, text, profile, pcm, signal); }
+      finally { pcm.end(); writeError = await flushed; }
+      if (writeError) return this.unstableUnknown(input.attemptId, "配音流落盘失败，保留原身份核对，不会重新提交。");
+      if (outcome.kind === "rejection") return this.preRefusal(input.attemptId, `供应商明确拒绝创建配音：${outcome.message}`);
+      if (outcome.kind === "failed") return this.nonCompliant(input.attemptId, outcome.message);
+      // notSent：生成指令从未送达，无输出也无费用，按提交前失败记录（exitKind=failed，零请求事实留在 detail）。
+      if (outcome.kind === "notSent") return this.preRefusal(input.attemptId, outcome.message);
+      if (outcome.kind === "cancelled") return this.deterministic(input.attemptId, "cancelled", outcome.message);
+      if (outcome.kind === "unknown") {
+        return this.unstableUnknown(input.attemptId, `配音会话结果未核实（${outcome.message}）；保留原身份核对，不会重新提交。`);
+      }
+      if (outcome.pcmBytes === 0) return this.nonCompliant(input.attemptId, "供应商未返回任何音频。");
+      const durationMs = Math.round(outcome.pcmBytes / PCM_BYTES_PER_SECOND * 1000);
+      if (durationMs > profile.speech.maxDurationMs) {
+        return this.nonCompliant(input.attemptId, `音频时长 ${(durationMs / 1000).toFixed(1)}s 超过本配置 120s 验收上限。`);
+      }
+      if (!transcriptMatches(outcome.transcript, text)) {
+        return this.nonCompliant(input.attemptId, "内容未通过：供应商转写与旁白不一致，不发布该音频。");
+      }
+      return withAttemptFiles(this.db, this.options.workRoot, input.attemptId, () => this.settlePcm(input.attemptId, pcmFile, outcome.usage));
+    });
   }
 
   // 单次会话没有可外查的任务身份：恢复只读本地证据，不要求当前 Key 可用。
@@ -129,7 +144,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
       return this.deterministic(query.attemptId, "failed", receipt.detail ?? "已取得的输出不满足冻结参数。");
     }
     const attemptDir = path.join(this.options.workRoot, query.attemptId);
-    if (existsSync(path.join(attemptDir, "speech.mp3"))) return this.settleSpeech(query.attemptId);
+    if (existsSync(path.join(attemptDir, "speech.mp3"))) return withAttemptFiles(this.db, this.options.workRoot, query.attemptId, () => this.settleSpeech(query.attemptId));
     return this.stableUnknown(query.attemptId, "单次配音会话没有可查询的任务身份，无法向供应商查询；结果与实际费用未取得；不会重新提交。");
   }
 
@@ -140,12 +155,13 @@ export class OpenAISpeechPort implements MediaExecutionPort {
 
   // —— 会话状态机 ——
 
-  private runSession(apiKey: string, text: string, profile: OpenAISpeechProfile, signal?: AbortSignal): Promise<SessionOutcome> {
+  private runSession(apiKey: string, text: string, profile: OpenAISpeechProfile, pcm: WriteStream, signal?: AbortSignal): Promise<SessionOutcome> {
     return new Promise<SessionOutcome>(resolve => {
       let settled = false;
       let sentResponse = false;
       let stopped = false;
-      const chunks: Buffer[] = [];
+      let pcmBytes = 0;
+      let paused = false;
       let transcript = "";
       const transport = this.transportFactory(realtimeUrl(profile), `Bearer ${apiKey}`, this.options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS);
       const finish = (outcome: SessionOutcome): void => {
@@ -170,6 +186,8 @@ export class OpenAISpeechPort implements MediaExecutionPort {
         try { transport.send(JSON.stringify({ type: "response.cancel" })); } catch { /* 发送失败同样结束本地等待 */ }
         finish({ kind: "unknown", message: "本地已停止等待并请求远端停止，供应商侧结果与费用未确认。" });
       };
+      pcm.once("error", () => finish({ kind: "unknown", message: "配音流写入失败" }));
+      if (signal?.aborted) { onStop(); return; }
       signal?.addEventListener("abort", onStop, { once: true });
       transport.onError((message, httpStatus) => {
         // 握手期 4xx（鉴权/限流/型号无效）是明确未受理；其余传输错误一律无法证明未受理。
@@ -216,10 +234,15 @@ export class OpenAISpeechPort implements MediaExecutionPort {
             return;
           case "response.output_audio.delta": {
             if (typeof event.delta !== "string" || event.delta.length === 0) return;
-            chunks.push(Buffer.from(event.delta, "base64"));
-            if (chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) > MAX_AUDIO_BYTES) {
+            const chunk = Buffer.from(event.delta, "base64");
+            pcmBytes += chunk.byteLength;
+            if (pcmBytes > MAX_AUDIO_BYTES) {
               transport.terminate();
               finish({ kind: "unknown", message: "音频流超过大小上限" });
+            } else if (!pcm.write(chunk) && !paused) {
+              paused = true;
+              transport.pause?.();
+              pcm.once("drain", () => { paused = false; if (!settled) transport.resume?.(); });
             }
             return;
           }
@@ -236,7 +259,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
             const response = event.response as { status?: unknown; usage?: unknown } | undefined;
             const usage = readUsage(response?.usage);
             if (response?.status === "completed") {
-              finish({ kind: "audio", pcm: Buffer.concat(chunks), transcript, usage });
+              finish({ kind: "audio", pcmBytes, transcript, usage });
               return;
             }
             if (response?.status === "cancelled") {
@@ -258,14 +281,12 @@ export class OpenAISpeechPort implements MediaExecutionPort {
   // —— 落盘与验收 ——
 
   /** PCM 原始落盘→FFmpeg 转 MP3→探测按冻结规格核对→原子移入完成位置；产出不可用如实 failed，工具暂不可用保留文件 unknown。 */
-  private async settleBytes(attemptId: string, pcm: Buffer, usage: { inputTokens: number; outputTokens: number }): Promise<ExecutionObservation> {
+  private async settlePcm(attemptId: string, source: string, usage: { inputTokens: number; outputTokens: number } | null): Promise<ExecutionObservation> {
     const attemptDir = path.join(this.options.workRoot, attemptId);
     const pcmFile = path.join(attemptDir, "narration.pcm");
     const temporary = path.join(attemptDir, "speech.mp3.part");
-    mkdirSync(attemptDir, { recursive: true, mode: 0o700 });
-    writeFileSync(pcmFile, pcm, { mode: 0o600 });
-    const handle = openSync(pcmFile, "r+");
-    try { fsyncSync(handle); } finally { closeSync(handle); }
+    await mkdir(attemptDir, { recursive: true, mode: 0o700 });
+    await rename(source, pcmFile);
     let durationMs = 0;
     let encoded = false;
     try {
@@ -274,23 +295,23 @@ export class OpenAISpeechPort implements MediaExecutionPort {
       const facts = await probeAudioFile(temporary);
       this.verifyAudio(facts);
       durationMs = facts.durationMs;
-      renameSync(temporary, path.join(attemptDir, "speech.mp3"));
+      await rename(temporary, path.join(attemptDir, "speech.mp3"));
     } catch (error) {
       // 编码阶段：可执行文件缺失或超时是本地工具不可用；其余退出失败是这批 PCM 的确定转码失败。
       if (!encoded && encodeFailureKind(error) === "output") {
-        rmSync(temporary, { force: true });
-        rmSync(pcmFile, { force: true });
+        await rm(temporary, { force: true });
+        await rm(pcmFile, { force: true });
         return this.nonCompliant(attemptId, `PCM 音频无法转码为 MP3：${error instanceof Error ? error.message : String(error)}`);
       }
       if (error instanceof InvalidAudioFile || error instanceof BadAudioOutput) {
-        rmSync(temporary, { force: true });
-        rmSync(pcmFile, { force: true });
+        await rm(temporary, { force: true });
+        await rm(pcmFile, { force: true });
         return this.nonCompliant(attemptId, error.message);
       }
       return this.unstableUnknown(attemptId,
         `音频已取得，本地转码或校验暂不可用（${error instanceof Error ? error.message : String(error)}）；保留原始文件继续核对，不重新提交。`);
     }
-    rmSync(pcmFile, { force: true });
+    await rm(pcmFile, { force: true });
     return this.publish(attemptId, durationMs, usage);
   }
 
@@ -304,7 +325,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
     } catch (error) {
       if (error instanceof InvalidAudioFile || error instanceof BadAudioOutput) {
         // 恢复同样不放过规格不符文件：登记失败收据，不发布。
-        rmSync(finalFile, { force: true });
+        await rm(finalFile, { force: true });
         return this.nonCompliant(attemptId, error.message);
       }
       return this.stableUnknown(attemptId,
@@ -312,14 +333,14 @@ export class OpenAISpeechPort implements MediaExecutionPort {
     }
   }
 
-  private publish(attemptId: string, durationMs: number, usage: { inputTokens: number; outputTokens: number } | null): ExecutionObservation {
+  private async publish(attemptId: string, durationMs: number, usage: { inputTokens: number; outputTokens: number } | null): Promise<ExecutionObservation> {
     const finalFile = path.join(this.options.workRoot, attemptId, "speech.mp3");
     const row = this.db.prepare("SELECT run_id FROM production_attempts WHERE id=?").get(attemptId) as { run_id: string };
     const run = runRow(this.db, row.run_id);
-    const blob = this.blobs.persist(run.owner_id, run.conversation_id, readFileSync(finalFile), "audio/mpeg", durationMs);
+    const blob = await this.blobs.persistFromFileAsync(run.owner_id, run.conversation_id, finalFile, "audio/mpeg", durationMs);
     const detail = `音频 ${(durationMs / 1000).toFixed(1)} 秒`
       + (usage ? `；实际用量：输入 ${usage.inputTokens} / 输出 ${usage.outputTokens} token，计费以供应商账单为准` : "");
-    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest, detail }))();
+    this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { blobId: blob.id, digest: blob.digest, detail,usage:{...usage,mediaDurationMs:durationMs} }))();
     return this.deterministicSucceeded(attemptId, blob.id, blob.digest, detail);
   }
 
@@ -368,7 +389,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
     return {
       observationId: `obs-${digestOf({ attemptId, scope: "openai-speech", state: "succeeded", blobId }).slice(0, 24)}`,
       attemptId, state: "succeeded", providerTaskId: null, blob: { id: blobId, digest, mimeType: "audio/mpeg" },
-      observedAt: this.stableTime(attemptId), message: `供应商配音已解码并核对通过（${detail}）。`, billing: null,
+      observedAt: this.stableTime(attemptId), message: `供应商配音已解码并核对通过（${detail}）。`, billing: null, ...completedUsage(this.db,attemptId),
     };
   }
 
@@ -402,12 +423,10 @@ function encodeFailureKind(error: unknown): "tool" | "output" {
   return "output";
 }
 
-function readUsage(raw: unknown): { inputTokens: number; outputTokens: number } {
-  const usage = raw as { input_tokens?: unknown; output_tokens?: unknown } | undefined;
-  return {
-    inputTokens: typeof usage?.input_tokens === "number" ? usage.input_tokens : 0,
-    outputTokens: typeof usage?.output_tokens === "number" ? usage.output_tokens : 0,
-  };
+function readUsage(raw: unknown): { inputTokens:number;outputTokens:number }|null {
+  const usage=raw as {input_tokens?:unknown;output_tokens?:unknown}|undefined;
+  if(typeof usage?.input_tokens!=="number" || typeof usage.output_tokens!=="number")return null;
+  return {inputTokens:usage.input_tokens,outputTokens:usage.output_tokens};
 }
 
 /** 转写与旁白只忽略空白与标点后逐字符比对；其余任何差异都算内容不符。 */
@@ -443,6 +462,8 @@ function wssProxyAgent(target: string): { agent?: unknown } {
 // ws 默认传输：Authorization 只进握手头；错误文本只保留受控消息与可解析的 HTTP 状态。
 // require 边界隔离 @types/ws 的 export= 类型（本包是 ESM，无 esModuleInterop）。
 interface WsClient {
+  pause(): void;
+  resume(): void;
   on(event: "message", listener: (data: unknown) => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
   on(event: "close", listener: () => void): unknown;
@@ -460,6 +481,7 @@ function defaultTransportFactory(url: string, authorization: string, handshakeTi
     send: text => { try { socket.send(text); } catch { /* 已关闭 */ } },
     close: () => { try { socket.close(); } catch { /* 已关闭 */ } },
     terminate: () => socket.terminate(),
+    pause: () => socket.pause(), resume: () => socket.resume(),
     onMessage: listener => socket.on("message", (data: unknown) => listener(String(data))),
     onError: listener => socket.on("error", (error: Error) => {
       const status = /Unexpected server response: (\d+)/.exec(error.message);
