@@ -180,3 +180,15 @@ test("DEPLOY-FIX-01 生产环境变量契约：example 列出的运行期变量�
     );
   }
 });
+
+test("BUG-06 FRAME_NO_PROXY 默认值：example 与 prod compose 一致，并让国内模型与对象存储域名免代理", () => {
+  // 配置了出站代理时，国内模型与成片下载必须直连。生产未显式配置就用 compose 的默认值，
+  // 照抄 example 的实例得到的结果必须与之相同。
+  const composeDefault = /\$\{FRAME_NO_PROXY:-([^}]+)\}/.exec(read("../../../docker/docker-compose.prod.yml"))![1]!;
+  const exampleDefault = /^# FRAME_NO_PROXY=(.+)$/m.exec(read("../../../.env.docker.prod.example"))![1]!;
+  assert.equal(exampleDefault, composeDefault, "example 的默认值应与 prod compose 保持一致");
+  const entries = composeDefault.split(",");
+  for (const suffix of [".volces.com", ".aliyuncs.com", ".minimaxi.com", ".minimax.cn", ".deepseek.com", ".bigmodel.cn"]) {
+    assert.ok(entries.includes(suffix), `默认 NO_PROXY 应包含 ${suffix}`);
+  }
+});

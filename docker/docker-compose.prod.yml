@@ -18,7 +18,7 @@ services:
       VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS: ${VIDEO_FACTORY_AUTH_SESSION_TTL_SECONDS:-43200}
       HTTP_PROXY: ${FRAME_HTTP_PROXY:-}
       HTTPS_PROXY: ${FRAME_HTTPS_PROXY:-}
-      NO_PROXY: ${FRAME_NO_PROXY:-localhost,127.0.0.1,vf-newsnow}
+      NO_PROXY: ${FRAME_NO_PROXY:-localhost,127.0.0.1,vf-newsnow,.volces.com,.aliyuncs.com,.minimaxi.com,.minimax.cn,.deepseek.com,.bigmodel.cn}
       NODE_USE_ENV_PROXY: "1"
       # Compose --env-file 只解析 YAML 占位符、不注入容器进程环境；同网 NewsNow
       # 白名单必须在此显式承接，否则 network-policy 会把私网 origin 当非法探测拦截。
