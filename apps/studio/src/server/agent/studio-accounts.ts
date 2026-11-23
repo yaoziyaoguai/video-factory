@@ -17,7 +17,7 @@ import {
 } from "./conversation-store.js";
 import type { AgentDatabase } from "./db.js";
 import { AgentError } from "./errors.js";
-import { finances, type RunRow } from "./production-store.js";
+import { finances, terminal, type RunRow } from "./production-store.js";
 import { newAgentId, type AgentClock } from "./util.js";
 import { validatorFor } from "./validate.js";
 
@@ -255,16 +255,20 @@ function budgetUsage(db: AgentDatabase, scope: BudgetPolicy["scope"], ownerId: s
   const runs = db.prepare(
     "SELECT r.* FROM production_runs r WHERE r.proposal_id IS NOT NULL" +
     (scope === "user" ? " AND r.owner_id=?" : "") +
-    " AND (r.conversation_id=? OR (r.created_at>=? AND r.created_at<?) OR r.state NOT IN ('succeeded','failed','cancelled')" +
-    " OR EXISTS (SELECT 1 FROM production_attempts a JOIN pending_reconciliation q ON q.attempt_id=a.id WHERE a.run_id=r.id))",
+    // 在途运行不分窗口（钱可能已经花出去）；终态运行的已结与待核费用都只归到创建它的日/月窗口，
+    // 没有外部账单时待核费用不会永久占住之后每一天、每一月的额度。
+    " AND (r.conversation_id=? OR r.state NOT IN ('succeeded','failed','cancelled') OR (r.created_at>=? AND r.created_at<?))",
   ).all(...(scope === "user" ? [ownerId] : []), conversationId, window.monthStart, window.monthEnd) as RunRow[];
   let conversation = 0, day = 0, month = 0;
   for (const run of runs) {
     const f = finances(db, run);
     const held = f.reservedMinor + f.pendingUnknownMinor;
+    const inFlight = !terminal(run.state);
+    const inDay = run.created_at >= window.dayStart && run.created_at < window.dayEnd;
+    const inMonth = run.created_at >= window.monthStart && run.created_at < window.monthEnd;
     if (run.conversation_id === conversationId) conversation += f.settledMinor + held;
-    day += held + (run.created_at >= window.dayStart && run.created_at < window.dayEnd ? f.settledMinor : 0);
-    month += held + (run.created_at >= window.monthStart && run.created_at < window.monthEnd ? f.settledMinor : 0);
+    day += (inFlight || inDay ? held : 0) + (inDay ? f.settledMinor : 0);
+    month += (inFlight || inMonth ? held : 0) + (inMonth ? f.settledMinor : 0);
   }
   const period = (limitMinor: number | null, usedMinor: number): BudgetPeriod => ({
     limitMinor, usedMinor, remainingMinor: limitMinor === null ? null : Math.max(0, limitMinor - usedMinor),

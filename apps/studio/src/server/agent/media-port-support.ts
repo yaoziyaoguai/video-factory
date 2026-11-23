@@ -51,6 +51,18 @@ export async function providerRequestJson(method: "POST" | "GET", url: URL, apiK
 
 export class NonCompliantOutput extends Error {}
 
+/**
+ * 请求确定没有送达供应商（发出前停止、连接未建立、缺凭据），或被同步拒绝且没有建立任务：费用确定为 0，
+ * 当场签发 0 元权威结算，不进待对账队列、不占预算。证据是这条观测本身，随观测一并登记进 ledger_observations。
+ * 生成指令已发出之后的失败/取消不得套用：实际费用未知，保持待对账。
+ */
+export function withZeroCostBilling(observation: ExecutionObservation): ExecutionObservation {
+  return { ...observation, billing: {
+    kind: "authoritative", billingFactId: `zero-${observation.attemptId}`, sourceRevision: "1",
+    netAmount: { currency: "CNY", amountMinor: 0 }, final: true, evidenceId: observation.observationId,
+  } };
+}
+
 export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 

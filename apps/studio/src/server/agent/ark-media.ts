@@ -14,6 +14,7 @@ import type { ArkVideoProfile } from "./media-config.js";
 import { LocalRenderPort } from "./local-render.js";
 import {
   audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
+  withZeroCostBilling,
 } from "./media-port-support.js";
 
 // Ark Seedance 薄适配：submit 只等创建回执并立即保存 task ID；query 只 GET 原任务；
@@ -195,8 +196,9 @@ export class ArkMediaPort implements MediaExecutionPort {
     });
   }
 
+  // 调用点全部在创建请求发出之前或被 4xx 同步拒绝：没有任务、费用为 0，当场结清。
   private preRefusal(attemptId: string, message: string): ExecutionObservation {
-    return this.observations.deterministic(attemptId, "failed", null, message);
+    return withZeroCostBilling(this.observations.deterministic(attemptId, "failed", null, message));
   }
 }
 

@@ -24,16 +24,22 @@ import { ProductionBlobs } from "../src/server/agent/production-blobs.js";
 import { issueSubmitPermit } from "../src/server/agent/submit-permit.js";
 import { attemptOutput } from "../src/server/agent/production-store.js";
 import { FakeRealtimeHub } from "./helpers/agent-openai-media.js";
-import type { ExecutionInput, ModelBinding, OperationSpec, RecoveryQuery } from "../src/shared/agent/generated/contracts.js";
+import type { ExecutionInput, ExecutionObservation, ModelBinding, OperationSpec, RecoveryQuery } from "../src/shared/agent/generated/contracts.js";
 
 // B1/B2 OpenAI 图片与配音端口的执行语义逐项验证：冻结 payload、三分终态（明确拒绝/failed/
 // unknown/cancelled）、signal 语义、转写不符不发布 blob、无 task ID 的本地收据恢复、零自动重发。
 // 图片走本地 HTTP 桩（成品是本地 ffmpeg 生成的真实 PNG/JPEG，经端口自身探测验收）；配音走
 // FakeRealtimeHub 进程内对演（PCM 经端口自身真实 FFmpeg 转 MP3 再探测）。全程不触真实外网。
+// 费用：请求确定未送达或被同步拒绝的观测带 0 元权威账单（当场结清）；已受理后失败的账单保持 null（待对账）。
 
 const runCommand = promisify(execFile);
 const staticClock = () => "2026-10-31T00:00:00.000Z";
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+const zeroCost = (observation: ExecutionObservation) => ({
+  kind: "authoritative", billingFactId: `zero-${observation.attemptId}`, sourceRevision: "1",
+  netAmount: { currency: "CNY", amountMinor: 0 }, final: true, evidenceId: observation.observationId,
+});
 
 const IMAGE_MODEL = "gpt-image-2.5-flare";
 const SPEECH_MODEL = "gpt-realtime-2.1-mini";
@@ -57,7 +63,7 @@ interface ImageStub {
   posts: { url: string; auth: string | undefined; body: any }[];
 }
 
-type ImageStubMode = "ok" | "okSmall" | "okJpeg" | "multi" | "badB64" | "status400" | "status500" | "hang";
+type ImageStubMode = "ok" | "okSmall" | "okJpeg" | "multi" | "badB64" | "status400" | "status500" | "reportedError" | "hang";
 
 async function startImageStub(mode: ImageStubMode, goodPng: Buffer, smallPng: Buffer, jpeg: Buffer): Promise<ImageStub> {
   const posts: ImageStub["posts"] = [];
@@ -75,6 +81,7 @@ async function startImageStub(mode: ImageStubMode, goodPng: Buffer, smallPng: Bu
         response.end(JSON.stringify({ error: { message: "stub failure" } }));
         return;
       }
+      if (mode === "reportedError") { response.end(JSON.stringify({ error: { code: "OutputVideoSensitiveContentDetected", message: "stub moderation" } })); return; }
       response.writeHead(200, { "content-type": "application/json" });
       if (mode === "multi") { response.end(JSON.stringify({ data: [imageOf(goodPng), imageOf(goodPng)] })); return; }
       if (mode === "badB64") { response.end(JSON.stringify({ data: [{ b64_json: "###not-base64###" }] })); return; }
@@ -241,6 +248,21 @@ it("image: 4xx 是明确拒绝 → failed 收据，单次请求", async t => {
   assert.equal(attemptOutput(db, "attempt")?.exit_kind, "failed");
   assert.equal(stub.posts.length, 1);
   assert.ok(!existsSync(path.join(directory, "work", "attempt")));
+  // 4xx 同步拒绝：没有产出、费用确定为 0，当场结清。
+  assert.deepEqual(observation.billing, zeroCost(observation));
+});
+
+it("image: HTTP 200 带 error（出图后被审核拦下）→ failed，费用待核而不是 0 元", async t => {
+  const art = { goodPng: Buffer.alloc(0), smallPng: Buffer.alloc(0), jpeg: Buffer.alloc(0) };
+  const { db, port, input, stub } = await imageCase(t, "reportedError", art);
+
+  const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
+
+  assert.equal(observation.state, "failed");
+  assert.match(observation.message ?? "", /供应商返回明确错误/);
+  assert.equal(observation.billing, null);
+  assert.equal(attemptOutput(db, "attempt")?.exit_kind, "failed");
+  assert.equal(stub.posts.length, 1);
 });
 
 it("image: 5xx 无法证明未受理 → unknown，不写收据、零重试", async t => {
@@ -251,6 +273,7 @@ it("image: 5xx 无法证明未受理 → unknown，不写收据、零重试", as
 
   assert.equal(observation.state, "unknown");
   assert.match(observation.message ?? "", /未核实/);
+  assert.equal(observation.billing, null);
   assert.equal(attemptOutput(db, "attempt"), undefined);
   assert.equal(stub.posts.length, 1);
 });
@@ -265,6 +288,7 @@ it("image: 请求发出后本地停止 → unknown；发出前停止 → cancell
   const midStop = await pending;
   assert.equal(midStop.state, "unknown");
   assert.match(midStop.message ?? "", /请求已发出后本地停止/);
+  assert.equal(midStop.billing, null);
   assert.equal(hang.stub.posts.length, 1);
   assert.equal(attemptOutput(hang.db, "attempt"), undefined);
 
@@ -274,6 +298,7 @@ it("image: 请求发出后本地停止 → unknown；发出前停止 → cancell
   const observation = await early.port.submit(early.input, issueSubmitPermit("attempt", 1), before.signal);
   assert.equal(observation.state, "cancelled");
   assert.match(observation.message ?? "", /停止请求发生在请求发出之前/);
+  assert.deepEqual(observation.billing, zeroCost(observation));
   assert.equal(early.stub.posts.length, 0);
 });
 
@@ -291,6 +316,8 @@ it("image: 多图、坏 base64、错画幅、非 PNG 都是确定 failed，不�
     const observation = await seeded.port.submit(seeded.input, issueSubmitPermit("attempt", 1));
     assert.equal(observation.state, "failed", mode);
     assert.match(observation.message ?? "", pattern);
+    // 完整响应已取得但产出不可用：费用仍未核实，不改写成 0 元。
+    assert.equal(observation.billing, null, mode);
     assert.equal(attemptOutput(seeded.db, "attempt")?.exit_kind, "failed");
     assert.equal(blobCount(seeded.db), 0, mode);
   }
@@ -303,12 +330,14 @@ it("image: 绑定漂移与凭据未启用是提交前失败", async t => {
   assert.equal(driftObservation.state, "failed");
   assert.match(driftObservation.message ?? "", /账号配置已变化/);
   assert.equal(drift.stub.posts.length, 0);
+  assert.deepEqual(driftObservation.billing, zeroCost(driftObservation));
 
   const noKey = await imageCase(t, "ok", art, "no-key");
   const keyObservation = await noKey.port.submit(noKey.input, issueSubmitPermit("attempt", 1));
   assert.equal(keyObservation.state, "failed");
   assert.match(keyObservation.message ?? "", /图片凭据未启用/);
   assert.equal(noKey.stub.posts.length, 0);
+  assert.deepEqual(keyObservation.billing, zeroCost(keyObservation));
 });
 
 it("image: 连接阶段失败（请求从未写出）是确定 failed；其余网络失败仍 unknown", async t => {
@@ -336,11 +365,13 @@ it("image: 连接阶段失败（请求从未写出）是确定 failed；其余�
   const refusedObservation = await refused.port.submit(refused.input, issueSubmitPermit("attempt", 1));
   assert.equal(refusedObservation.state, "failed");
   assert.match(refusedObservation.message ?? "", /图片创建请求未发出（ECONNREFUSED）；供应商未收到任何生成指令/);
+  assert.deepEqual(refusedObservation.billing, zeroCost(refusedObservation));
 
   const reset = await caseFor("ECONNRESET"); // 不在可证明“未写出”的码集内：仍按未知处理
   const resetObservation = await reset.port.submit(reset.input, issueSubmitPermit("attempt", 1));
   assert.equal(resetObservation.state, "unknown");
   assert.match(resetObservation.message ?? "", /结果未核实/);
+  assert.equal(resetObservation.billing, null);
 });
 
 it("image: query 复用成功收据；收据缺失但有完成文件时重验补发布且只发布一次", async t => {
@@ -449,18 +480,20 @@ it("speech: 转写不符 → 内容未通过，不发布 blob、不落文件", a
 });
 
 it("speech: incomplete / 会话内 error / 握手 401 各归确定 failed", async t => {
-  const cases: Array<[FakeRealtimeHub, RegExp]> = [
-    [new FakeRealtimeHub({ mode: "incomplete", audioSeconds: 1 }), /供应商响应未完成（status=incomplete）.*费用待核/],
-    [new FakeRealtimeHub({ mode: "serverError", audioSeconds: 1 }), /供应商明确拒绝创建配音.*会话错误/],
-    [new FakeRealtimeHub({ mode: "handshake401", audioSeconds: 1 }), /供应商明确拒绝创建配音：HTTP 401/],
+  const cases: Array<[FakeRealtimeHub, RegExp, boolean]> = [
+    [new FakeRealtimeHub({ mode: "incomplete", audioSeconds: 1 }), /供应商响应未完成（status=incomplete）.*费用待核/, true],
+    [new FakeRealtimeHub({ mode: "serverError", audioSeconds: 1 }), /供应商明确拒绝创建配音.*会话错误/, true],
+    [new FakeRealtimeHub({ mode: "handshake401", audioSeconds: 1 }), /供应商明确拒绝创建配音：HTTP 401/, false],
   ];
-  for (const [hub, pattern] of cases) {
+  for (const [hub, pattern, generationSent] of cases) {
     const { db, port, input } = await speechCase(t, hub);
     const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
     assert.equal(observation.state, "failed", String(pattern));
     assert.match(observation.message ?? "", pattern);
     assert.equal(attemptOutput(db, "attempt")?.exit_kind, "failed");
     assert.equal(blobCount(db), 0);
+    // 生成指令已发出：供应商可能已计费，费用待核；握手期被拒没有建立会话，当场结清 0 元。
+    assert.deepEqual(observation.billing, generationSent ? null : zeroCost(observation), String(pattern));
   }
 });
 
@@ -485,12 +518,14 @@ it("speech: 生成指令未发出的连接失败是确定 failed，不落 unknow
   assert.equal(connectFail.hub.sessions[0]!.sent.length, 0); // wire 证据：客户端零发送
   assert.equal(attemptOutput(connectFail.db, "attempt")?.exit_kind, "failed");
   assert.equal(blobCount(connectFail.db), 0);
+  assert.deepEqual(connectObservation.billing, zeroCost(connectObservation));
 
   const closedEarly = await speechCase(t, new FakeRealtimeHub({ mode: "closeBeforeAny", audioSeconds: 1 }));
   const closeObservation = await closedEarly.port.submit(closedEarly.input, issueSubmitPermit("attempt", 1));
   assert.equal(closeObservation.state, "failed");
   assert.match(closeObservation.message ?? "", /连接在请求发出前关闭；未提交生成请求/);
   assert.equal(closedEarly.hub.sessions[0]!.sent.length, 0);
+  assert.deepEqual(closeObservation.billing, zeroCost(closeObservation));
 });
 
 it("speech: 生成中停止 → 已发 cancel 并立即结束本地等待（结果未确认，不等 180 秒截止）；发送前停止 → cancelled 零请求", async t => {
@@ -505,6 +540,7 @@ it("speech: 生成中停止 → 已发 cancel 并立即结束本地等待（结�
   assert.ok(Date.now() - startedAt < 2_000, "停止后应立即结束本地等待，不等会话截止");
   assert.equal(observation.state, "unknown");
   assert.match(observation.message ?? "", /本地已停止等待并请求远端停止/);
+  assert.equal(observation.billing, null);
   assert.equal(mid.hub.sessions[0]!.cancelled, true, "取消指令已发出");
   assert.equal(blobCount(mid.db), 0);
   assert.ok(!existsSync(path.join(mid.directory, "work", "attempt")));
@@ -517,6 +553,7 @@ it("speech: 生成中停止 → 已发 cancel 并立即结束本地等待（结�
   assert.equal(earlyObservation.state, "cancelled");
   assert.match(earlyObservation.message ?? "", /停止请求发生在请求发出之前/);
   assert.equal(early.hub.sessions[0]!.sent.length, 0);
+  assert.deepEqual(earlyObservation.billing, zeroCost(earlyObservation));
 });
 
 it("speech: 零音频与超时长音频是确定 failed", async t => {
@@ -524,6 +561,7 @@ it("speech: 零音频与超时长音频是确定 failed", async t => {
   const silentObservation = await silent.port.submit(silent.input, issueSubmitPermit("attempt", 1));
   assert.equal(silentObservation.state, "failed");
   assert.match(silentObservation.message ?? "", /供应商未返回任何音频/);
+  assert.equal(silentObservation.billing, null);
 
   const overlong = await speechCase(t, new FakeRealtimeHub({ mode: "completed", audioSeconds: 121 }));
   const longObservation = await overlong.port.submit(overlong.input, issueSubmitPermit("attempt", 1));
@@ -580,6 +618,7 @@ it("speech: 绑定漂移与凭据未启用是提交前失败，不建会话", as
   assert.equal(driftObservation.state, "failed");
   assert.match(driftObservation.message ?? "", /账号配置已变化/);
   assert.equal(drift.hub.sessions.length, 0);
+  assert.deepEqual(driftObservation.billing, zeroCost(driftObservation));
 });
 
 // —— 网关退役路由（B3：旧供应商绑定不再回落任何通道） ——

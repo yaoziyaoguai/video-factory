@@ -13,6 +13,7 @@ import { digestOf, type AgentClock } from "./util.js";
 import type { WanVideoProfile } from "./media-config.js";
 import {
   aspectRatioMismatch, audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
+  withZeroCostBilling,
 } from "./media-port-support.js";
 
 // 阿里万相 wan3.0-video/-prime 薄适配（wire 序列按 2026-11-01 百炼官方页核实）：
@@ -189,7 +190,8 @@ export class WanVideoPort implements MediaExecutionPort {
     });
   }
 
+  // 调用点全部在创建请求发出之前或被 4xx 同步拒绝：没有任务、费用为 0，当场结清。
   private preRefusal(attemptId: string, message: string): ExecutionObservation {
-    return this.observations.deterministic(attemptId, "failed", null, message);
+    return withZeroCostBilling(this.observations.deterministic(attemptId, "failed", null, message));
   }
 }

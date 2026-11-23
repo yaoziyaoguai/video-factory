@@ -21,9 +21,9 @@ import { DEFAULT_ARK_VIDEO_PROFILE } from "../src/server/agent/media-config.js";
 import { openAgentDatabase } from "../src/server/agent/db.js";
 import { probeVideoFile } from "../src/server/agent/media-probe.js";
 import type { ProductionCrashHook } from "../src/server/agent/production-service.js";
-import { attemptsFor } from "../src/server/agent/production-store.js";
+import { attemptsFor, finances, runRow } from "../src/server/agent/production-store.js";
 import { validatorFor } from "../src/server/agent/validate.js";
-import type { ProductionIntent } from "../src/shared/agent/generated/contracts.js";
+import type { BillingFact, ExecutionObservation, ProductionIntent } from "../src/shared/agent/generated/contracts.js";
 import { ensureConfirmedWork, finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { toolIntentOf } from "./helpers/tool-args.js";
 
@@ -227,7 +227,16 @@ it("F1 视频创建及查询错误回显不进入持久事实或公开投影", a
       await runtime.worker!.pollOnce();
       const attempt = attemptsFor(runtime.database, runId).at(-1)!;
       assert.equal(attempt.state, expected);
-      assert.equal(attempt.billing_json, null);
+      if (mode === "echo400") {
+        // 4xx 同步拒绝：没有建立任务、费用确定为 0，带 0 元权威账单（证据是观测本身）。
+        assert.equal(attempt.billing_final, 1);
+        assert.equal(attempt.billed_minor, 0);
+        const fact = JSON.parse(attempt.billing_json!) as Extract<BillingFact, { kind: "authoritative" }>;
+        assert.deepEqual([fact.kind, fact.billingFactId, fact.final, fact.netAmount.amountMinor], ["authoritative", `zero-${attempt.id}`, true, 0]);
+      } else {
+        // 任务失败、5xx、查询失败：费用未知，不虚构账单。
+        assert.equal(attempt.billing_json, null);
+      }
       if (mode === "echoTaskFailed") {
         assert.match(runtime.service.getRun("local-owner", runId).issue?.message ?? "", /InvalidTask/);
       }
@@ -423,6 +432,22 @@ it("C1-03：供应商 4xx 明确拒绝→failed 且不重试；不合规成品�
       assert.match(runtime.service.getRun("local-owner", runId).issue?.message ?? "", /供应商明确拒绝.*HTTP 400/);
       for (let i = 0; i < 2; i++) await runtime.worker!.pollOnce();
       assert.equal(stub.state.posts.length, 1, "明确拒绝不重试");
+      // 4xx 同步拒绝＝没有建立任务、费用确定为 0：当场结清，不进待对账队列；证据是这条观测本身。
+      const attempt = attemptsFor(runtime.database, runId).at(-1)!;
+      assert.equal(attempt.billing_final, 1);
+      assert.equal(attempt.billed_minor, 0);
+      const { observation_json } = runtime.database.prepare("SELECT observation_json FROM ledger_observations WHERE attempt_id=?").get(attempt.id) as { observation_json: string };
+      const { billing } = JSON.parse(observation_json) as ExecutionObservation;
+      assert.deepEqual(billing, {
+        kind: "authoritative", billingFactId: `zero-${attempt.id}`, sourceRevision: "1",
+        netAmount: { currency: "CNY", amountMinor: 0 }, final: true,
+        evidenceId: (JSON.parse(observation_json) as ExecutionObservation).observationId,
+      });
+      assert.deepEqual(JSON.parse(attempt.billing_json!), billing);
+      assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM pending_reconciliation WHERE attempt_id=?").get(attempt.id) as { n: number }).n, 0);
+      const finance = finances(runtime.database, runRow(runtime.database, runId));
+      assert.equal(finance.state, "settled");
+      assert.equal(finance.settledMinor + finance.reservedMinor + finance.pendingUnknownMinor, 0);
     } finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); stub.server.closeAllConnections(); stub.server.close(); }
 
     // 不合规成品：供应商成功但画幅不符 → failed 终态、保留 task id、不再反复获取同一无效文件。

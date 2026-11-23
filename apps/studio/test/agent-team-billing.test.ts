@@ -508,6 +508,76 @@ test("CAP-07 同一共享预算下竞争的两份付费提案，等待账单、�
   );
 });
 
+test("BUG-01 待核费用只占创建它的日/月窗口：跨日、跨月归零；在途运行不分窗口", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "frame-budget-window-"));
+  // 上海时间 11-22 06:00，日界为 16:00Z。
+  const day = "2026-11-21T22:00:00.000Z";
+  const pending = productionHarness(dir, day, undefined, false, { owner: "paid-a", conversation: "conv-a", billing: null }),
+    settled = productionHarness(dir, day, undefined, false, { owner: "paid-b", conversation: "conv-b" }),
+    inFlight = productionHarness(dir, day, undefined, false, { owner: "paid-c", conversation: "conv-c" });
+  const db = pending.db;
+  let instant = day;
+  const store = new StudioAccountsStore(db, () => instant);
+  t.after(async () => {
+    await inFlight.close();
+    await settled.close();
+    await pending.close();
+    await rm(dir, { force: true, recursive: true });
+  });
+  // worker 每次轮询都会认领库里的到期运行并顺带对账：先跑完带默认账单的那份，再让待核运行进场。
+  const finish = async (harness: typeof pending): Promise<string> => {
+    const run = harness.accept().run;
+    for (let i = 0; i < 8 && runRow(db, run.id).state !== "succeeded"; i++) await harness.worker.pollOnce();
+    return run.id;
+  };
+  const settledRun = await finish(settled),
+    pendingRun = await finish(pending);
+  const unreconciled = finances(db, runRow(db, pendingRun));
+  assert.equal(unreconciled.state, "pending_reconciliation");
+  assert.ok(unreconciled.pendingUnknownMinor > 0);
+  const paid = finances(db, runRow(db, settledRun));
+  assert.equal(paid.state, "settled");
+  assert.ok(paid.settledMinor > 0);
+  const pendingMinor = unreconciled.pendingUnknownMinor,
+    settledMinor = paid.settledMinor;
+  // 个人日/月用量、空间日/月用量。
+  const usage = () => {
+    const { personal, workspace } = store.budgetSummary("paid-a", "conv-a");
+    return [personal.day.usedMinor, workspace.day.usedMinor, workspace.month.usedMinor];
+  };
+
+  assert.deepEqual(usage(), [pendingMinor, pendingMinor + settledMinor, pendingMinor + settledMinor]);
+  instant = "2026-11-22T18:00:00.000Z";
+  // 次日：待核与已结都只留在创建它的那一天，月额度照常占用。
+  assert.deepEqual(usage(), [0, 0, pendingMinor + settledMinor]);
+  instant = "2026-12-21T22:00:00.000Z";
+  // 次月：没有外部账单的待核费用不再永久占住额度。
+  assert.deepEqual(usage(), [0, 0, 0]);
+
+  const policy = {
+    scope: "workspace" as const,
+    subjectId: "default",
+    commandId: "day-cap",
+    expectedRevision: 0,
+    conversationLimitMinor: null,
+    dayLimitMinor: pendingMinor + settledMinor,
+    monthLimitMinor: null,
+  };
+  store.saveBudget("admin", policy);
+  instant = day;
+  assert.throws(() => checkBudget(db, "paid-a", "conv-x", instant, 1), /今日/);
+  instant = "2026-11-22T18:00:00.000Z";
+  assert.doesNotThrow(() => checkBudget(db, "paid-a", "conv-x", instant, pendingMinor + settledMinor));
+
+  store.saveBudget("admin", { ...policy, commandId: "no-cap", expectedRevision: 1, dayLimitMinor: null });
+  const reserved = finances(db, runRow(db, inFlight.accept().run.id)).reservedMinor;
+  assert.ok(reserved > 0);
+  // 前一天受理、尚未执行的运行：钱可能已经花出去，次日与次月都照占。
+  assert.deepEqual(usage(), [0, reserved, pendingMinor + settledMinor + reserved]);
+  instant = "2026-12-21T22:00:00.000Z";
+  assert.deepEqual(usage(), [0, reserved, reserved]);
+});
+
 test("NEW-01 私网 HTTPS 账单地址在发起请求前拒绝", async t => {
   const dir = await mkdtemp(path.join(tmpdir(), "frame-invoice-boundary-"));
   const h = productionHarness(dir, "2026-11-22T00:00:00.000Z", undefined, false);

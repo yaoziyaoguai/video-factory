@@ -11,14 +11,15 @@ import { InvalidAudioFile, probeAudioFile, type AudioFileFacts } from "./media-p
 import type { AgentClock } from "./util.js";
 import type { MiniMaxSpeechProfile } from "./media-config.js";
 import { getRevisionRow } from "./artifact-store.js";
-import { decodedMediaChunks, PortObservations, ProviderHttpError, providerRequestJson, withAttemptFiles } from "./media-port-support.js";
+import { decodedMediaChunks, PortObservations, ProviderHttpError, providerRequestJson, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
 import { speechText } from "../../shared/agent/markdown.js";
 
 // MiniMax t2a v2 同步配音薄适配（wire 序列按 2026-11-01 官方页核实）：
 // POST /v1/t2a_v2 {model, text, stream:false, output_format:"hex", voice_setting:{voice_id},
 // audio_setting:{sample_rate:32000, bitrate:128000, format:"mp3", channel:1}} →
 // base_resp.status_code=0 + data.audio（hex MP3）+ extra_info.usage_characters（计费字符）。
-// 成品按冻结规格验收（MP3/32kHz/单声道/≤120s）；usage_characters 只写观测消息，billing 恒 null。
+// 成品按冻结规格验收（MP3/32kHz/单声道/≤120s）；usage_characters 只写观测消息；billing 只在请求确定未产生
+// 费用时才是 0 元结算（withZeroCostBilling）。
 // 单次请求没有可外查的任务身份：查询/取消只读本地收据与已落盘文件，缺证据稳定 unknown，不重发。
 
 export type MiniMaxSpeechBindingResolver = (binding: ModelBinding) => { profile: MiniMaxSpeechProfile; apiKey: string | null } | null;
@@ -56,7 +57,7 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     consumeSubmitPermit(permit, input.attemptId);
     if (input.operation.kind !== "speech") throw new Error("MiniMax 配音通道只接受 speech 操作。");
     if (signal?.aborted) {
-      return this.observations.deterministic(input.attemptId, "cancelled", null, "停止请求发生在请求发出之前；未提交任何请求。");
+      return withZeroCostBilling(this.observations.deterministic(input.attemptId, "cancelled", null, "停止请求发生在请求发出之前；未提交任何请求。"));
     }
     const resolved = this.options.resolve(input.operation.model);
     if (!resolved) return this.preRefusal(input.attemptId, "账号配置已变化，未使用当前账号提交请求。");
@@ -96,7 +97,8 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     }
     const data = typeof parsed.data === "object" && parsed.data !== null ? parsed.data as { audio?: unknown } : {};
     if (typeof data.audio !== "string" || data.audio.length === 0) {
-      return this.preRefusal(input.attemptId, "供应商未返回任何音频。");
+      // HTTP 200 且业务码为 0：请求已被受理，没有音频不代表没有计费，不签发零元结算。
+      return this.observations.deterministic(input.attemptId, "failed", null, "供应商未返回任何音频。");
     }
     if (data.audio.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(data.audio)) {
       return this.observations.nonCompliant(input.attemptId, null, "供应商返回的音频不是完整合法的 hex 数据。");
@@ -185,7 +187,8 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     if (facts.durationMs > 120_000) throw new BadAudioOutput(`音频时长 ${(facts.durationMs / 1000).toFixed(1)}s 超过 120s 验收上限。`);
   }
 
+  // 调用点全部在请求发出之前或被供应商明确拒绝：没有产出、费用为 0，当场结清。
   private preRefusal(attemptId: string, message: string): ExecutionObservation {
-    return this.observations.deterministic(attemptId, "failed", null, message);
+    return withZeroCostBilling(this.observations.deterministic(attemptId, "failed", null, message));
   }
 }

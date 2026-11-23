@@ -1,4 +1,4 @@
-import { withAttemptFiles } from "./media-port-support.js";
+import { withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
 import { execFile } from "node:child_process";
 import { existsSync, type WriteStream } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
@@ -25,6 +25,7 @@ import { speechText } from "../../shared/agent/markdown.js";
 // completed。PCM 经 FFmpeg 转 MP3（24kHz 单声道）后按冻结规格验收；转写与旁白只差空白/标点才算通过，
 // 不符不发布 blob。billing 恒 null；实际用量写入观测消息。该接口没有可外查的任务身份：query/cancel
 // 只读本地文件与收据，缺证据稳定 unknown。signal：未发出即停止 → cancelled；已生成后停止 → response.cancel。
+// 结算例外：生成指令（response.create）确定未发出的终态签发 0 元结算，见 withZeroCostBilling。
 
 const run = promisify(execFile);
 
@@ -68,10 +69,10 @@ const INSTRUCTIONS = "请用自然清晰的普通话，逐字朗读用户提供�
 type ProviderRecoveryQuery = Extract<RecoveryQuery, { kind: "provider" }>;
 
 type SessionOutcome =
-  | { kind: "rejection"; message: string }
+  | { kind: "rejection"; message: string; generationSent: boolean }
   | { kind: "failed"; message: string }
   | { kind: "notSent"; message: string }
-  | { kind: "cancelled"; message: string }
+  | { kind: "cancelled"; message: string; generationSent: boolean }
   | { kind: "unknown"; message: string }
   | { kind: "audio"; pcmBytes: number; transcript: string; usage: { inputTokens: number; outputTokens: number } | null };
 
@@ -88,7 +89,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
   async submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
     consumeSubmitPermit(permit, input.attemptId);
     if (input.operation.kind !== "speech") throw new Error("OpenAI 配音通道只接受 speech 操作。");
-    if (signal?.aborted) return this.deterministic(input.attemptId, "cancelled", "停止请求发生在请求发出之前；未提交任何请求。");
+    if (signal?.aborted) return withZeroCostBilling(this.deterministic(input.attemptId, "cancelled", "停止请求发生在请求发出之前；未提交任何请求。"));
     const resolved = this.options.resolve(input.operation.model);
     if (!resolved) return this.preRefusal(input.attemptId, "账号配置已变化，未使用当前账号提交请求。");
     if (!resolved.apiKey) return this.preRefusal(input.attemptId, "配音凭据未启用；未提交任何请求，不会自动重试。");
@@ -106,11 +107,17 @@ export class OpenAISpeechPort implements MediaExecutionPort {
       try { outcome = await this.runSession(apiKey, text, profile, pcm, signal); }
       finally { pcm.end(); writeError = await flushed; }
       if (writeError) return this.unstableUnknown(input.attemptId, "配音流落盘失败，保留原身份核对，不会重新提交。");
-      if (outcome.kind === "rejection") return this.preRefusal(input.attemptId, `供应商明确拒绝创建配音：${outcome.message}`);
+      // generationSent：生成指令已发出，供应商可能已计费，费用保持待核。
+      if (outcome.kind === "rejection") {
+        return this.preRefusal(input.attemptId, `供应商明确拒绝创建配音：${outcome.message}`, outcome.generationSent);
+      }
       if (outcome.kind === "failed") return this.nonCompliant(input.attemptId, outcome.message);
       // notSent：生成指令从未送达，无输出也无费用，按提交前失败记录（exitKind=failed，零请求事实留在 detail）。
       if (outcome.kind === "notSent") return this.preRefusal(input.attemptId, outcome.message);
-      if (outcome.kind === "cancelled") return this.deterministic(input.attemptId, "cancelled", outcome.message);
+      if (outcome.kind === "cancelled") {
+        const observation = this.deterministic(input.attemptId, "cancelled", outcome.message);
+        return outcome.generationSent ? observation : withZeroCostBilling(observation);
+      }
       if (outcome.kind === "unknown") {
         return this.unstableUnknown(input.attemptId, `配音会话结果未核实（${outcome.message}）；保留原身份核对，不会重新提交。`);
       }
@@ -182,7 +189,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
         // 请求已发出：尝试让远端停止生成，随后立即结束本地等待并清理连接——
         // 不依赖对端回执（收不到终态不再等满 180 秒截止）；此刻没有已知终态就如实落
         // “结果未确认”。取消指令发送失败同样走清理，不挂起。
-        if (!sentResponse) { finish({ kind: "cancelled", message: "停止请求发生在请求发出之前；未提交任何请求。" }); return; }
+        if (!sentResponse) { finish({ kind: "cancelled", message: "停止请求发生在请求发出之前；未提交任何请求。", generationSent: false }); return; }
         try { transport.send(JSON.stringify({ type: "response.cancel" })); } catch { /* 发送失败同样结束本地等待 */ }
         finish({ kind: "unknown", message: "本地已停止等待并请求远端停止，供应商侧结果与费用未确认。" });
       };
@@ -192,7 +199,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
       transport.onError((message, httpStatus) => {
         // 握手期 4xx（鉴权/限流/型号无效）是明确未受理；其余传输错误一律无法证明未受理。
         if (httpStatus !== null && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408) {
-          finish({ kind: "rejection", message });
+          finish({ kind: "rejection", message, generationSent: false });
           return;
         }
         // response.create 未发出＝供应商没收到生成指令（与停止路径同一事实）；确定失败，不落 unknown。
@@ -252,7 +259,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
           case "error": {
             // 供应商在会话内主动报告的错误是确定事实（如内容审查拒绝）。
             const detail = event.error as { type?: unknown } | undefined;
-            finish({ kind: "rejection", message: `供应商会话错误${typeof detail?.type === "string" ? `（${detail.type}）` : ""}` });
+            finish({ kind: "rejection", message: `供应商会话错误${typeof detail?.type === "string" ? `（${detail.type}）` : ""}`, generationSent: sentResponse });
             return;
           }
           case "response.done": {
@@ -263,7 +270,7 @@ export class OpenAISpeechPort implements MediaExecutionPort {
               return;
             }
             if (response?.status === "cancelled") {
-              finish({ kind: "cancelled", message: stopped ? "本地停止后供应商已终止生成。" : "供应商已取消生成。" });
+              finish({ kind: "cancelled", message: stopped ? "本地停止后供应商已终止生成。" : "供应商已取消生成。", generationSent: sentResponse });
               return;
             }
             finish(typeof response?.status === "string"
@@ -372,10 +379,12 @@ export class OpenAISpeechPort implements MediaExecutionPort {
     return this.deterministic(attemptId, "failed", `已完整取得的输出不满足冻结参数：${reason}；费用待核。`);
   }
 
-  private preRefusal(attemptId: string, message: string): ExecutionObservation {
+  /** 提交前拒绝：登记效果收据；生成指令未发出的当场结清 0 元，已发出的费用仍待核。 */
+  private preRefusal(attemptId: string, message: string, generationSent = false): ExecutionObservation {
     // B2：提交前本地拒绝/明确供应商拒绝同样登记效果收据，费用未发生的事实留在 detail。
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { exitKind: "failed", detail: message }))();
-    return this.deterministic(attemptId, "failed", message);
+    const observation = this.deterministic(attemptId, "failed", message);
+    return generationSent ? observation : withZeroCostBilling(observation);
   }
 
   private deterministic(attemptId: string, state: "failed" | "cancelled", message: string): ExecutionObservation {

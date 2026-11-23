@@ -1,4 +1,4 @@
-import { decodedMediaChunks, withAttemptFiles } from "./media-port-support.js";
+import { decodedMediaChunks, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -15,7 +15,8 @@ import type { ImageProfile } from "./media-config.js";
 import { markdownFullText } from "../../shared/agent/markdown.js";
 
 // OpenAI 和火山方舟共用同步单图执行与恢复（B1/B2）：一次 POST 完整接收响应→解析恰一张 b64 图→解码并验实际
-// 格式与冻结尺寸→按 attempt 确定位置原子落盘→登记 blob/效果收据→返回观测；billing 恒 null，估价不写成账单。
+// 格式与冻结尺寸→按 attempt 确定位置原子落盘→登记 blob/效果收据→返回观测；估价不写成账单，
+// billing 只在请求确定未产生费用时才是 0 元结算（withZeroCostBilling）。
 // 该接口没有经证实的任务查询/取消：query/cancel 只读本地文件与收据，缺证据稳定 unknown，绝不伪造 providerTaskId 外查。
 // signal：未发出即停止 → cancelled；请求已发出后中断无法证明未受理 → unknown（Images 无远端取消语义）。
 
@@ -51,7 +52,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
   async submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
     consumeSubmitPermit(permit, input.attemptId);
     if (input.operation.kind !== "image") throw new Error("图片通道只接受 image 操作。");
-    if (signal?.aborted) return this.deterministic(input.attemptId, "cancelled", "停止请求发生在请求发出之前；未提交任何请求。");
+    if (signal?.aborted) return withZeroCostBilling(this.deterministic(input.attemptId, "cancelled", "停止请求发生在请求发出之前；未提交任何请求。"));
     const resolved = this.options.resolve(input.operation.model);
     if (!resolved) return this.preRefusal(input.attemptId, "账号配置已变化，未使用当前账号提交请求。");
     if (!resolved.apiKey) return this.preRefusal(input.attemptId, "图片凭据未启用；未提交任何请求，不会自动重试。");
@@ -71,7 +72,7 @@ export class ImageGenerationPort implements MediaExecutionPort {
       if (error instanceof ImageRejection) {
         return this.preRefusal(input.attemptId, `供应商明确拒绝创建图片：${error.message}`);
       }
-      if (error instanceof BadImageOutput) {
+      if (error instanceof BadImageOutput || error instanceof ProviderReportedError) {
         // 完整响应已取得但产出不可用：如实终态失败，费用仍未核实，不改写成“没花钱”。
         return this.nonCompliant(input.attemptId, error.message);
       }
@@ -215,7 +216,8 @@ export class ImageGenerationPort implements MediaExecutionPort {
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new IncompleteResponse("供应商响应不是对象。");
       const record = parsed as { error?: unknown };
       if (record.error !== undefined && record.error !== null) {
-        throw new ImageRejection("供应商返回明确错误。");
+        // HTTP 200 带 error（如出图后被内容审核拦下）：请求已被受理，费用未知，不能按提交前拒绝结清 0 元。
+        throw new ProviderReportedError("供应商返回明确错误。");
       }
       return parsed;
     } finally {
@@ -264,10 +266,11 @@ export class ImageGenerationPort implements MediaExecutionPort {
     return this.deterministic(attemptId, "failed", `已完整取得的输出不满足冻结参数：${reason}`);
   }
 
+  // 调用点全部在请求发出之前、连接未建立或被 4xx/429 同步拒绝：没有产出、费用为 0，当场结清。
   private preRefusal(attemptId: string, message: string): ExecutionObservation {
     // B2：提交前本地拒绝/明确供应商拒绝同样登记效果收据，费用未发生的事实留在 detail。
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId, { exitKind: "failed", detail: message }))();
-    return this.deterministic(attemptId, "failed", message);
+    return withZeroCostBilling(this.deterministic(attemptId, "failed", message));
   }
 
   private deterministic(attemptId: string, state: "failed" | "cancelled", message: string): ExecutionObservation {
@@ -309,6 +312,8 @@ export class ImageGenerationPort implements MediaExecutionPort {
 class ImageRejection extends Error {}
 class BadImageOutput extends Error {}
 class IncompleteResponse extends Error {}
+/** 供应商用 HTTP 200 携带 error 对象：请求已受理但无可用产出，与 4xx 拒绝分开归类。 */
+class ProviderReportedError extends Error {}
 
 // fetch 网络失败时错误码挂在 cause 上；这组码只出现在请求写出前的连接阶段，可证明“未发送”。
 function connectPhaseCode(error: unknown): string | null {

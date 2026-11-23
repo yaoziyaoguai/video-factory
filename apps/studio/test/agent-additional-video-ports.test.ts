@@ -31,7 +31,7 @@ import { MiniMaxSpeechPort } from "../src/server/agent/minimax-speech.js";
 import { finalVideoTarget, seedConfirmedWork } from "./helpers/creative-work-fixture.js";
 import { canonicalJson, digestOf, newAgentId } from "../src/server/agent/util.js";
 import type {
-  ExecutionInput, ModelBinding, OperationSpec, ProductionIntent, RecoveryQuery,
+  ExecutionInput, ExecutionObservation, ModelBinding, OperationSpec, ProductionIntent, RecoveryQuery,
 } from "../src/shared/agent/generated/contracts.js";
 
 // M2 三端口本地 HTTP 替身验收（§11.3 出口）：每协议覆盖 payload、身份、成功、明确失败、
@@ -138,6 +138,12 @@ function speechOperation(binding: ModelBinding, text: string): OperationSpec {
 
 const billingOf = (db: AgentDatabase, attemptId: string) =>
   (db.prepare("SELECT billing_json FROM production_attempts WHERE id=?").get(attemptId) as { billing_json: string | null }).billing_json;
+
+// 请求确定未送达或被同步拒绝的观测：0 元权威账单，证据是这条观测本身。
+const zeroCost = (observation: ExecutionObservation) => ({
+  kind: "authoritative", billingFactId: `zero-${observation.attemptId}`, sourceRevision: "1",
+  netAmount: { currency: "CNY", amountMinor: 0 }, final: true, evidenceId: observation.observationId,
+});
 
 const closeServer = (server: http.Server) => { server.closeAllConnections(); server.close(); };
 
@@ -293,6 +299,9 @@ describe("MiniMax H3 video port (M2)", () => {
     assert.equal(refusedObservation.state, "failed");
     assert.match(refusedObservation.message ?? "", /供应商明确拒绝创建任务/);
     assert.equal(refusedObservation.providerTaskId, null);
+    // 4xx 同步拒绝：没有建立任务、费用确定为 0。
+    assert.deepEqual(refusedObservation.billing, zeroCost(refusedObservation));
+    assert.equal(billingOf(ctx.db, "attempt-refused"), null, "端口只产出观测，账单由 worker 登记后生效");
 
     stub.state.createStatus = 503;
     const unknown = seedProviderAttempt(ctx.db, videoOperation(ctx.binding, { durationSeconds: 6, resolution: "768P", audioMode: "native" }, TEXT), ctx.binding, "attempt-unknown");
@@ -580,12 +589,14 @@ describe("Wan video port (M2)", () => {
     const refusedObservation = await ctx.port.submit(refused.input, issueSubmitPermit("attempt-refused", 1));
     assert.equal(refusedObservation.state, "failed");
     assert.match(refusedObservation.message ?? "", /供应商明确拒绝创建任务/);
+    assert.deepEqual(refusedObservation.billing, zeroCost(refusedObservation));
 
     stub.state.createStatus = 503;
     const unknown = seedProviderAttempt(ctx.db, videoOperation(ctx.binding, { durationSeconds: 6, resolution: "720P", audioMode: "none" }, TEXT), ctx.binding, "attempt-unknown");
     const unknownObservation = await ctx.port.submit(unknown.input, issueSubmitPermit("attempt-unknown", 1));
     assert.equal(unknownObservation.state, "unknown");
     assert.match(unknownObservation.message ?? "", /创建请求结果未核实/);
+    assert.equal(unknownObservation.billing, null);
     assert.equal(stub.state.posts.length, 2);
 
     stub.state.createStatus = 200;
@@ -624,7 +635,7 @@ describe("Wan video port (M2)", () => {
 // —— MiniMax 配音桩：t2a v2 同步 wire 形状按官方页 ——
 
 interface SpeechStubState {
-  mode: "ok" | "baseResp" | "status400" | "status503" | "wrongRate" | "invalidSuffix" | "oddHex";
+  mode: "ok" | "baseResp" | "status400" | "status503" | "silent" | "wrongRate" | "invalidSuffix" | "oddHex";
   posts: { auth: string | undefined; body: any }[];
 }
 
@@ -646,6 +657,11 @@ async function startSpeechStub(mp3: Buffer, wrongRateMp3: Buffer): Promise<{ ser
         if (state.mode === "baseResp") {
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify({ base_resp: { status_code: 1004, status_msg: "text too long" }, data: {}, extra_info: {} }));
+          return;
+        }
+        if (state.mode === "silent") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ base_resp: { status_code: 0 }, data: {}, extra_info: {} }));
           return;
         }
         const audio = state.mode === "wrongRate" ? wrongRateMp3 : mp3;
@@ -723,26 +739,38 @@ describe("MiniMax speech port (M2)", () => {
       const refusedObservation = await ctx.port.submit(refused.input, issueSubmitPermit("attempt-baseresp", 1));
       assert.equal(refusedObservation.state, "failed");
       assert.match(refusedObservation.message ?? "", /base_resp 1004/);
+      assert.deepEqual(refusedObservation.billing, zeroCost(refusedObservation));
 
       stub.state.mode = "status400";
       const rejected = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-400");
-      assert.equal((await ctx.port.submit(rejected.input, issueSubmitPermit("attempt-400", 1))).state, "failed");
+      const rejectedObservation = await ctx.port.submit(rejected.input, issueSubmitPermit("attempt-400", 1));
+      assert.equal(rejectedObservation.state, "failed");
+      assert.deepEqual(rejectedObservation.billing, zeroCost(rejectedObservation));
 
       stub.state.mode = "status503";
       const unknown = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-503");
       const unknownObservation = await ctx.port.submit(unknown.input, issueSubmitPermit("attempt-503", 1));
       assert.equal(unknownObservation.state, "unknown");
       assert.match(unknownObservation.message ?? "", /配音请求结果未核实/);
+      assert.equal(unknownObservation.billing, null);
       const afterUnknown = await ctx.port.query(unknown.query);
       assert.equal(afterUnknown.state, "unknown");
       assert.match(afterUnknown.message ?? "", /没有可查询的任务身份/);
       assert.equal(stub.state.posts.length, 3, "未知不自动重发");
+
+      stub.state.mode = "silent";
+      const silent = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-silent");
+      const silentObservation = await ctx.port.submit(silent.input, issueSubmitPermit("attempt-silent", 1));
+      assert.equal(silentObservation.state, "failed");
+      assert.match(silentObservation.message ?? "", /供应商未返回任何音频/);
+      assert.equal(silentObservation.billing, null, "HTTP 200 且业务码为 0：请求已被受理，费用待核");
 
       stub.state.mode = "wrongRate";
       const nonCompliant = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-wrongrate");
       const bad = await ctx.port.submit(nonCompliant.input, issueSubmitPermit("attempt-wrongrate", 1));
       assert.equal(bad.state, "failed");
       assert.match(bad.message ?? "", /采样率 44100Hz 与冻结规格 32000Hz 不符/);
+      assert.equal(bad.billing, null, "已产出但规格不符：费用待核");
       assert.equal(attemptOutput(ctx.db, "attempt-wrongrate")!.exit_kind, "failed");
       assert.ok(!existsSync(path.join(ctx.workRoot, "attempt-wrongrate", "speech.mp3")), "不合规音频不保留成品文件");
       for (const mode of ["invalidSuffix", "oddHex"] as const) {

@@ -75,9 +75,10 @@ function protectedBlobs(db: AgentDatabase, ownerId: string, cutoff: string) {
     WHERE a.owner_id=? AND (r.created_at>=? OR (a.work_id IS NULL AND a.head_revision_id=r.id)) AND a.kind NOT IN ('script','analysis','prompt')`)
     .all(ownerId, cutoff) as RevisionRef[];
   for (const revision of recent) pinDraft(revision);
+  // 只有在途运行的冻结输入与产出受保护：账单对账只读写 SQLite、不读这些文件，
+  // 未对账状态不应阻止终态运行的超龄草稿释放磁盘。
   const active = db.prepare(`SELECT r.id,s.spec_json FROM production_runs r JOIN production_snapshots s ON s.id=r.snapshot_id
-    WHERE r.owner_id=? AND (r.state IN ('queued','running','unknown','cancel_requested') OR EXISTS
-      (SELECT 1 FROM production_attempts a WHERE a.run_id=r.id AND (a.billing_conflict=1 OR (a.reserve_minor>0 AND a.billing_final=0))))`).all(ownerId) as { id: string; spec_json: string }[];
+    WHERE r.owner_id=? AND r.state IN ('queued','running','unknown','cancel_requested')`).all(ownerId) as { id: string; spec_json: string }[];
   const frozenRefs = db.prepare("SELECT DISTINCT key,atom FROM json_tree(?) WHERE key IN ('blobId','revisionId') AND type='text'");
   const revisionOwner = db.prepare("SELECT a.id FROM artifact_revisions r JOIN artifacts a ON a.id=r.artifact_id WHERE r.id=? AND a.owner_id=?");
   const outputs = db.prepare(`SELECT output_blob_id AS id FROM production_operations WHERE run_id=? AND output_blob_id IS NOT NULL

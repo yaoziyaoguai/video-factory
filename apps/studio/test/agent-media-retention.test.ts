@@ -11,7 +11,7 @@ import { createWork } from "../src/server/agent/creative-work.js";
 import { digestOf } from "../src/server/agent/util.js";
 import type { ArtifactRevision, RevisionRef } from "../src/shared/agent/generated/contracts.js";
 
-test("OPT-04 真实文件按定稿来源、当前认可、活动或未结算制作留存，回收陈旧中间稿", async t => {
+test("OPT-04 真实文件按定稿来源、当前认可或活动制作留存，回收陈旧中间稿与已终态制作的超龄草稿", async t => {
   const dir = await mkdtemp(path.join(tmpdir(),"frame-media-retention-"));
   const old="2026-09-01T10:00:00.000Z", now="2026-11-22T10:00:00.000Z";
   const app=await assembleOfflineAgent({dataDir:dir,uiOrigin:"http://127.0.0.1:4318",clock:()=>now});
@@ -52,9 +52,11 @@ test("OPT-04 真实文件按定稿来源、当前认可、活动或未结算制�
       .run("snap-"+id,JSON.stringify({operations:[{inputs:[{kind:"blob",blobId:blob}]}]}),id,old);
     db.prepare("INSERT INTO production_runs(id,owner_id,conversation_id,work_id,snapshot_id,title,state,created_seq,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
       .run(id,owner,conversation,work.id,"snap-"+id,"制作",state,++sequence,old,old);
+    // r2 已终态但账单未结：对账只读写 SQLite，不读冻结输入文件，超龄草稿照常回收。
     if (id==="r2") {
       db.prepare("INSERT INTO production_operations(run_id,id,spec_json,state) VALUES(?,'op','{}','failed')").run(id);
       db.prepare("INSERT INTO production_attempts(id,run_id,operation_id,ordinal,request_identity,phase,state,reserve_minor,billing_final) VALUES('a',?,'op',1,'provider-a','observed','failed',50,0)").run(id);
+      db.prepare("INSERT INTO pending_reconciliation VALUES('a',?)").run(old);
     }
   }
   const recent=media("new-revision-old-file");mediaRevision("recent",recent.id,now);
@@ -62,21 +64,23 @@ test("OPT-04 真实文件按定稿来源、当前认可、活动或未结算制�
   const obsolete=mediaRevision("obsolete",discarded[0]!.id);
   const shared=media("shared");
   const other=blobs.persist("other","other",await readFile(blobs.filePath(shared.digest)),"video/mp4",1000);
-  const rootIds=[final,input,projectFile,draft,approved,job,pending,recent];
+  const rootIds=[final,input,projectFile,draft,approved,job,recent];
   const usage=retention.usage(owner);
   assert.equal(usage.finalBytes,final.size_bytes+input.size_bytes+projectFile.size_bytes);
-  assert.equal(usage.reclaimableBytes,12*8192);
+  const reclaimed=discarded.concat(pending);
+  assert.equal(usage.reclaimableBytes,reclaimed.reduce((sum,blob)=>sum+blob.size_bytes,0));
   assert.throws(()=>retention.sweepUnpinnedDraftBlobs(owner,{commandId:"stale",expectedRevision:999}),/清理记录已更新/);
   db.exec("CREATE TEMP TRIGGER reject_gc BEFORE INSERT ON storage_cleanups BEGIN SELECT raise(ABORT,'late transaction failure'); END");
   assert.throws(()=>retention.sweepUnpinnedDraftBlobs(owner,{commandId:"gc",expectedRevision:0}),/late transaction failure/);
   assert.ok(discarded.every(blob=>existsSync(blobs.filePath(blob.digest))));
+  assert.ok(existsSync(blobs.filePath(pending.digest)));
   db.exec("DROP TRIGGER reject_gc");
   const result=retention.sweepUnpinnedDraftBlobs(owner,{commandId:"gc",expectedRevision:0});
-  assert.equal(result.freedBytes,usage.reclaimableBytes);assert.equal(result.freedFiles,12);
+  assert.equal(result.freedBytes,usage.reclaimableBytes);assert.equal(result.freedFiles,reclaimed.length);
   assert.equal(result.usage.reclaimableBytes,0);assert.equal(result.usage.revision,1);
   assert.deepEqual(retention.sweepUnpinnedDraftBlobs(owner,{commandId:"gc",expectedRevision:0}),result);
   assert.ok(rootIds.every(blob=>existsSync(blobs.filePath(blob.digest)) && blobs.get(owner,blob.id).id===blob.id));
-  assert.ok(discarded.every(blob=>!existsSync(blobs.filePath(blob.digest))));
+  assert.ok(reclaimed.every(blob=>!existsSync(blobs.filePath(blob.digest))));
   assert.equal(blobs.get("other",other.id).digest,shared.digest);
   assert.equal(app.service.readRevision(owner,obsolete.artifactId,obsolete.revisionId).archivedAt,now);
   const archived=await app.app.inject({method:"GET",url:`/api/agent/v1/blobs/${discarded[0]!.id}/content`});
@@ -89,6 +93,6 @@ test("OPT-04 真实文件按定稿来源、当前认可、活动或未结算制�
   renameSync(blobs.filePath(final.digest),path.join(quarantined,final.digest));
   new ProductionBlobs(db,dir,()=>now);
   assert.ok(existsSync(blobs.filePath(final.digest)));
-  t.diagnostic(JSON.stringify({protected:rootIds.length,retained:rootIds.length,oldBytes:12*8192,reclaimedBytes:result.freedBytes,
+  t.diagnostic(JSON.stringify({protected:rootIds.length,retained:rootIds.length,oldBytes:reclaimed.reduce((sum,blob)=>sum+blob.size_bytes,0),reclaimedBytes:result.freedBytes,
     otherOwnerIntact:true,replay:result.usage.revision}));
 });
