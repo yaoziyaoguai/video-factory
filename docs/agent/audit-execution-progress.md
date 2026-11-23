@@ -497,3 +497,52 @@ CSS 合并复核（重启离线服务实测计算样式）：approval-plate anim
 - Commit 1 `chore(repo): remove retired legacy docs, maintenance modules, and obsolete bench scripts`：23 个历史退役删除（docs/过期文档 13 + maintenance 三源三测 6 + perf 旧 bench 4）+ .gitignore。
 - Commit 2 `feat(agent-server): contract 0.1.59, sqlite v34, streaming zip64, and deterministic offline build/demo`：src/server/** + src/shared/** + contracts/** + docker/** + deploy/** + scripts/** + CI + skills + tsconfig.server.json + package.json(studio)/package-lock + 30 个 M 与 10 个新增服务端测试 + 4 个测试 helper/fixture。
 - Commit 3 `feat(studio-ui): editorial studio craft overhaul, render memoization, and frame perf harness`：src/client/** + 8 个 M 前端测试与 setup.ts + 3 个新增 tsx 测试 + agent-static-contracts + bench-review-cuts.mjs + perf/bench/** + 根 package.json(perf:frame) + DESIGN.md + README.md + 本文档。
+
+## 试用就绪修复（BUG-01～06，2026-11-24）
+
+输入：《frame_production_dogfood_readiness_audit.md》第六章（开启真实调用前的 6 项在线链路隐患 + 1 项偶发测试竞态）。分支 `fix/dogfood-readiness-20261123`（基于 `ac07afa`），每项一个原子提交，另有 1 个提交放宽两条回归用例的计时余量；只改服务端、创作宿主与部署配置，不碰 UI/CSS；全程未调用真实模型或媒体服务。
+
+### 逐项修复
+
+- **BUG-01 零成本结清与预算窗口**（`773ace1`）：请求确定没有送达供应商、或被同步拒绝且没有建立任务的终态，签发 0 元权威结算（`withZeroCostBilling`），不再进待对账队列；预算按创建运行的日/月窗口归集，在途运行继续跨窗口占用；留存只保护在途运行的输入与产出。
+- **BUG-02 配音转写归一**（`f1d1fdd`）：`normalizeTranscript` 把全半角、大小写与数字读法（逐位/进位/小数/万亿/百分之）归到同一写法；`transcriptMismatch` 返回可直接展示的差异说明，不回显旁白或转写原文。
+- **BUG-03 方舟 adaptive 成片验收与付费前画幅预判**（`a14aebe`）：首帧图生视频只核对比例与档位（容一个宏块的取整），其余请求仍按标称像素逐位核对；上游图片尚未生成时，按它冻结的画幅预判决定输出画幅的关键帧槽。
+- **BUG-04 供应商拒绝原因与下载跳转**（`7f2daf1`）：`extractSafeProviderError` 只读取白名单里的错误码与说明并隐去凭据，追加到拒绝文案；`downloadToFile` 手工逐跳跟随跳转，每一跳先过 `assertPublicResolvedHost`，被安全边界拒绝时落 failed 终态。
+- **BUG-05 离线识音门控与断连回收**（`f586dc9`）：`alignMedia` 单槽位门控，占用中的请求得到 `QUEUE_FULL`；字幕路由监听连接关闭并中止子进程；识音进程被信号结束时按 SIGKILL、超时、其他信号给出 `TEMPORARILY_UNAVAILABLE`；`frame-transcribe.py` 线程数默认 2（`FRAME_ASR_THREADS` 可指定）。
+- **BUG-06 NO_PROXY 默认值与 GC 单飞**（`834fc18`、`e1eea95`）：prod compose 与 example 的默认值补齐 `.volces.com`、`.aliyuncs.com`、`.minimaxi.com`、`.minimax.cn`、`.deepseek.com`、`.bigmodel.cn`，静态契约保证两处一致；创作宿主的卷清扫加单飞闸，`persistUsage` 的暂存文件名带随机后缀；补两条回归用例（上一轮清扫未返回时不叠加新一轮，`close()` 返回后不再改写卷使用记录）。
+- **回归用例的计时余量**（`812224d`）：上面两条用例的拖住时间与等待终点改到余量长一个量级，见下一节 BUG-06。
+
+### 与审计原文的取舍
+
+- BUG-01：零元结算事实带 `evidenceId`（指向观测本身）。指令已发出之后的三种情形保持待对账，不签发 0 元：OpenAI Realtime 会话内 `response.create` 之后出错、方舟出图 HTTP 200 带 `error`、MiniMax 配音 HTTP 200 且业务码为 0 但没有音频。进程在 `submit()` 返回与 `observe()` 提交之间崩溃的窗口不覆盖。
+- BUG-02：数字串（含小数点）必须完全一致，年份、金额读错不会被相似度放过；小数点只在两个数字之间保留（“点击”“一点点”不参与归一）；大写数字（壹/贰/叁…）不归一，按不一致处理；长句 15% 的容差可能放过一处单字差异，按审计规格保留。
+- BUG-03：短边只设下限（标称短边减一个宏块），没有采用审计原文的上限：按 `688..736` 会把 1:1（标称短边 960）等画幅的首帧成片误判为不合规。480p 档仍被下限拒绝。
+- BUG-04：起始下载地址沿用供应商给出的签名链接，只约束跳转目标。
+- BUG-05：门控是进程内的单槽位，多实例部署时每个实例各放行一个。`ETIMEDOUT` 分支在 Node 22 上不会命中（超时表现为子进程被信号结束），原有分支未改。
+- BUG-06：单飞闸同时判断 `closing` 是审计原文的写法；`close()` 里 `clearInterval` 先于 `closing = true`，这个条件实际到不了，按原文保留。写入失败留在写与改名之间时，会留下一个带随机后缀的暂存文件，后续写入不再覆盖它；没有加清理。回归用例用 50ms 的 GC 间隔，把首轮卷枚举拖住 1000ms：单飞用例在拖住期间断言只进了一轮，关闭用例按首轮被拖住的时刻推算等待终点（拖住结束再加 600ms）。起初只拖住 500ms，单飞用例离“首轮返回”只剩约 300ms 余量，关闭用例则要求 `close()` 在 500ms 内返回，两头都会在机器卡顿时失真。
+
+### 门禁（2026-11-24，本地 Node 22，安静机器）
+
+被测树 `812224d`，工作区干净，三道门禁顺序各跑一次。
+
+- `npm run contracts:check`：退出码 0。
+- 根 `npm test`（typecheck + vitest + auth + 服务端全量 + build）：退出码 0，01:08–01:25。vitest 11 个文件 292/292；auth 5/5；服务端全量 541 项测试 535 通过、0 失败、6 跳过（954 秒；上一批基线 512 项、506 通过、6 跳过，新增 29 条）；build 通过。
+- `agent-creative-host-pool.test.ts` 循环 20 轮：20/20 轮通过，每轮 14/14，合计 280 通过、0 失败，单轮 16.3–19.3 秒。
+- 压力验证：8 个核全部占满（1 分钟负载 62–151）时循环同一文件 5 轮，5/5 轮通过、每轮 14/14，单轮 37–52 秒。
+- 修复前后对照（把未修复的宿主脚本拷进镜像目录，配同一份测试跑）：两条回归用例分别以「首轮未返回时叠了 5 轮清扫」「`close()` 返回约 756ms 后使用记录仍被改写」失败，其余 12 条通过。
+- 反防御自审：分支上新增的捕获与默认值逐条看过，都落在外部 I/O 边界（供应商响应解析、下载、子进程），没有需要清理的项。
+- 以上门禁都在本机、在 `812224d` 这棵树上跑，没有在 CI 运行器上跑过；之后合并进 `main` 的提交只改文档。
+
+### 验证边界
+
+- 没有发起任何真实模型或媒体调用，供应商行为全部由端口级替身模拟。
+- 下载跳转只对解析桩验证，没有对真实对象存储/CDN 的跳转链路验证。
+- faster-whisper 内存不足（SIGKILL）由替身子进程模拟，没有实跑。`FRAME_ASR_THREADS` 的默认值写在镜像内置的脚本里，镜像重建后才生效。
+- 本机没有 compose 插件：compose 改动只做了 YAML 解析与静态契约校验，真正的渲染在 CI 的 smoke 脚本里。
+
+### 范围外观察（未改）
+
+- `ark-media.ts` 的任务失败路径仍只按精确键名脱敏，没有套用 `extractSafeProviderError`。
+- MiniMax 与万相视频的 HTTP 200 业务错误没有被识别为拒绝；`extractSafeProviderError` 的白名单也不含 `image_base_resp`（未对照供应商文档核实）。
+- `scripts/domestic-service-hosts.txt` 含 `api.minimax.chat`，NO_PROXY 默认值没有 `.minimax.chat`。
+- `scripts/smoke-frame-release.sh` 显式沿用旧的 NO_PROXY 值。
