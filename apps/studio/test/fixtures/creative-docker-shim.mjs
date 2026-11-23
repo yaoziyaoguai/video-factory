@@ -8,7 +8,7 @@ const dockerTime = at => {
   return `${iso.slice(0, 10)} ${iso.slice(11, 23)}000000 +00:00 UTC`;
 };
 
-export async function main({ state, log, delay }) {
+export async function main({ state, log, delay, holdMs }) {
   const argv = process.argv.slice(2);
   const args = argv[0] === "--host" ? argv.slice(2) : argv;
   const record = () => appendFile(log, `${JSON.stringify({ argv: args })}\n`);
@@ -30,6 +30,10 @@ export async function main({ state, log, delay }) {
   }
   if (subcommand === "volume" && args[1] === "ls") {
     await record();
+    // 可选拖住宿主启动后的第一轮 GC 卷枚举（按命名空间前缀过滤，过滤值以 “-” 结尾；其余枚举不算）：
+    // 模拟高负载下 docker 迟迟不返回，供 GC 单飞回归测试制造与 close() 重叠的清扫。
+    if (holdMs && (await readFile(log, "utf8")).split("\n").filter(line => /"name=[^"]+-"/.test(line)).length === 1)
+      await new Promise(resolve => setTimeout(resolve, holdMs));
     const filter = args[args.indexOf("--filter") + 1] ?? "";
     const prefix = filter.replace(/^name=/, "");
     const current = await loadState();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -36,6 +36,8 @@ interface CreateHostExtras {
    * 可返回 run 延迟配置——卷名只有在钩子内才能算出，而延迟要烘焙进假 docker 包装脚本。 */
   prepare?: (paths: { directory: string; runtimeDir: string; workspaceRoot: string; state: string }) =>
     Promise<{ shimDelay?: { volume: string; ms: number } } | void>;
+  /** 拖住宿主启动后的第一轮 GC 清扫（毫秒）：GC 间隔比它短时，后续 tick 就与这一轮相遇。 */
+  sweepHoldMs?: number;
 }
 
 async function createHost(options: Record<string, unknown>, extras: CreateHostExtras = {}) {
@@ -50,7 +52,8 @@ async function createHost(options: Record<string, unknown>, extras: CreateHostEx
   const prepared = extras.prepare ? await extras.prepare({ directory, runtimeDir, workspaceRoot, state }) : undefined;
   const fixture = new URL("fixtures/creative-docker-shim.mjs", import.meta.url).href;
   const delay = prepared?.shimDelay ? `, delay: ${JSON.stringify(prepared.shimDelay)}` : "";
-  const script = `#!/usr/bin/env node\nimport(${JSON.stringify(fixture)}).then(module => module.main({ state: ${JSON.stringify(state)}, log: ${JSON.stringify(log)}${delay} }));\n`;
+  const hold = extras.sweepHoldMs ? `, holdMs: ${extras.sweepHoldMs}` : "";
+  const script = `#!/usr/bin/env node\nimport(${JSON.stringify(fixture)}).then(module => module.main({ state: ${JSON.stringify(state)}, log: ${JSON.stringify(log)}${delay}${hold} }));\n`;
   await writeFile(path.join(bin, "docker"), script, { mode: 0o755 });
   const { createCreativeRunnerHost } = await import(new URL("../../../scripts/creative-runner-host.mjs", import.meta.url).href) as {
     createCreativeRunnerHost: (options: Record<string, unknown>) => Promise<HostHandle>;
@@ -59,11 +62,14 @@ async function createHost(options: Record<string, unknown>, extras: CreateHostEx
   process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
   const host = await createCreativeRunnerHost({ socketPath: path.join(runtimeDir, "s"), workspaceRoot, dockerSocket: "/nonexistent.sock", ...options });
   const readLog = async (): Promise<string[][]> => (await readFile(log, "utf8")).split("\n").filter(Boolean).map(line => (JSON.parse(line) as { argv: string[] }).argv);
+  // 用例可以先于 cleanup 关闭宿主；宿主的 close() 不可重入，这里保证只调用一次。
+  let closed: Promise<void> | undefined;
+  const close = () => (closed ??= host.close());
   return {
-    host, state, readLog,
+    host, state, runtimeDir, readLog, close,
     cleanup: async () => {
       const warmNames = (await readLog()).filter(isWarm).map(args => args[args.indexOf("--name") + 1]!);
-      await host.close();
+      await close();
       try {
         // 替身进程要写最后一次 rm 操作。按容器名收到记录再删除目录，避免日志在清理途中重建。
         assert.ok(await waitFor(async () => {
@@ -84,6 +90,8 @@ const isInit = (argv: string[]): boolean => argv[0] === "run" && argv.some(value
   && argv.includes("0:0") && !argv.includes("--interactive") && argv.some(value => value.includes("/opt/frame/creative-operations.py"));
 const isWarm = (argv: string[]): boolean => helperArgv(argv) && hasReadonlyMount(argv);
 const isSync = (argv: string[]): boolean => helperArgv(argv) && !hasReadonlyMount(argv) && !isInit(argv);
+// GC 清扫按命名空间前缀枚举卷（过滤值以 “-” 结尾）。启动时清理执行卷按 label 过滤、冷卷复核按完整卷名过滤，都不算。
+const isSweep = (argv: string[]): boolean => argv[0] === "volume" && argv[1] === "ls" && argv.some(arg => /^name=.+-$/.test(arg));
 const readData = (body: string): string => Buffer.from((JSON.parse(body) as { data: string }).data, "base64").toString("utf8");
 const waitFor = async (probe: () => boolean | Promise<boolean>, milliseconds = 4000): Promise<boolean> => {
   const deadline = Date.now() + milliseconds;
@@ -195,7 +203,7 @@ test("空闲超过阈值的温热容器被销毁，随后冷重启可用", async
 });
 
 test("命名卷 GC：超龄 Skill 卷回收，近期使用的卷与工程卷保留", async t => {
-  // 近期卷的余量必须远大于整测时长：GC 无重入门闸，相邻周期的清扫会并发进行。
+  // 近期卷的余量必须远大于整测时长：清扫按间隔在整测期间持续进行，到断言时它得仍在闲置窗口内。
   const { host, state, readLog, cleanup } = await createHost({ gcIntervalMs: 50, volumeIdleMs: 5000 }, {
     prepare: async ({ runtimeDir, workspaceRoot, state }) => {
       const namespace = await namespaceOf(workspaceRoot);
@@ -274,6 +282,28 @@ test("在途请求的卷受保护：挂载前的 GC 窗口不回收，响应结�
     return !Object.hasOwn(volumes, volume);
   }), "响应结束后闲置卷照常回收");
   assert.equal(host.debugState().reservedVolumes.length, 0, "响应结束后不应残留保护记录");
+});
+
+test("BUG-06 GC 单飞：上一轮清扫未返回前，定时器不叠加新一轮", async t => {
+  // 清扫要拉起 docker 子进程，耗时远大于这里的 50ms 间隔；原先每个 tick 都再起一轮并覆盖在途引用。
+  const { readLog, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: 500 });
+  t.after(cleanup);
+  assert.ok(await waitFor(async () => (await readLog()).some(isSweep)), "首轮清扫应进入 docker");
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal((await readLog()).filter(isSweep).length, 1, "首轮仍未返回时不得叠加新的清扫");
+});
+
+test("BUG-06 宿主关闭后不再有清扫写入：close() 返回时在途清扫已全部收束", async t => {
+  // 原先 close() 只等得到最后一轮，更早的轮次在宿主关闭后继续写使用记录，与测试清理目录相撞（ENOTEMPTY）。
+  const { runtimeDir, readLog, close, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: 500 });
+  t.after(cleanup);
+  assert.ok(await waitFor(async () => (await readLog()).some(isSweep)), "首轮清扫应进入 docker");
+  await new Promise(resolve => setTimeout(resolve, 200)); // 让后续 tick 叠出更多轮清扫。
+  await close();
+  const usageFile = path.join(runtimeDir, "creative-volume-usage.json");
+  const closedAt = (await stat(usageFile)).mtimeMs;
+  await new Promise(resolve => setTimeout(resolve, 400)); // 等被拖住的那一轮返回。
+  assert.equal((await stat(usageFile)).mtimeMs, closedAt, "宿主关闭后不得再有清扫改写卷使用记录");
 });
 
 test("静默在途读取不触发空闲回收：全部请求结束后才重新计空闲", async t => {

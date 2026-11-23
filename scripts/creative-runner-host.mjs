@@ -159,8 +159,9 @@ export async function createCreativeRunnerHost({
   const syncedSkills = new Set();
   const persistUsage = async () => {
     // 原子替换：进程中断留下的半截文件不应让全部使用记录失效（那会让存量卷被误当无记录处理）。
+    // 暂存名带随机后缀：每次写入独占一个暂存文件，改名时不会带走另一笔写入尚未写完的内容。
+    const staged = `${usageFile}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      const staged = `${usageFile}.${process.pid}.tmp`;
       await writeFile(staged, JSON.stringify(Object.fromEntries(lastUsed)), { mode: 0o600 });
       await rename(staged, usageFile);
     } catch { /* 记录失败只影响下次回收时点的精度。 */ }
@@ -206,8 +207,14 @@ export async function createCreativeRunnerHost({
     }
     await persistUsage();
   };
+  // 单飞：清扫要拉起 docker 子进程，上一轮未返回前定时器不再叠加新一轮。否则在途引用被逐轮覆盖，
+  // close() 只等得到最后一轮，其余轮次在宿主关闭后继续写使用记录。
+  let closing = false;
   let sweeping = null;
-  const runSweep = () => { sweeping = sweepVolumes().catch(() => undefined); };
+  const runSweep = () => {
+    if (sweeping || closing) return;
+    sweeping = sweepVolumes().catch(() => undefined).finally(() => { sweeping = null; });
+  };
   const gcTimer = setInterval(runSweep, gcIntervalMs);
   gcTimer.unref();
 
@@ -215,7 +222,6 @@ export async function createCreativeRunnerHost({
   const pool = [];
   const creating = new Set();
   const waiting = [];
-  let closing = false;
   const startWarm = (projectVolume, skillsVolume) => {
     const name = `frame-creative-${randomUUID()}`;
     // 与一次性容器完全相同的加固参数；stdin 保持打开，容器进程按行循环服务。
