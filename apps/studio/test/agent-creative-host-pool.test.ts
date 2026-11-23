@@ -92,6 +92,10 @@ const isWarm = (argv: string[]): boolean => helperArgv(argv) && hasReadonlyMount
 const isSync = (argv: string[]): boolean => helperArgv(argv) && !hasReadonlyMount(argv) && !isInit(argv);
 // GC 清扫按命名空间前缀枚举卷（过滤值以 “-” 结尾）。启动时清理执行卷按 label 过滤、冷卷复核按完整卷名过滤，都不算。
 const isSweep = (argv: string[]): boolean => argv[0] === "volume" && argv[1] === "ls" && argv.some(arg => /^name=.+-$/.test(arg));
+
+// GC 回归用例把首轮清扫的卷枚举拖住这么久。单飞用例的断言在它被拖住期间做出，关闭用例等它返回之后再检查，
+// 两头都比断言前的等待长出一个量级：机器再卡，断言也不会落到另一头去。
+const SWEEP_HOLD_MS = 1000;
 const readData = (body: string): string => Buffer.from((JSON.parse(body) as { data: string }).data, "base64").toString("utf8");
 const waitFor = async (probe: () => boolean | Promise<boolean>, milliseconds = 4000): Promise<boolean> => {
   const deadline = Date.now() + milliseconds;
@@ -286,7 +290,7 @@ test("在途请求的卷受保护：挂载前的 GC 窗口不回收，响应结�
 
 test("BUG-06 GC 单飞：上一轮清扫未返回前，定时器不叠加新一轮", async t => {
   // 清扫要拉起 docker 子进程，耗时远大于这里的 50ms 间隔；原先每个 tick 都再起一轮并覆盖在途引用。
-  const { readLog, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: 500 });
+  const { readLog, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: SWEEP_HOLD_MS });
   t.after(cleanup);
   assert.ok(await waitFor(async () => (await readLog()).some(isSweep)), "首轮清扫应进入 docker");
   await new Promise(resolve => setTimeout(resolve, 200));
@@ -295,14 +299,16 @@ test("BUG-06 GC 单飞：上一轮清扫未返回前，定时器不叠加新一�
 
 test("BUG-06 宿主关闭后不再有清扫写入：close() 返回时在途清扫已全部收束", async t => {
   // 原先 close() 只等得到最后一轮，更早的轮次在宿主关闭后继续写使用记录，与测试清理目录相撞（ENOTEMPTY）。
-  const { runtimeDir, readLog, close, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: 500 });
+  const { runtimeDir, readLog, close, cleanup } = await createHost({ gcIntervalMs: 50 }, { sweepHoldMs: SWEEP_HOLD_MS });
   t.after(cleanup);
   assert.ok(await waitFor(async () => (await readLog()).some(isSweep)), "首轮清扫应进入 docker");
+  const heldAt = Date.now();
   await new Promise(resolve => setTimeout(resolve, 200)); // 让后续 tick 叠出更多轮清扫。
   await close();
   const usageFile = path.join(runtimeDir, "creative-volume-usage.json");
   const closedAt = (await stat(usageFile)).mtimeMs;
-  await new Promise(resolve => setTimeout(resolve, 400)); // 等被拖住的那一轮返回。
+  // 未修复时，被拖住的那一轮要到拖住时间结束才返回并写入使用记录：等到那之后（再留 600ms 给它写完），记录都不该变。
+  await new Promise(resolve => setTimeout(resolve, heldAt + SWEEP_HOLD_MS + 600 - Date.now()));
   assert.equal((await stat(usageFile)).mtimeMs, closedAt, "宿主关闭后不得再有清扫改写卷使用记录");
 });
 
