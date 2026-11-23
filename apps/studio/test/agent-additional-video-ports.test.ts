@@ -738,20 +738,23 @@ describe("MiniMax speech port (M2)", () => {
       const refused = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-baseresp");
       const refusedObservation = await ctx.port.submit(refused.input, issueSubmitPermit("attempt-baseresp", 1));
       assert.equal(refusedObservation.state, "failed");
-      assert.match(refusedObservation.message ?? "", /base_resp 1004/);
+      // HTTP 200 + base_resp 业务拒绝：业务码与说明一并带给使用者。
+      assert.equal(refusedObservation.message, "供应商明确拒绝配音请求（base_resp 1004：text too long）。");
       assert.deepEqual(refusedObservation.billing, zeroCost(refusedObservation));
 
       stub.state.mode = "status400";
       const rejected = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-400");
       const rejectedObservation = await ctx.port.submit(rejected.input, issueSubmitPermit("attempt-400", 1));
       assert.equal(rejectedObservation.state, "failed");
+      // 供应商回显的 Authorization 不进观测：只留业务码，Bearer 串与本次 Key 都隐去。
+      assert.equal(rejectedObservation.message, "供应商明确拒绝配音请求：HTTP 400（base_resp 1004：invalid Authorization: [已隐去凭据] [已隐去凭据]）");
       assert.deepEqual(rejectedObservation.billing, zeroCost(rejectedObservation));
 
       stub.state.mode = "status503";
       const unknown = seedProviderAttempt(ctx.db, speechOperation(ctx.binding, TEXT), ctx.binding, "attempt-503");
       const unknownObservation = await ctx.port.submit(unknown.input, issueSubmitPermit("attempt-503", 1));
       assert.equal(unknownObservation.state, "unknown");
-      assert.match(unknownObservation.message ?? "", /配音请求结果未核实/);
+      assert.match(unknownObservation.message ?? "", /^配音请求结果未核实（HTTP 503（base_resp 1004：invalid Authorization: \[已隐去凭据\] \[已隐去凭据\]））；/);
       assert.equal(unknownObservation.billing, null);
       const afterUnknown = await ctx.port.query(unknown.query);
       assert.equal(afterUnknown.state, "unknown");

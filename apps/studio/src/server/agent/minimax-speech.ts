@@ -11,7 +11,7 @@ import { InvalidAudioFile, probeAudioFile, type AudioFileFacts } from "./media-p
 import type { AgentClock } from "./util.js";
 import type { MiniMaxSpeechProfile } from "./media-config.js";
 import { getRevisionRow } from "./artifact-store.js";
-import { decodedMediaChunks, PortObservations, ProviderHttpError, providerRequestJson, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
+import { decodedMediaChunks, extractSafeProviderError, PortObservations, ProviderHttpError, providerRequestJson, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
 import { speechText } from "../../shared/agent/markdown.js";
 
 // MiniMax t2a v2 同步配音薄适配（wire 序列按 2026-11-01 官方页核实）：
@@ -93,7 +93,8 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
     // t2a v2 用 HTTP 200 + base_resp 表达业务拒绝：明确失败（未产出音频）不是未知。
     const baseResp = typeof parsed.base_resp === "object" && parsed.base_resp !== null ? parsed.base_resp as { status_code?: unknown } : {};
     if (baseResp.status_code !== 0) {
-      return this.preRefusal(input.attemptId, `供应商明确拒绝配音请求（base_resp ${typeof baseResp.status_code === "number" ? baseResp.status_code : "?"}）。`);
+      // 正文里没有可读的业务码与说明（如缺少 base_resp）时沿用占位说明。
+      return this.preRefusal(input.attemptId, `供应商明确拒绝配音请求${extractSafeProviderError(parsed, apiKey) || "（base_resp ?）"}。`);
     }
     const data = typeof parsed.data === "object" && parsed.data !== null ? parsed.data as { audio?: unknown } : {};
     if (typeof data.audio !== "string" || data.audio.length === 0) {

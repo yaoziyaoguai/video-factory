@@ -244,12 +244,47 @@ it("image: 4xx 是明确拒绝 → failed 收据，单次请求", async t => {
   const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
 
   assert.equal(observation.state, "failed");
-  assert.match(observation.message ?? "", /供应商明确拒绝创建图片：HTTP 400/);
+  assert.equal(observation.message, "供应商明确拒绝创建图片：HTTP 400（stub failure）。");
   assert.equal(attemptOutput(db, "attempt")?.exit_kind, "failed");
   assert.equal(stub.posts.length, 1);
   assert.ok(!existsSync(path.join(directory, "work", "attempt")));
   // 4xx 同步拒绝：没有产出、费用确定为 0，当场结清。
   assert.deepEqual(observation.billing, zeroCost(observation));
+});
+
+it("image: 方舟 4xx 拒绝带出错误码与脱敏后的说明；未开通型号指向开通管理", async () => {
+  const apiKey = "ark-synthetic-key-91ab";
+  const connection = { id: "test-ark", name: "方舟", protocol: "ark", baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    apiKey, enabled: true, credentialConfigured: true, models: [{ id: "flash", kind: "image", name: "Seedream Flash", modelId: "doubao-seedream-5-0-flash-260915",
+      features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true }] };
+  const refusal = "供应商明确拒绝创建图片：";
+  const cases = [
+    [404, { error: { code: "ModelNotOpen", message: `model not activated; Authorization: Bearer ${apiKey}` } }, `${refusal}当前账号尚未开通此图片型号，请在火山方舟的开通管理中核对。`],
+    [404, { error: { code: "AccessDenied", message: `denied for ${apiKey}`, request_id: "req-1" } }, `${refusal}火山方舟未找到该型号或此连接无权调用（HTTP 404）（AccessDenied：denied for [已隐去凭据]），请核对型号与开通状态。`],
+    [400, { error: { code: "InputTextSensitive", type: "SensitiveContentDetectedInputText", message: "提示词未通过内容安全审核，请调整后重试。" } }, `${refusal}HTTP 400（InputTextSensitive：提示词未通过内容安全审核，请调整后重试。）。`],
+  ] as const;
+  for (const [status, body, message] of cases) {
+    const dir = await mkdtemp(path.join(tmpdir(), "frame-seedream-refusal-"));
+    const db = openAgentDatabase(dir);
+    try {
+      initializeTextModelSettings(db, staticClock);
+      initializeProviderConnections(db, []);
+      saveProviderConnection(db, staticClock, "owner", { commandId: "choose", expectedRevision: 0, connection });
+      const binding = additionalMediaCatalog(db, true)["image:" + connection.models[0]!.modelId]!.binding!;
+      const port = new ImageGenerationPort(db, new ProductionBlobs(db, dir, staticClock), staticClock, {
+        resolve: model => resolveImageBinding(db, model), workRoot: dir,
+        fetchImpl: async () => Response.json(body, { status }),
+      });
+      const { input } = seedProviderAttempt(db, imageOperation(binding), binding);
+
+      const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
+
+      assert.equal(observation.state, "failed", `HTTP ${status}`);
+      assert.equal(observation.message, message);
+      assert.deepEqual(observation.billing, zeroCost(observation));
+      assert.ok(!JSON.stringify(db.prepare("SELECT detail FROM production_attempt_outputs").all()).includes(apiKey), "供应商回显的 Key 不进收据");
+    } finally { db.close(); await rm(dir, { recursive: true, force: true }); }
+  }
 });
 
 it("image: HTTP 200 带 error（出图后被审核拦下）→ failed，费用待核而不是 0 元", async t => {

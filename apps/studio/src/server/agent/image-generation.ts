@@ -1,4 +1,4 @@
-import { decodedMediaChunks, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
+import { decodedMediaChunks, extractSafeProviderError, withAttemptFiles, withZeroCostBilling } from "./media-port-support.js";
 import { existsSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -203,12 +203,13 @@ export class ImageGenerationPort implements MediaExecutionPort {
       let parsed: unknown;
       try { parsed = body ? JSON.parse(body) : {}; } catch { throw new IncompleteResponse("响应不是有效 JSON。"); }
       if (!response.ok) {
-        // 供应商原始错误可能回显凭据；在写入观测/收据前只保留受控状态。
+        // 供应商原始错误可能回显凭据：写入观测/收据前只保留状态与受控摘要（已隐去凭据）。
+        const detail = extractSafeProviderError(parsed, apiKey);
         const message = profile.providerId === "ark" && response.status === 404
           ? (parsed as { error?: { code?: string } } | null)?.error?.code === "ModelNotOpen"
             ? "当前账号尚未开通此图片型号，请在火山方舟的开通管理中核对。"
-            : "火山方舟未找到该型号或此连接无权调用（HTTP 404），请核对型号与开通状态。"
-          : `HTTP ${response.status}。`;
+            : `火山方舟未找到该型号或此连接无权调用（HTTP 404）${detail}，请核对型号与开通状态。`
+          : `HTTP ${response.status}${detail}。`;
         // 4xx/429 是明确未受理的拒绝；5xx、超时与断连按未知处理，由调用方归类。
         if (response.status >= 400 && response.status < 500 && response.status !== 408) throw new ImageRejection(message);
         throw new IncompleteResponse(`供应商暂时不可用：${message}`);

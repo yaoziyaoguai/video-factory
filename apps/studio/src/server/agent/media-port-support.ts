@@ -9,6 +9,8 @@ import type { AgentDatabase } from "./db.js";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { attemptOutput, completedUsage, recordAttemptOutput, runRow } from "./production-store.js";
 import { InvalidVideoFile, probeVideoFile, type VideoFileFacts } from "./media-probe.js";
+import { AgentError } from "./errors.js";
+import { assertPublicResolvedHost, type HostResolver } from "./network-policy.js";
 import { digestOf, type AgentClock } from "./util.js";
 
 // 供应商媒体端口共用的一次性收尾件：受控 HTTP、确定性下载与观测/收据工厂。
@@ -23,7 +25,43 @@ export interface ProviderHttpOptions {
   requestTimeoutMs?: number | undefined;
 }
 
-/** 受控 JSON 请求：非 2xx 抛 ProviderHttpError（只含状态，不含供应商正文/凭据）；非对象响应抛错。 */
+const CREDENTIAL_REDACTED = "[已隐去凭据]";
+const MAX_PROVIDER_ERROR_CHARS = 160;
+// 供应商拒绝文案可能回显请求里的凭据：Bearer 串、带凭据名的赋值（保留固定词表里的凭据名，只隐去值）、sk- 开头的 Key 形状。
+const CREDENTIAL_PATTERNS: [RegExp, string][] = [
+  [/\b(bearer|basic)\s+[A-Za-z0-9\-._~+/=]{6,}/gi, `$1 ${CREDENTIAL_REDACTED}`],
+  [/\b(api[_-]?key|access[_-]?key|secret|token|authorization|password)(["']?\s*[:=]\s*["']?)[^\s"';,}&]{4,}/gi, `$1$2${CREDENTIAL_REDACTED}`],
+  [/\bsk-[A-Za-z0-9*_\-]{4,}/g, CREDENTIAL_REDACTED],
+];
+
+interface ProviderErrorBody {
+  error?: { code?: unknown; message?: unknown } | null;
+  code?: unknown;
+  message?: unknown;
+  base_resp?: { status_code?: unknown; status_msg?: unknown } | null;
+}
+
+/**
+ * 供应商错误体的受控摘要：只读白名单里的错误码与说明，其余正文可能回显请求内容，不进观测。
+ * 返回 `（错误码：说明）` 后缀（压成单行、至多 160 字），隐去本次 Key 与疑似凭据片段；没有可用字段返回空串。
+ */
+export function extractSafeProviderError(parsed: unknown, apiKey: string): string {
+  const body = (typeof parsed === "object" && parsed !== null ? parsed : {}) as ProviderErrorBody;
+  // 数值型的码（如 base_resp.status_code）同样算可读说明。
+  const read = (value: unknown): string => typeof value === "string" || typeof value === "number" ? String(value) : "";
+  const baseRespCode = read(body.base_resp?.status_code);
+  const parts = [
+    read(body.error?.code), read(body.code), baseRespCode ? `base_resp ${baseRespCode}` : "",
+    read(body.error?.message), read(body.message), read(body.base_resp?.status_msg),
+  ];
+  const redacted = CREDENTIAL_PATTERNS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement),
+      [...new Set(parts.filter(Boolean))].join("：").replaceAll(apiKey, CREDENTIAL_REDACTED))
+    .replace(/[\p{Cc}\s]+/gu, " ").trim();
+  if (!redacted) return "";
+  return `（${redacted.length > MAX_PROVIDER_ERROR_CHARS ? `${redacted.slice(0, MAX_PROVIDER_ERROR_CHARS - 1)}…` : redacted}）`;
+}
+
+/** 受控 JSON 请求：非 2xx 抛 ProviderHttpError（HTTP 状态 + 受控错误摘要，见 extractSafeProviderError）；非对象响应抛错。 */
 export async function providerRequestJson(method: "POST" | "GET", url: URL, apiKey: string, body: unknown,
   options: ProviderHttpOptions & { headers?: Record<string, string>; signal?: AbortSignal | undefined } = {}): Promise<Record<string, unknown>> {
   const controller = new AbortController();
@@ -41,7 +79,7 @@ export async function providerRequestJson(method: "POST" | "GET", url: URL, apiK
     const text = await response.text();
     let parsed: unknown;
     try { parsed = text ? JSON.parse(text) : {}; } catch { /* 非 JSON 响应按状态处理 */ }
-    if (!response.ok) throw new ProviderHttpError(`HTTP ${response.status}`, response.status);
+    if (!response.ok) throw new ProviderHttpError(`HTTP ${response.status}${extractSafeProviderError(parsed, apiKey)}`, response.status);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("供应商响应不是对象。");
     return parsed as Record<string, unknown>;
   } finally {
@@ -66,9 +104,21 @@ export function withZeroCostBilling(observation: ExecutionObservation): Executio
 export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 export const DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 
-/** 确定性下载：先写 .part 再原子改名；带超时与字节上限，超限判非合规（完整事实，不是网络失败）。 */
-export async function downloadToFile(fetchImpl: typeof fetch, url: URL, attemptDir: string, finalFile: string,
-  options: { downloadTimeoutMs?: number | undefined; maxDownloadBytes?: number | undefined } = {}): Promise<void> {
+export interface DownloadOptions {
+  downloadTimeoutMs?: number | undefined;
+  maxDownloadBytes?: number | undefined;
+  /** 跳转目标的解析器；缺省用系统解析。 */
+  resolveHost?: HostResolver | undefined;
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_DOWNLOAD_REDIRECTS = 5;
+
+/**
+ * 确定性下载：先写 .part 再原子改名；带超时与字节上限，超限判非合规（完整事实，不是网络失败）。
+ * 成片下载不带凭据，对象存储/CDN 常以 302 换到签名地址：手工逐跳跟随，每个跳转目标先过安全边界（有效的 HTTP(S) 地址、解析结果不在内网），不附加任何请求头。
+ */
+export async function downloadToFile(fetchImpl: typeof fetch, url: URL, attemptDir: string, finalFile: string, options: DownloadOptions = {}): Promise<void> {
   await mkdir(attemptDir, { recursive: true, mode: 0o700 });
   const temporary = path.join(attemptDir, "download.part");
   const controller = new AbortController();
@@ -76,7 +126,22 @@ export async function downloadToFile(fetchImpl: typeof fetch, url: URL, attemptD
   let received = 0;
   const timer = setTimeout(() => controller.abort(), options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS);
   try {
-    const response = await fetchImpl(url, { signal: controller.signal, redirect: "manual" });
+    let current = url;
+    let response = await fetchImpl(current, { signal: controller.signal, redirect: "manual" });
+    // 起始地址是供应商接口给出的签名链接，沿用原样；只约束跳转目标。
+    for (let hop = 0; REDIRECT_STATUSES.has(response.status); hop += 1) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (location === null || hop === MAX_DOWNLOAD_REDIRECTS) throw new Error(`下载失败：HTTP ${response.status}`);
+      // 只跟随有效的 HTTP(S) 地址，且解析结果不在内网；这是重试也不会变的明确拒绝，由收尾方落 failed 终态。
+      const target = URL.parse(location, current);
+      if (!target || (target.protocol !== "http:" && target.protocol !== "https:")) {
+        throw new AgentError("FORBIDDEN", "下载跳转地址不是有效的 HTTP(S) 地址，已拒绝跟随。");
+      }
+      current = target;
+      await assertPublicResolvedHost(current.hostname, options.resolveHost);
+      response = await fetchImpl(current, { signal: controller.signal, redirect: "manual" });
+    }
     if (!response.ok || !response.body) throw new Error(`下载失败：HTTP ${response.status}`);
     const declared = Number(response.headers.get("content-length") ?? Number.NaN);
     if (Number.isSafeInteger(declared) && declared > limit) {
@@ -149,7 +214,16 @@ export class PortObservations {
 
   // 完整文件已取得且确定不合规：failed 终态、保留 task ID 与原因、费用独立待核，不再获取同一无效文件。
   nonCompliant(attemptId: string, providerTaskId: string | null, reason: string): ExecutionObservation {
-    const message = `已完整取得的输出不满足冻结参数：${reason}`;
+    return this.failedOutput(attemptId, providerTaskId, `已完整取得的输出不满足冻结参数：${reason}`);
+  }
+
+  // 成片下载被安全边界明确拒绝（跳转目标落在内网，或不是有效的 HTTP(S) 地址）：重试不会改变结果，
+  // 同样 failed 终态并保留 task ID 与原因；费用独立待核。
+  blockedDownload(attemptId: string, providerTaskId: string | null, reason: string): ExecutionObservation {
+    return this.failedOutput(attemptId, providerTaskId, `成片下载被安全边界拒绝：${reason}`);
+  }
+
+  private failedOutput(attemptId: string, providerTaskId: string | null, message: string): ExecutionObservation {
     this.db.transaction(() => recordAttemptOutput(this.db, this.clock(), attemptId,
       { ...(providerTaskId ? { providerTaskId } : {}), exitKind: "failed", detail: message }))();
     return this.deterministic(attemptId, "failed", providerTaskId, message);
@@ -207,7 +281,7 @@ export interface SettleVideoParams {
   attemptDir: string;
   finalFile: string;
   /** 供应商刚返回的下载地址；恢复已有文件时不传。 */
-  download?: { url: URL; fetchImpl: typeof fetch; downloadTimeoutMs?: number | undefined; maxDownloadBytes?: number | undefined };
+  download?: { url: URL; fetchImpl: typeof fetch } & DownloadOptions;
   /** 冻结参数校验：返回不合规原因（完整文件已取得，判 failed），null 表示通过。 */
   validate: (facts: VideoFileFacts, op: Extract<OperationSpec, { kind: "video" }>) => string | null;
   /** 下载/探测暂时失败时保留任务与文件的 running 文案。 */
@@ -236,6 +310,9 @@ export async function settleDownloadedVideo(params: SettleVideoParams): Promise<
   } catch (error) {
     if (error instanceof InvalidVideoFile || error instanceof NonCompliantOutput) {
       return observations.nonCompliant(params.attemptId, params.providerTaskId, error.message);
+    }
+    if (error instanceof AgentError && error.code === "FORBIDDEN") {
+      return observations.blockedDownload(params.attemptId, params.providerTaskId, error.message);
     }
     // 网络或探测工具暂不可用：保留任务与完整文件；已有文件不会重新下载。
     return {

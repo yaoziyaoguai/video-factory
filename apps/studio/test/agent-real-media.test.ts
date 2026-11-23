@@ -47,11 +47,13 @@ interface StubState {
   posts: { auth: string | undefined; body: any }[];
   gets: number;
   getAuths: (string | undefined)[];
+  redirects: number;
   downloads: number;
+  downloadAuths: (string | undefined)[];
 }
 
 async function startStub(goodClip: Buffer, badClip: Buffer): Promise<{ server: http.Server; baseUrl: string; state: StubState }> {
-  const state: StubState = { createMode: "ok", taskStatus: "running", videoUrlPath: "/dl/good.mp4", posts: [], gets: 0, getAuths: [], downloads: 0 };
+  const state: StubState = { createMode: "ok", taskStatus: "running", videoUrlPath: "/dl/good.mp4", posts: [], gets: 0, getAuths: [], redirects: 0, downloads: 0, downloadAuths: [] };
   const server = http.createServer((request, response) => {
     const url = request.url ?? "";
     if (request.method === "POST" && url === "/v3/contents/generations/tasks") {
@@ -94,8 +96,23 @@ async function startStub(goodClip: Buffer, badClip: Buffer): Promise<{ server: h
       response.end(JSON.stringify(body));
       return;
     }
-    if (request.method === "GET" && url === "/dl/good.mp4") { state.downloads += 1; response.writeHead(200, { "content-type": "video/mp4" }); response.end(goodClip); return; }
-    if (request.method === "GET" && url === "/dl/bad.mp4") { state.downloads += 1; response.writeHead(200, { "content-type": "video/mp4" }); response.end(badClip); return; }
+    // 成片地址可带签名查询串：下载按路径分发。
+    const pathname = new URL(url, "http://stub").pathname;
+    if (request.method === "GET" && pathname === "/dl/redirect") {
+      // 对象存储/CDN：302 换到带签名的正式地址。
+      state.redirects += 1;
+      response.writeHead(302, { location: "/dl/good.mp4?X-Tos-Signature=stub-signature" });
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && pathname === "/dl/private") {
+      state.redirects += 1;
+      response.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && pathname === "/dl/good.mp4") { state.downloads += 1; state.downloadAuths.push(request.headers.authorization); response.writeHead(200, { "content-type": "video/mp4" }); response.end(goodClip); return; }
+    if (request.method === "GET" && pathname === "/dl/bad.mp4") { state.downloads += 1; state.downloadAuths.push(request.headers.authorization); response.writeHead(200, { "content-type": "video/mp4" }); response.end(badClip); return; }
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { code: "NotFound", message: "no such file" } }));
   });
@@ -211,7 +228,7 @@ async function withClips<T>(fn: (good: Buffer, bad: Buffer) => Promise<T>): Prom
   finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-it("F1 视频创建及查询错误回显不进入持久事实或公开投影", async () => {
+it("F1 视频创建及查询错误：错误码与脱敏后的说明可见，Key 回显不进入持久事实或公开投影", async () => {
   const marker = "VIDEO-ERROR-SYNTHETIC-KEY";
   for (const [mode, expected] of [["echo400", "failed"], ["echo503", "unknown"], ["echoTaskFailed", "failed"], ["echoQuery503", "unknown"]] as const) {
     const stub = await startStub(Buffer.alloc(0), Buffer.alloc(0));
@@ -233,6 +250,10 @@ it("F1 视频创建及查询错误回显不进入持久事实或公开投影", a
         assert.equal(attempt.billed_minor, 0);
         const fact = JSON.parse(attempt.billing_json!) as Extract<BillingFact, { kind: "authoritative" }>;
         assert.deepEqual([fact.kind, fact.billingFactId, fact.final, fact.netAmount.amountMinor], ["authoritative", `zero-${attempt.id}`, true, 0]);
+        // 拒绝原因带出错误码与脱敏后的说明：本次 Key 与 "Bearer" 串都不落库。
+        const { message } = JSON.parse((runtime.database.prepare("SELECT observation_json FROM ledger_observations WHERE attempt_id=? ORDER BY id DESC LIMIT 1").get(attempt.id) as { observation_json: string }).observation_json) as ExecutionObservation;
+        assert.equal(message, "供应商明确拒绝创建任务：HTTP 400（InvalidParameter：invalid Authorization: [已隐去凭据] [已隐去凭据]）");
+        assert.match(runtime.service.getRun("local-owner", runId).issue?.message ?? "", /HTTP 400（InvalidParameter：/);
       } else {
         // 任务失败、5xx、查询失败：费用未知，不虚构账单。
         assert.equal(attempt.billing_json, null);
@@ -506,6 +527,69 @@ it("C1-03：下载暂时失败保留任务身份继续下载；换配置重启�
       assert.equal(driftAttempt.state, "running", "下载仍失败时任务身份继续保留");
       assert.equal(resolveArkBinding(rebuilt.database, bindingOf(configB)), null, "库外绑定版本不可解析");
     } finally { if (runtime.database.open) await runtime.close(); await (rebuilt ? rebuilt.close() : Promise.resolve()); await rm(directory, { recursive: true, force: true }); stub.server.closeAllConnections(); stub.server.close(); }
+  });
+});
+
+it("C1-03：成片地址 302 换到签名链接时逐跳跟随并发布，下载请求不带凭据；跳向内网则 failed 并说明原因", async () => {
+  await withClips(async good => {
+    // 桩监听 127.0.0.1，跳转目标要过私网边界：这一段显式打开联调放行开关（生产不开），用完即还原。
+    const previous = process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+    process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = "1";
+    const stub = await startStub(good, good);
+    stub.state.taskStatus = "succeeded";
+    stub.state.videoUrlPath = "/dl/redirect";
+    const directory = await mkdtemp(path.join(tmpdir(), "frame-real-run-"));
+    let runtime: AgentRuntime | null = null;
+    try {
+      const config = testConfig(stub.baseUrl);
+      runtime = await buildRealRuntime(directory, config, { apiKey: "test-key" });
+      const conversation = runtime.service.createConversation("local-owner", { commandId: cmd(), title: "签名跳转" }).conversation;
+      const prompt = await deliverPrompt(runtime, conversation.id, "山路。");
+      const runId = await acceptedVideoRun(runtime, conversation.id, videoIntent(prompt, config));
+      await runtime.worker!.pollOnce();
+      await runtime.worker!.pollOnce();
+      assert.equal(runtime.service.getRun("local-owner", runId).state, "succeeded", "302 之后的成品照常校验并发布");
+      assert.deepEqual([stub.state.redirects, stub.state.downloads, stub.state.posts.length], [1, 1, 1]);
+      assert.deepEqual(stub.state.downloadAuths, [undefined], "成片下载请求不携带供应商凭据");
+    } finally {
+      if (previous === undefined) delete process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK;
+      else process.env.NEWSNOW_ALLOW_PRIVATE_NETWORK = previous;
+      if (runtime) await runtime.close();
+      await rm(directory, { recursive: true, force: true });
+      stub.server.closeAllConnections(); stub.server.close();
+    }
+
+    // 跳转目标落在内网（如云元数据地址）：安全边界拒绝跟随。重试不会改变这个结果——failed 终态并说明原因，
+    // 不卡在 running；视频已生成，费用保持待对账，不写成 0 元。
+    const blocked = await startStub(good, good);
+    blocked.state.taskStatus = "succeeded";
+    blocked.state.videoUrlPath = "/dl/private";
+    const directory2 = await mkdtemp(path.join(tmpdir(), "frame-real-run-"));
+    const config2 = testConfig(blocked.baseUrl);
+    let runtime2: AgentRuntime | null = null;
+    try {
+      runtime2 = await buildRealRuntime(directory2, config2, { apiKey: "test-key" });
+      const conversation = runtime2.service.createConversation("local-owner", { commandId: cmd(), title: "内网跳转" }).conversation;
+      const prompt = await deliverPrompt(runtime2, conversation.id, "山路。");
+      const runId = await acceptedVideoRun(runtime2, conversation.id, videoIntent(prompt, config2));
+      await runtime2.worker!.pollOnce();
+      await runtime2.worker!.pollOnce();
+      const run = runtime2.service.getRun("local-owner", runId);
+      assert.equal(run.state, "failed");
+      assert.match(run.issue?.message ?? "", /成片下载被安全边界拒绝：请求目标属于内网地址，已拒绝。/);
+      assert.deepEqual([blocked.state.redirects, blocked.state.downloads], [1, 0], "拒绝跟随时不向跳转目标发请求");
+      const attempt = attemptsFor(runtime2.database, runId).at(-1)!;
+      assert.equal(attempt.provider_task_id, "task-001", "保留任务身份，便于人工核对费用");
+      assert.equal(attempt.billing_json, null, "视频已生成，费用未知，不虚构账单");
+      assert.equal(finances(runtime2.database, runRow(runtime2.database, runId)).state, "pending_reconciliation");
+      const getsAfterFailure = blocked.state.gets;
+      await runtime2.worker!.pollOnce();
+      assert.equal(blocked.state.gets, getsAfterFailure, "终态账务停查");
+    } finally {
+      if (runtime2) await runtime2.close();
+      await rm(directory2, { recursive: true, force: true });
+      blocked.server.closeAllConnections(); blocked.server.close();
+    }
   });
 });
 
