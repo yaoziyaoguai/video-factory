@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -48,6 +48,9 @@ import { validatorFor } from "./validate.js";
 
 type Scope = { ownerId: string; conversationId: string };
 const runAsr = promisify(execFile);
+// 识音子进程（faster-whisper + ffmpeg 解码）峰值约 0.5~0.65GB，而生产容器的内存上限是 2GB，还要容纳
+// Node、SQLite 与本地渲染：同一时刻只放行一个识音任务，多出来的请求当场得到可重试的答复，而不是叠加后触发 OOM。
+let activeAsrCount = 0;
 export function validateSubtitleCommand(schema: string, input: unknown) {
   const result = validatorFor(schema)(input);
   if (!result.ok) throw new AgentError("INVALID_INPUT", result.message);
@@ -170,6 +173,12 @@ async function alignMedia(
   )
     throw new AgentError("INVALID_INPUT", "这段视频没有可识别的声音轨。");
   const home = process.env.FRAME_ASR_HOME ?? "/opt/frame-asr";
+  if (activeAsrCount >= 1)
+    throw new AgentError(
+      "QUEUE_FULL",
+      "当前已有语音识别任务正在进行，请稍候再试。",
+    );
+  activeAsrCount += 1;
   let stdout: string;
   try {
     ({ stdout } = await runAsr(
@@ -178,16 +187,30 @@ async function alignMedia(
       { signal, timeout: 15 * 60_000, maxBuffer: 20 * 1024 * 1024 },
     ));
   } catch (error) {
-    const e = error as NodeJS.ErrnoException;
+    const e = error as ExecFileException;
     if (e.code === "ENOENT")
       throw new AgentError("CAPABILITY_UNAVAILABLE", "本地识音模型尚未安装。");
+    // 客户端断开或请求被停止：子进程已被 signal 结束，原样上抛，不当作识音故障。
     if (signal?.aborted) throw error;
+    // 进程被信号结束时 code 为 null、signal 是信号名。OOM Killer 用 SIGKILL；超时由 Node 自己发信号结束，killed 为真。
+    if (e.signal === "SIGKILL")
+      throw new AgentError(
+        "TEMPORARILY_UNAVAILABLE",
+        "本地语音识别未完成：识音进程被系统强制中止，通常是服务内存不足，请稍后重试。",
+      );
     if (typeof e.code === "number" || e.code === "ETIMEDOUT")
       throw new AgentError(
         "TEMPORARILY_UNAVAILABLE",
         "本地语音识别未完成。识别进程退出：" + String(e.code),
       );
+    if (typeof e.signal === "string")
+      throw new AgentError(
+        "TEMPORARILY_UNAVAILABLE",
+        `本地语音识别未完成。识别进程${e.killed ? "超过 15 分钟上限被结束" : `异常中止（${e.signal}）`}。`,
+      );
     throw error;
+  } finally {
+    activeAsrCount -= 1;
   }
   const timing: SpeechTiming = JSON.parse(stdout);
   if (

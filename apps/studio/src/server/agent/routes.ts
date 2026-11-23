@@ -326,8 +326,15 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return reply.code(202).send(service.acceptProposal(requireOwner(request), params.proposalId, body(request)));
   });
 
-  app.post<{Params:{workId:string}}>("/works/:workId/subtitle-tracks",async(request,reply)=>
-    reply.code(201).send(await service.createSubtitles(requireOwner(request),request.params.workId,body(request))));
+  // 识音会拉起数百 MB 的 python + ffmpeg 子进程：客户端中途断开（刷新、关页）时立即中止并回收。
+  // 断连不是路由故障：连接已不在，不回包也不记错误。
+  app.post<{Params:{workId:string}}>("/works/:workId/subtitle-tracks",async(request,reply)=>{
+    const controller=new AbortController(),close=()=>{if(!reply.raw.writableEnded)controller.abort();};
+    reply.raw.once("close",close);
+    try{return reply.code(201).send(await service.createSubtitles(requireOwner(request),request.params.workId,body(request),controller.signal));}
+    catch(error){if(controller.signal.aborted)return reply.hijack();throw error;}
+    finally{reply.raw.off("close",close);}
+  });
   app.post<{Params:{artifactId:string}}>("/artifacts/:artifactId/subtitle-revisions",async(request,reply)=>
     reply.code(201).send(service.saveSubtitleRevision(requireOwner(request),request.params.artifactId,body(request))));
   app.get<{Params:{artifactId:string;revisionId:string};Querystring:{format:string}}>("/artifacts/:artifactId/revisions/:revisionId/subtitles",async(request,reply)=>{

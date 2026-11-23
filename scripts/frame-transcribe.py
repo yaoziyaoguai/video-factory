@@ -41,8 +41,12 @@ def transcribe_window(model, samples, language):
                                            initial_prompt=CHINESE_PROMPT, **decode_options)
     return segments, language
 
+def asr_threads():
+    # 生产容器限 2 核，还要留给 ffmpeg 解码与 Node：线程多于可用核数只会互相争抢。留空用 2。
+    return int(os.environ.get("FRAME_ASR_THREADS") or 2)
+
 def recognize(model_dir, source, language=None):
-    model = WhisperModel(model_dir, device="cpu", compute_type="int8", cpu_threads=3, local_files_only=True)
+    model = WhisperModel(model_dir, device="cpu", compute_type="int8", cpu_threads=asr_threads(), local_files_only=True)
     command = ["ffmpeg","-nostdin","-v","error","-xerror","-protocol_whitelist","file,pipe","-i",source,"-map","0:a:0","-ac","1","-ar",str(RATE),"-f","s16le","-"]
     words, starts, ends = [], [], []
     offset = 0

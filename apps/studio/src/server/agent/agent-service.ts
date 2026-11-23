@@ -1161,9 +1161,9 @@ export class AgentService {
     return this.options.production;
   }
 
-  async createSubtitles(ownerId:string,workId:string,input:CreateSubtitleTrack){
+  async createSubtitles(ownerId:string,workId:string,input:CreateSubtitleTrack,signal?:AbortSignal){
     const {db,clock,hub}=this.options;
-    const receipt=await createSubtitle(db,this.mediaService().blobs,clock,ownerId,workId,input);
+    const receipt=await createSubtitle(db,this.mediaService().blobs,clock,ownerId,workId,input,undefined,signal);
     hub.notifyCommitted(getWorkRow(db,ownerId,workId)!.conversation_id);
     return receipt;
   }

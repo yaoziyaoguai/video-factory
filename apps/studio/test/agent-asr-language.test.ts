@@ -41,3 +41,40 @@ assert transcribe(m, "second", "en")[1] == "en"
 assert m.calls[-1][1]["initial_prompt"] is None
 `, program]);
 });
+
+test("BUG-05 识音线程数默认 2 以匹配 2 核容器，可由 FRAME_ASR_THREADS 指定", () => {
+  const program = fileURLToPath(new URL("../../../scripts/frame-transcribe.py", import.meta.url));
+  // 只隔离推理库与解码器：模型在拉起解码器之前加载，走到解码器即可停，不需要音轨。
+  execFileSync("python3", ["-I", "-B", "-c", `
+import os
+import runpy
+import subprocess
+import sys
+from types import ModuleType, SimpleNamespace
+
+sys.modules["numpy"] = ModuleType("numpy")
+loaded = []
+
+class Stop(Exception):
+    pass
+
+class Decoder:
+    def __init__(self, *args, **options):
+        raise Stop
+
+sys.modules["faster_whisper"] = SimpleNamespace(WhisperModel=lambda *a, **k: loaded.append(k) or object())
+recognize = runpy.run_path(sys.argv[1])["recognize"]
+subprocess.Popen = Decoder
+for value, expected in [(None, 2), ("", 2), ("4", 4)]:
+    if value is None:
+        os.environ.pop("FRAME_ASR_THREADS", None)
+    else:
+        os.environ["FRAME_ASR_THREADS"] = value
+    try:
+        recognize("model", "source.wav")
+        raise AssertionError("应当停在解码器处")
+    except Stop:
+        pass
+    assert loaded[-1] == dict(device="cpu", compute_type="int8", cpu_threads=expected, local_files_only=True), loaded[-1]
+`, program]);
+});

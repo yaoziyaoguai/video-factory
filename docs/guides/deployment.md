@@ -105,7 +105,7 @@ python3 -m venv .local/edge-tts
 
 应用镜像从稳定基础镜像继承本地 CPU 转录环境。构建基础镜像时安装固定版本的 faster-whisper 与 Systran base 权重，运行时以 int8 解码。普通业务镜像构建复用该层。构建基础镜像可传入 `HF_ENDPOINT`；自定义远程权重同时设置 `FRAME_ASR_MODEL_ID`、`FRAME_ASR_MODEL_REVISION` 和 `FRAME_ASR_MODEL_SHA256`。
 
-裸机运行 `sh scripts/install-frame-asr.sh /opt/frame-asr`；使用已有的权重文件时设置 `FRAME_ASR_MODEL_DIR` 指向包含四个模型文件的目录。指定其他安装位置后通过 `FRAME_ASR_HOME` 指向该位置。留空 `FRAME_ASR_LANGUAGE` 时按首个有语音的分片锁定语种；主要创作中文视频的实例可设为 `zh`。转录读取本机模型与音轨。[Systran 模型说明](https://huggingface.co/Systran/faster-whisper-base)
+裸机运行 `sh scripts/install-frame-asr.sh /opt/frame-asr`；使用已有的权重文件时设置 `FRAME_ASR_MODEL_DIR` 指向包含四个模型文件的目录。指定其他安装位置后通过 `FRAME_ASR_HOME` 指向该位置。留空 `FRAME_ASR_LANGUAGE` 时按首个有语音的分片锁定语种；主要创作中文视频的实例可设为 `zh`。识音线程数 `FRAME_ASR_THREADS` 留空用 2，与 2 核容器匹配。转录读取本机模型与音轨。[Systran 模型说明](https://huggingface.co/Systran/faster-whisper-base)
 
 工程 ZIP 的 `README-RUN.md` 给出该修订的冻结镜像和启动命令。把该镜像保存在原宿主或载入目标 Docker，再解压运行。FCPXML 解压后打开 `Frame.fcpxmld`，OTIO 打开 `Frame.otio`，剪映草稿保留 `draft_content.json` 及同目录 `media/`。包内的 `Frame-timeline.json` 保存原切点、音量、淡入淡出及旁白压低音乐的开关，便于核对各剪辑软件的混音。
 
