@@ -256,10 +256,11 @@ export function durationMismatch(facts: VideoFileFacts, expectedSeconds: number)
     ? `输出时长 ${facts.videoDurationMs} ms 与冻结秒数 ${expectedMs} ms 不符（容差 ${frameMs} ms）` : null;
 }
 
-/** 冻结画幅：允许宽高各取整一像素造成的误差，不把明确的 1:1 当作 16:9。 */
-export function aspectRatioMismatch(facts: VideoFileFacts, aspectRatio: Extract<OperationSpec, { kind: "video" }>["parameters"]["aspectRatio"]): string | null {
+/** 冻结画幅：允许宽高各 maxRounding 像素的取整误差（默认 1 像素），不把明确的 1:1 当作 16:9。 */
+export function aspectRatioMismatch(facts: VideoFileFacts, aspectRatio: Extract<OperationSpec, { kind: "video" }>["parameters"]["aspectRatio"],
+  maxRounding = 1): string | null {
   const [widthRatio, heightRatio] = aspectRatio.split(":").map(Number) as [number, number];
-  return Math.abs(facts.width * heightRatio - facts.height * widthRatio) > widthRatio + heightRatio
+  return Math.abs(facts.width * heightRatio - facts.height * widthRatio) > maxRounding * (widthRatio + heightRatio)
     ? `输出画幅 ${facts.width}x${facts.height} 与冻结比例 ${aspectRatio} 不符` : null;
 }
 

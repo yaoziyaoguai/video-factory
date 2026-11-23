@@ -1,6 +1,6 @@
 import { videoWireBody } from "./video-image-inputs.js";
 import { AgentError } from "./errors.js";
-import { InvalidImageFile } from "./media-probe.js";
+import { InvalidImageFile, type VideoFileFacts } from "./media-probe.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { MediaExecutionPort, SubmitPermit } from "../../shared/agent/ports.js";
@@ -13,8 +13,8 @@ import { digestOf, type AgentClock } from "./util.js";
 import type { ArkVideoProfile } from "./media-config.js";
 import { LocalRenderPort } from "./local-render.js";
 import {
-  audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo, validateHttpUrl,
-  withZeroCostBilling,
+  aspectRatioMismatch, audioModeMismatch, durationMismatch, PortObservations, ProviderHttpError, providerRequestJson, settleDownloadedVideo,
+  validateHttpUrl, withZeroCostBilling,
 } from "./media-port-support.js";
 
 // Ark Seedance 薄适配：submit 只等创建回执并立即保存 task ID；query 只 GET 原任务；
@@ -36,6 +36,25 @@ export interface ArkMediaPortOptions {
 }
 
 type ProviderRecoveryQuery = Extract<RecoveryQuery, { kind: "provider" }>;
+type ArkVideoOp = Extract<OperationSpec, { kind: "video" }>;
+
+// 各画幅在 720p 档的标称像素。
+const NOMINAL_720P = { "16:9": [1280, 720], "9:16": [720, 1280], "1:1": [960, 960] } as const;
+// 首帧图生视频按宏块对齐出片（16:9 常见 1248x704）：比例与短边下限都容一个宏块的取整。
+const MACRO_BLOCK = 32;
+
+/** 成片画幅验收：首帧图生视频请求的是 ratio "adaptive"，只核对比例与档位；其余请求按标称像素逐位核对。 */
+function arkOutputMismatch(facts: VideoFileFacts, parameters: ArkVideoOp["parameters"]): string | null {
+  const [width, height] = NOMINAL_720P[parameters.aspectRatio];
+  if (parameters.firstFrameSlot === undefined) {
+    return facts.width === width && facts.height === height ? null
+      : `输出画幅 ${facts.width}x${facts.height} 与冻结参数 ${width}x${height} 不符。`;
+  }
+  const ratio = aspectRatioMismatch(facts, parameters.aspectRatio, MACRO_BLOCK);
+  if (ratio) return ratio;
+  const shortSide = Math.min(facts.width, facts.height), floor = Math.min(width, height) - MACRO_BLOCK;
+  return shortSide < floor ? `输出短边 ${shortSide} 像素，低于冻结 ${parameters.resolution} 档的下限 ${floor}。` : null;
+}
 
 interface ArkTask {
   id?: unknown;
@@ -186,12 +205,8 @@ export class ArkMediaPort implements MediaExecutionPort {
       ...(typeof (task?.usage as {completion_tokens?:unknown})?.completion_tokens==="number" ? {usage:{outputTokens:(task!.usage as {completion_tokens:number}).completion_tokens}} : {}),
       ...(task ? { download: { url: validateHttpUrl(content?.video_url), fetchImpl: this.fetchImpl,
         downloadTimeoutMs: this.options.downloadTimeoutMs, maxDownloadBytes: this.options.maxDownloadBytes } } : {}),
-      validate: (facts, op) => {
-        const sizes = { "16:9": [1280,720], "9:16": [720,1280], "1:1": [960,960] } as const;
-        const [width,height] = sizes[op.parameters.aspectRatio];
-        if (facts.width !== width || facts.height !== height) return `输出画幅 ${facts.width}x${facts.height} 与冻结参数 ${width}x${height} 不符。`;
-        return durationMismatch(facts, op.parameters.durationSeconds) ?? audioModeMismatch(facts, op.parameters.audioMode);
-      },
+      validate: (facts, op) => arkOutputMismatch(facts, op.parameters)
+        ?? durationMismatch(facts, op.parameters.durationSeconds) ?? audioModeMismatch(facts, op.parameters.audioMode),
       retryMessage: "任务已完成，视频文件暂未完成取得或校验；保留已有文件和任务身份继续核对，不重新生成。",
     });
   }

@@ -57,6 +57,10 @@ export function videoImageSlots(p: VideoParameters): Slot[] {
   return slots;
 }
 
+/** 这类输入图片决定输出画幅（方舟首帧、MiniMax 首尾帧）：图片必须就是视频的冻结画幅。 */
+const decidesOutputRatio = (key: keyof typeof profiles, role: ImageRole): boolean =>
+  (key === "minimax" && role !== "reference_image") || (key === "ark" && role === "first_frame");
+
 function verifyImage(
   model: string,
   p: VideoParameters,
@@ -78,7 +82,7 @@ function verifyImage(
       `该型号要求参考图每边在 ${profile.minSide}–${profile.maxSide} 像素内，长宽比最多 ${profile.maxAspect}，单图上限 ${Math.ceil(profile.maxBytes / 1000000)} MB。`,
     );
   }
-  if ((key === "minimax" && role !== "reference_image") || (key === "ark" && role === "first_frame")) {
+  if (decidesOutputRatio(key, role)) {
     const [a, b] = p.aspectRatio.split(":").map(Number) as [number, number];
     if (Math.abs(width * b - height * a) > Math.max(a, b))
       throw new AgentError("CAPABILITY_UNAVAILABLE", "该型号按输入关键帧决定输出画幅，请将图片裁为冻结画幅。");
@@ -118,7 +122,14 @@ export function validateVideoImages(
   let encodedBytes = 0;
   for (const { slot, role } of slots) {
     const fact = facts[slot]!;
-    if (fact.kind === "operation_output" && fact.producerKind === "image") continue;
+    if (fact.kind === "operation_output" && fact.producerKind === "image") {
+      // 上游图片尚未生成、没有像素可探：按它冻结的画幅预判，别等出图花了钱才发现首帧画幅不对。
+      if (decidesOutputRatio(provider, role) && fact.producerAspectRatio !== p.aspectRatio) {
+        throw new AgentError("CAPABILITY_UNAVAILABLE",
+          `该型号按输入关键帧决定输出画幅：上游图片按 ${fact.producerAspectRatio} 生成，与视频冻结画幅 ${p.aspectRatio} 不一致。`);
+      }
+      continue;
+    }
     const media =
       fact.kind === "blob"
         ? fact

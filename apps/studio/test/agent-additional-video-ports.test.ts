@@ -44,8 +44,8 @@ const staticClock = () => "2026-11-01T00:00:00.000Z";
 
 // —— 媒体夹具（真实可 probe 字节） ——
 
-async function makeClip(file: string, seconds: number, withAudio: boolean, audioSeconds = seconds): Promise<void> {
-  const args = ["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=teal:s=1280x720:r=24:d=${seconds}`];
+async function makeClip(file: string, seconds: number, withAudio: boolean, audioSeconds = seconds, size = "1280x720"): Promise<void> {
+  const args = ["-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `color=c=teal:s=${size}:r=24:d=${seconds}`];
   if (withAudio) {
     args.push("-f", "lavfi", "-i", `sine=frequency=220:duration=${audioSeconds}`, "-map", "0:v", "-map", "1:a", "-c:a", "aac");
   }
@@ -1194,6 +1194,83 @@ it("CAP-02 三种真实端口的首帧、首尾帧和角色参考图：本地 HT
   });
 });
 
+it("CAP-02 方舟首帧 adaptive 成片按比例与档位验收（1248x704 通过）；纯文生视频仍按标称像素逐位核对", async (t) => {
+  const { ArkMediaPort } = await import("../src/server/agent/ark-media.js");
+  const { DEFAULT_ARK_VIDEO_PROFILE, mediaBinding } = await import("../src/server/agent/media-config.js");
+  const dir = await mkdtemp(path.join(tmpdir(), "frame-ark-adaptive-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const still = async (size: string): Promise<string> => {
+    const file = path.join(dir, `${size}.png`);
+    await run("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=s=${size}`, "-frames:v", "1", file]);
+    return file;
+  };
+  const wide = await still("1280x720"), square = await still("960x960");
+  const clip = path.join(dir, "clip.mp4"), clips = new Map<string, Buffer>();
+  for (const size of ["1248x704", "1280x720", "960x960", "854x480"]) {
+    await makeClip(clip, 6, false, 6, size);
+    clips.set(size, readFileSync(clip));
+  }
+  const ratios: string[] = [];
+  let base = "", served = "";
+  const server = http.createServer(async (req, res) => {
+    if (req.method === "POST") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      ratios.push(JSON.parse(Buffer.concat(chunks).toString("utf8")).ratio);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ id: "task" }));
+    }
+    if (req.url === "/contents/generations/tasks/task") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ id: "task", status: "succeeded", content: { video_url: `${base}/${served}.mp4` } }));
+    }
+    const bytes = clips.get(req.url!.slice(1, -4));
+    if (bytes) {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      return res.end(bytes);
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const cases: { name: string; aspectRatio: "16:9" | "1:1"; firstFrame?: string; clip: string; state: string; reason?: RegExp }[] = [
+    { name: "宏块对齐的首帧成片", aspectRatio: "16:9", firstFrame: wide, clip: "1248x704", state: "succeeded" },
+    { name: "标称像素的首帧成片", aspectRatio: "16:9", firstFrame: wide, clip: "1280x720", state: "succeeded" },
+    { name: "方形首帧成片", aspectRatio: "1:1", firstFrame: square, clip: "960x960", state: "succeeded" },
+    { name: "首帧成片画幅不符", aspectRatio: "16:9", firstFrame: wide, clip: "960x960", state: "failed", reason: /输出画幅 960x960 与冻结比例 16:9 不符/ },
+    { name: "首帧成片降到 480p 档", aspectRatio: "16:9", firstFrame: wide, clip: "854x480", state: "failed", reason: /输出短边 480 像素，低于冻结 720p 档的下限 688。/ },
+    { name: "纯文生视频不放宽像素", aspectRatio: "16:9", clip: "1248x704", state: "failed", reason: /输出画幅 1248x704 与冻结参数 1280x720 不符。/ },
+  ];
+  for (const [index, c] of cases.entries()) {
+    const { db, blobs, workRoot } = await openFixture(t, "frame-ark-adaptive-port-");
+    const profile = { ...DEFAULT_ARK_VIDEO_PROFILE, baseUrl: base };
+    const binding = mediaBinding(profile, `adaptive-${index}`);
+    const port = new ArkMediaPort(db, blobs, staticClock, { resolve: resolverFor(profile, "fixture-key").resolve, workRoot });
+    const op = videoOperation(binding, { durationSeconds: 6, resolution: "720p", audioMode: "none" }, "冻结的镜头提示");
+    assert.ok(op.kind === "video");
+    op.parameters = { ...op.parameters, aspectRatio: c.aspectRatio, ...(c.firstFrame ? { firstFrameSlot: 0 } : {}) };
+    if (c.firstFrame) op.inputs = [{ kind: "operation_output", producerOperationId: "board", outputSlot: "image" }, ...op.inputs];
+    const { input, query } = seedProviderAttempt(db, op, binding);
+    if (c.firstFrame) {
+      const blob = await blobs.persistFromFileAsync("owner", "conversation", c.firstFrame, "image/png", null);
+      input.resolvedInputs = [{ slot: 0, blobId: blob.id, digest: blob.digest }];
+    }
+    served = c.clip;
+    const submitted = await port.submit(input, issueSubmitPermit(input.attemptId, 1));
+    assert.equal(submitted.state, "running", `${c.name}：${submitted.message ?? ""}`);
+    const done = await port.query({ ...query, providerTaskId: "task" });
+    assert.equal(done.state, c.state, `${c.name}：${done.message ?? ""}`);
+    if (c.reason) assert.match(done.message ?? "", c.reason);
+    else assert.equal(done.blob?.mimeType, "video/mp4", c.name);
+  }
+  assert.deepEqual(ratios, ["adaptive", "adaptive", "adaptive", "adaptive", "adaptive", "16:9"]);
+});
+
 it("CAP-02 准备时核对上游产物类型、槽位、型号及请求大小", async () => {
   const { validateVideoImages } = await import("../src/server/agent/video-image-inputs.js");
   const { DEFAULT_ARK_VIDEO_PROFILE, mediaBinding } = await import("../src/server/agent/media-config.js");
@@ -1203,7 +1280,7 @@ it("CAP-02 准备时核对上游产物类型、槽位、型号及请求大小", 
   op.inputs.push({ kind: "operation_output", producerOperationId: "board", outputSlot: "image" });
   op.parameters.firstFrameSlot = 1;
   assert.ok(
-    validateVideoImages(model.modelId, op, [{ kind: "text" }, { kind: "operation_output", producerKind: "image" }]),
+    validateVideoImages(model.modelId, op, [{ kind: "text" }, { kind: "operation_output", producerKind: "image", producerAspectRatio: "16:9" }]),
   );
   assert.throws(
     () =>
@@ -1230,6 +1307,90 @@ it("CAP-02 准备时核对上游产物类型、槽位、型号及请求大小", 
       }),
     { code: "CAPABILITY_UNAVAILABLE" },
   );
+});
+
+it("CAP-02 上游图片的画幅与视频冻结画幅不一致时，关键帧槽在准备阶段拒绝；角色参考图不受限", async () => {
+  const { validateVideoImages } = await import("../src/server/agent/video-image-inputs.js");
+  const { DEFAULT_ARK_VIDEO_PROFILE, mediaBinding } = await import("../src/server/agent/media-config.js");
+  const seedance = mediaBinding(DEFAULT_ARK_VIDEO_PROFILE, "ratio").modelId;
+  // 上游图片按 from 生成、视频冻结在 parameters 所列画幅：返回准备阶段的校验调用。
+  const prepare = (modelId: string, parameters: Partial<Extract<OperationSpec, { kind: "video" }>["parameters"]>, from: "16:9" | "9:16" | "1:1") => () => {
+    const op = videoOperation({ providerId: "fixture", modelId, connectionId: "ratio", configurationRevisionId: "frozen" }, { durationSeconds: 5, resolution: "720p", audioMode: "none" }, "镜头");
+    assert.ok(op.kind === "video");
+    op.inputs.push({ kind: "operation_output", producerOperationId: "board", outputSlot: "image" });
+    op.parameters = { ...op.parameters, ...parameters };
+    return validateVideoImages(modelId, op, [{ kind: "text" }, { kind: "operation_output", producerKind: "image", producerAspectRatio: from }]);
+  };
+  const refuses = (run: () => boolean, from: "16:9" | "9:16" | "1:1", aspectRatio: "16:9" | "9:16" | "1:1") =>
+    assert.throws(run, { code: "CAPABILITY_UNAVAILABLE", message: `该型号按输入关键帧决定输出画幅：上游图片按 ${from} 生成，与视频冻结画幅 ${aspectRatio} 不一致。` });
+
+  // 方舟首帧：上游 16:9 与视频 16:9 一致才放行；视频改竖屏后同一张图在付费前被拒。
+  assert.ok(prepare(seedance, { firstFrameSlot: 1 }, "16:9")());
+  refuses(prepare(seedance, { firstFrameSlot: 1 }, "9:16"), "9:16", "16:9");
+  refuses(prepare(seedance, { aspectRatio: "9:16", firstFrameSlot: 1 }, "16:9"), "16:9", "9:16");
+  // 角色参考图不决定输出画幅：竖屏参考图可以配横屏视频。
+  assert.ok(prepare(seedance, { referenceImageSlots: [1] }, "9:16")());
+  // MiniMax 首帧、尾帧同样决定画幅，参考图不受限。
+  refuses(prepare("MiniMax-H3", { firstFrameSlot: 1 }, "9:16"), "9:16", "16:9");
+  refuses(prepare("MiniMax-H3", { lastFrameSlot: 1 }, "1:1"), "1:1", "16:9");
+  assert.ok(prepare("MiniMax-H3", { referenceImageSlots: [1] }, "9:16")());
+  // 万相的关键帧不决定画幅，保持原规则。
+  assert.ok(prepare("wan3.0-video", { firstFrameSlot: 1 }, "9:16")());
+});
+
+it("CAP-02 提案阶段拦截跨操作画幅不匹配：横屏生图作竖屏视频首帧在付费前被拒，不产生提案", async t => {
+  const { initializeArkVideoSettings, readArkVideoCurrent, arkVideoCatalog } = await import("../src/server/agent/ark-video-settings.js");
+  const render = { available: true, probeAvailable: true, aacAvailable: true, reason: "测试桩" };
+  const directory = await mkdtemp(path.join(tmpdir(), "vf-first-frame-ratio-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runtime = await createAgentRuntime({
+    dataDir: directory, skillsRoot: defaultSkillsRoot, providerConnections: true,
+    host: { faux: { provider: FAUX_PROVIDER, modelIds: [FAUX_TEXT_MODEL] } },
+    models: [{ binding: { providerId: FAUX_PROVIDER, modelId: FAUX_TEXT_MODEL, connectionId: "fixture", configurationRevisionId: "ratio-test" },
+      name: "Faux", kind: "text", features: [], availability: "configured", verificationNote: "协议测试", isDefault: true }],
+    defaultModelId: FAUX_TEXT_MODEL, clock: staticClock,
+    text: { factory: db => { initializeTextModelSettings(db, staticClock); return { models: () => [], defaultBinding: () => null, resolve: () => null }; } },
+    media: { autoStart: false, factory: (db, blobs) => {
+      initializeArkVideoSettings(db, { clock: staticClock });
+      return {
+        port: new LocalRenderPort(db, blobs, staticClock, { workRoot: path.join(directory, "work") }),
+        catalog: () => ({ ...arkVideoCatalog(readArkVideoCurrent(db), render), ...additionalMediaCatalog(db, true) }),
+        models: () => [],
+      };
+    } },
+  });
+  t.after(() => runtime.close());
+  const db = runtime.database;
+  saveProviderConnection(db, staticClock, "local-owner", {
+    commandId: "ark-ratio-connection", expectedRevision: readProviderConnections(db).revision,
+    connection: { id: "conn-ark", name: "火山方舟", protocol: "ark", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", apiKey: "fixture-key",
+      enabled: true, credentialConfigured: true, models: [
+        { id: "model-seedance", kind: "video", name: "Seedance", modelId: "doubao-seedance-2-5-260628", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true },
+        { id: "model-seedream", kind: "image", name: "Seedream", modelId: "doubao-seedream-5-0-flash-260915", features: [], contextWindowTokens: null, maxOutputTokens: null, enabled: true, isDefault: true },
+      ] },
+  });
+  const catalog = { ...arkVideoCatalog(readArkVideoCurrent(db), render), ...additionalMediaCatalog(db, true) };
+  const videoBinding = catalog["video:doubao-seedance-2-5-260628"]!.binding!, imageBinding = catalog["image:doubao-seedream-5-0-flash-260915"]!.binding!;
+  const conversation = runtime.service.createConversation("local-owner", { commandId: "ark-ratio-conversation", title: "首帧图生视频" }).conversation;
+  const work = seedConfirmedWork(db, staticClock(), { ownerId: "local-owner", conversationId: conversation.id }, "首帧图生视频");
+  const intent = (aspectRatio: "16:9" | "9:16"): ProductionIntent => ({
+    workId: work.workId, title: "首帧图生视频", inputSources: [], reviewInputs: [work.reviewInput], purpose: "production", scope: "首帧图生视频整片制作",
+    operations: [
+      { operationId: "board", outputSlot: "image", kind: "image", model: imageBinding, inputs: [{ kind: "text", text: "山谷的黄昏。" }], maxCreateAttempts: 1,
+        parameters: { aspectRatio: "16:9", resolution: "2560x1440" } },
+      { operationId: "shot", outputSlot: "video", kind: "video", model: videoBinding,
+        inputs: [{ kind: "operation_output", producerOperationId: "board", outputSlot: "image" }, { kind: "text", text: "镜头缓缓推进。" }], maxCreateAttempts: 1,
+        parameters: { durationSeconds: 5, aspectRatio, resolution: "720p", audioMode: "none", firstFrameSlot: 0 } },
+    ],
+    finalOutput: { operationId: "shot", outputSlot: "video" }, outputTarget: finalVideoTarget(),
+    maxSpend: { currency: "CNY", amountMinor: 5000 },
+  });
+  await assert.rejects(
+    runtime.service.prepareProposal("local-owner", conversation.id, { commandId: "ark-ratio-vertical", spec: intent("9:16") }),
+    { code: "CAPABILITY_UNAVAILABLE", message: "该型号按输入关键帧决定输出画幅：上游图片按 16:9 生成，与视频冻结画幅 9:16 不一致。" });
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM proposals").get() as { n: number }).n, 0, "拒绝发生在生成上游图片之前");
+  const prepared = await runtime.service.prepareProposal("local-owner", conversation.id, { commandId: "ark-ratio-matching", spec: intent("16:9") });
+  assert.equal(prepared.proposal.spec.operations.length, 2, "画幅一致的两步制作照常报价");
 });
 
 it("CAP-02 Seedance 2.5 允许三十张参考图，MiniMax 与万相在各自上限拒绝", async () => {

@@ -1010,7 +1010,9 @@ export type TrustedOperationInput =
   | { kind: "text" }
   | { kind: "artifact_revision"; content: { format: "markdown" } | { format: "media"; blobId: string; mimeType: string } }
   | { kind: "blob"; blobId: string; mimeType: string }
-  | { kind: "operation_output"; producerKind: OperationRequest["kind"] }
+  // 上游图片还没生成：带出它冻结的画幅，供按关键帧决定画幅的视频通道在付费前核对。
+  | { kind: "operation_output"; producerKind: Exclude<OperationRequest["kind"], "image"> }
+  | { kind: "operation_output"; producerKind: "image"; producerAspectRatio: Extract<OperationRequest, { kind: "image" }>["parameters"]["aspectRatio"] }
   | { kind: "project_revision" };
 
 // 付费前对已有渲染输入文件的探测结果（按 blobId 索引）；T6 起按槽位角色区分视频/音频事实。
@@ -1626,7 +1628,9 @@ export function normalizeOperationInputs(
             throw new AgentError("INVALID_INPUT", audio ? "旁白槽只接受配音输出。" : image ? "图片片段只接受图片生成输出。" : narrated ? "视频画面槽不能引用图片或配音输出。" : "有序拼接不能把图片或配音当作视频片段。");
           }
         }
-        facts.push({ kind: "operation_output", producerKind: producer.kind });
+        facts.push(producer.kind === "image"
+          ? { kind: "operation_output", producerKind: "image", producerAspectRatio: producer.parameters.aspectRatio }
+          : { kind: "operation_output", producerKind: producer.kind });
         visit(producer.operationId);
         if (op.kind === "render" && !codeParameters) sources.push(operationSources.get(producer.operationId)!);
         if (op.kind === "render" && !codeParameters) {
