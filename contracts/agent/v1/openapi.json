@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Frame Agent first increment",
-    "version": "0.1.59",
+    "version": "0.1.61",
     "description": "Frame Agent HTTP contract; payloads derive from one local JSON Schema authority."
   },
   "servers": [
@@ -1388,6 +1388,74 @@
             "application/json": {
               "schema": {
                 "$ref": "./contracts.schema.json#/$defs/AcceptProposal"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/proposals/{proposalId}/rebind": {
+      "post": {
+        "operationId": "rebindProposal",
+        "description": "Trusted user route only. Deterministically rebinds selected media operations on an unaccepted proposal, recomputes quotes and digest in one transaction, and emits proposal.changed.",
+        "responses": {
+          "200": {
+            "description": "Updated proposal snapshot with fresh digest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./contracts.schema.json#/$defs/Proposal"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "name": "proposalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "./contracts.schema.json#/$defs/Id"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must match configured UI origin. Missing/foreign origin rejected."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./contracts.schema.json#/$defs/RebindProposal"
               }
             }
           }

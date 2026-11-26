@@ -5149,6 +5149,37 @@
     }
   },
   {
+    "name": "colab ltx video connection coexists with vendor apis",
+    "schema": "ProviderConnection",
+    "valid": true,
+    "value": {
+      "id": "provider-colab",
+      "name": "Google Colab (LTX-2.5)",
+      "protocol": "colab",
+      "baseUrl": "https://colab.research.google.com",
+      "apiKey": null,
+      "enabled": true,
+      "models": [
+        {
+          "id": "model-colab-ltx25",
+          "kind": "video",
+          "name": "LTX-2.5 Distilled (720p)",
+          "modelId": "Lightricks/LTX-2.5-distilled",
+          "features": [
+            "首帧生视频",
+            "原生音画",
+            "Colab CU"
+          ],
+          "contextWindowTokens": null,
+          "maxOutputTokens": null,
+          "enabled": true,
+          "isDefault": false
+        }
+      ],
+      "credentialConfigured": true
+    }
+  },
+  {
     "name": "ProviderConnectionSettings",
     "schema": "ProviderConnectionSettings",
     "valid": true,
@@ -10574,6 +10605,18 @@
     }
   },
   {
+    "name": "save edge tts settings explicit pool default",
+    "schema": "SaveEdgeTtsSettings",
+    "valid": true,
+    "value": {
+      "commandId": "cmd_edge_default_1",
+      "expectedRevision": 1,
+      "enabled": true,
+      "voice": "zh-CN-YunxiNeural",
+      "isDefault": true
+    }
+  },
+  {
     "name": "tool dub free with explicit voice and rate",
     "schema": "ToolDubFree",
     "valid": true,
@@ -11320,6 +11363,42 @@
     }
   },
   {
+    "name": "Colab 视频计算单元与分阶段计时用量",
+    "schema": "ProviderUsage",
+    "valid": true,
+    "value": {
+      "mediaDurationMs": 5000,
+      "width": 1280,
+      "height": 720,
+      "resolution": "720p",
+      "providerReceiptId": "gpu-t4-s-usw1b2-sample",
+      "externalUnit": "colab_cu",
+      "estimatedExternalAmount": 0.18,
+      "observedBalanceDelta": 0.2,
+      "accelerator": "Tesla T4",
+      "modelRevision": "Lightricks/LTX-2.5@main",
+      "cacheSource": "warm_memory",
+      "stageTimingsMs": {
+        "queueAllocMs": 0,
+        "envSetupMs": 0,
+        "weightFetchMs": 0,
+        "modelLoadMs": 0,
+        "inferenceMs": 42000,
+        "encodeTransferMs": 3100,
+        "releaseMs": 1800
+      }
+    }
+  },
+  {
+    "name": "未知外部额度单位拒绝",
+    "schema": "ProviderUsage",
+    "valid": false,
+    "value": {
+      "mediaDurationMs": 5000,
+      "externalUnit": "unknown_credits"
+    }
+  },
+  {
     "name": "来源可核对的逐笔账单",
     "schema": "StatementLine",
     "valid": true,
@@ -11453,6 +11532,82 @@
         }
       },
       "effectiveRemainingMinor": null
+    }
+  },
+  {
+    "name": "rebind proposal updates one shot and voice deterministically",
+    "schema": "RebindProposal",
+    "valid": true,
+    "value": {
+      "commandId": "rebind-cmd-1",
+      "expectedDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "changes": [
+        {
+          "operationId": "shot_2",
+          "model": {
+            "providerId": "colab",
+            "modelId": "Lightricks/LTX-2.5-distilled",
+            "connectionId": "conn_colab_1",
+            "configurationRevisionId": "cfg-colab0000000000000000001"
+          }
+        },
+        {
+          "operationId": "voice_1",
+          "model": {
+            "providerId": "edge-tts",
+            "modelId": "edge-tts",
+            "connectionId": "free-service-edge-tts",
+            "configurationRevisionId": "cfg-edgetts00000000000000001"
+          },
+          "voiceId": "zh-CN-XiaoxiaoNeural"
+        }
+      ]
+    }
+  },
+  {
+    "name": "rebind proposal rejects empty changes",
+    "schema": "RebindProposal",
+    "valid": false,
+    "value": {
+      "commandId": "rebind-empty",
+      "expectedDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "changes": []
+    }
+  },
+  {
+    "name": "acceptance blocker requires explicit model selection when no default exists",
+    "schema": "AcceptanceBlocker",
+    "valid": true,
+    "value": {
+      "code": "MODEL_SELECTION_REQUIRED",
+      "message": "当前尚未设置默认视频模型，请先在卡片中选择本次使用的模型后再确认制作。",
+      "action": "select_model"
+    }
+  },
+  {
+    "name": "pool model entry carries connection alias voices and cost summary",
+    "schema": "ModelEntry",
+    "valid": true,
+    "value": {
+      "binding": {
+        "providerId": "edge-tts",
+        "modelId": "edge-tts",
+        "connectionId": "free-service-edge-tts",
+        "configurationRevisionId": "cfg-edgetts00000000000000001"
+      },
+      "name": "Edge 免费配音",
+      "kind": "speech",
+      "features": ["text-to-speech", "词级时间边界"],
+      "availability": "configured",
+      "verificationNote": "免费配音，生成 MP3 与词级时间边界。",
+      "isDefault": false,
+      "connectionName": "免费服务",
+      "costSummary": "¥0.00 免费配音",
+      "defaultVoiceId": "zh-CN-XiaoxiaoNeural",
+      "voices": [
+        { "id": "zh-CN-XiaoxiaoNeural", "label": "晓晓 · 中文女声" },
+        { "id": "zh-CN-YunxiNeural", "label": "云希 · 中文男声" }
+      ]
     }
   }
 ]

@@ -88,10 +88,13 @@ export function readFreeServiceSettings(
     };
   }
   if (serviceId === "edge-tts") {
-    const config = row ? JSON.parse(row.config_json) as { enabled: boolean; voice?: string } : { enabled: false };
+    const config = row
+      ? JSON.parse(row.config_json) as { enabled: boolean; voice?: string; isDefault?: boolean }
+      : { enabled: false };
     return {
       serviceId: "edge-tts", revision, enabled: config.enabled,
       voice: config.voice || DEFAULT_EDGE_TTS_VOICE,
+      ...(typeof config.isDefault === "boolean" ? { isDefault: config.isDefault } : {}),
     };
   }
   const config = row ? JSON.parse(row.config_json) as { enabled: boolean } : { enabled: false };
@@ -161,6 +164,29 @@ export function captureEdgeTtsConfig(db: AgentDatabase): CapturedEdgeTtsConfig |
   const config = JSON.parse(row.config_json) as { enabled: boolean; voice?: string };
   if (!config.enabled || !config.voice) return null;
   return { enabled: true, voice: config.voice, pythonCommand: edgeTtsPythonCommand() };
+}
+
+/** 读取 Edge 免费配音在配音池中的显式默认标记；未显式设置时返回 undefined 以兼容单免费配音默认回退。 */
+export function readEdgeTtsExplicitDefault(db: AgentDatabase): boolean | undefined {
+  const row = readRow(db, "edge-tts");
+  if (!row) return undefined;
+  const config = JSON.parse(row.config_json) as { enabled: boolean; isDefault?: boolean };
+  if (!config.enabled) return undefined;
+  return typeof config.isDefault === "boolean" ? config.isDefault : undefined;
+}
+
+/** 当用户在供应商连接中将某付费配音设为默认时，同步清除 Edge 免费配音的显式默认标记。 */
+export function clearEdgeTtsDefaultIfSet(db: AgentDatabase, now: string): void {
+  const row = readRow(db, "edge-tts");
+  if (!row) return;
+  const config = JSON.parse(row.config_json) as { enabled: boolean; voice?: string; isDefault?: boolean };
+  if (config.isDefault !== true) return;
+  const nextJson = canonicalJson({
+    enabled: config.enabled,
+    voice: config.voice || DEFAULT_EDGE_TTS_VOICE,
+    isDefault: false,
+  });
+  upsertConfig(db, "edge-tts", row.revision, nextJson, null, now);
 }
 
 /**
@@ -311,12 +337,22 @@ export function saveNewsNowServiceSettings(db: AgentDatabase, clock: AgentClock,
 export function saveEdgeTtsServiceSettings(db: AgentDatabase, clock: AgentClock, ownerId: string, input: SaveEdgeTtsSettings): SaveFreeServiceSettingsReceipt {
   const verdict = validatorFor("SaveEdgeTtsSettings")(input);
   if (!verdict.ok) throw new AgentError("INVALID_INPUT", verdict.message);
-  const normalized = { enabled: input.enabled, voice: input.voice };
   const key = { ownerId, operation: "saveFreeServiceSettings", targetId: "edge-tts", commandId: input.commandId };
   return db.transaction(() => {
+    const row = readRow(db, "edge-tts");
+    const existing = row ? JSON.parse(row.config_json) as { isDefault?: boolean } : {};
+    const effectiveDefault = !input.enabled
+      ? (typeof existing.isDefault === "boolean" || typeof input.isDefault === "boolean" ? false : undefined)
+      : typeof input.isDefault === "boolean"
+      ? input.isDefault
+      : existing.isDefault;
+    const normalized = {
+      enabled: input.enabled,
+      voice: input.voice,
+      ...(typeof effectiveDefault === "boolean" ? { isDefault: effectiveDefault } : {}),
+    };
     const replay = checkCommandReceipt<SaveFreeServiceSettingsReceipt>(db, key, { ...input, ...normalized });
     if (replay.kind === "replay") return { ...replay.receipt, replayed: true };
-    const row = readRow(db, "edge-tts");
     requireRevision(row?.revision ?? 0, input.expectedRevision);
     const now = clock();
     const configJson = canonicalJson(normalized);

@@ -63,7 +63,25 @@ try {
   const cookie = login.setCookie[0].split(";")[0];
   const skills = await fetch(base + "/api/agent/v1/settings/skills", { headers: {cookie} });
   assert.equal(skills.status, 200);
-  assert.ok((await skills.json()).skills.some(s => s.id === "travel-prompt-kit"), "Missing built-in skill in the production image");
+  const skillsBody = await skills.json();
+  for (const requiredSkill of ["travel-prompt-kit", "video-generation", "colab-ltx-video"]) {
+    assert.ok(skillsBody.skills.some(s => s.id === requiredSkill), `Missing built-in skill '${requiredSkill}' in the production image`);
+  }
+  const { existsSync } = await import("node:fs");
+  const { execFileSync } = await import("node:child_process");
+  for (const packagedPath of [
+    "apps/studio/dist/server/server/agent/colab-ltx-video.js",
+    "apps/studio/dist/server/server/agent/edge-speech.js",
+    ".agents/skills/colab-ltx-video/scripts/colab_ltx.py",
+    ".agents/skills/colab-ltx-video/scripts/ltx25_remote_worker.py",
+    "scripts/ultra_media_common.py",
+    "scripts/ultra_config.py",
+  ]) {
+    assert.equal(existsSync(path.resolve(packagedPath)), true, `Missing '${packagedPath}' in the production image`);
+  }
+  execFileSync("python3", [".agents/skills/colab-ltx-video/scripts/colab_ltx.py", "--help"], { stdio: "ignore" });
+  const colabCliBin = process.env.COLAB_CLI_BIN?.trim() || "colab";
+  execFileSync(colabCliBin, ["--help"], { stdio: "ignore" });
   const created = await fetch(base + "/api/agent/v1/conversations", {method:"POST", headers:{ cookie, origin:"https://frame.example", "content-type":"application/json", "x-video-factory-request":"studio"}, body:JSON.stringify({commandId:"cmd-container-smoke", title:"Container smoke"})});
   assert.equal(created.status, 201, await created.text());
   const page = await fetch(base + "/agent", { signal: AbortSignal.timeout(5000) });

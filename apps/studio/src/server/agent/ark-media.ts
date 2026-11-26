@@ -224,12 +224,21 @@ export interface RealMediaGatewayOptions {
   resolveProviderPort: (binding: ModelBinding) => MediaExecutionPort | null;
   /** 退役通道路由的观测时间来源；未提供时用当前时间。 */
   clock?: AgentClock;
+  /** 需要随网关关闭清理的额外端口。 */
+  closeables?: MediaExecutionPort[];
 }
 
 export class RealMediaGateway implements MediaExecutionPort {
   readonly reconcileTerminalBilling = false;
   readonly queryRequiresProviderTaskId = true;
   constructor(private readonly local: LocalRenderPort, private readonly options: RealMediaGatewayOptions) {}
+  queryRequiresProviderTaskIdFor(binding: ModelBinding): boolean {
+    const port = this.options.resolveProviderPort(binding);
+    if (!port) return true;
+    return port.queryRequiresProviderTaskIdFor
+      ? port.queryRequiresProviderTaskIdFor(binding)
+      : (port.queryRequiresProviderTaskId ?? true);
+  }
   submit(input: ExecutionInput, permit: SubmitPermit, signal?: AbortSignal): Promise<ExecutionObservation> {
     if (input.operation.kind === "render") return this.local.submit(input, permit, signal);
     // 视频供应商同样按冻结绑定路由（Ark/MiniMax/万相），不再默认 Ark。
@@ -258,6 +267,9 @@ export class RealMediaGateway implements MediaExecutionPort {
     });
   }
   async close(): Promise<void> {
-    await this.local.close();
+    await Promise.all([
+      this.local.close(),
+      ...(this.options.closeables ?? []).map(port => Promise.resolve(port.close?.())),
+    ]);
   }
 }

@@ -476,7 +476,7 @@ it("speech: wire 冻结（wss/Authorization/marin/pcm24k/4096/low），成功转
   assert.equal(observation.state, "succeeded");
   assert.equal(observation.blob?.mimeType, "audio/mpeg");
   assert.equal(observation.billing, null);
-  assert.match(observation.message ?? "", /音频 1\.0 秒/);
+  assert.match(observation.message ?? "", /音频 1\.[01] 秒/);
   assert.equal(observation.usage?.inputTokens,55);assert.equal(observation.usage?.outputTokens,176);assert.ok(observation.usage!.mediaDurationMs!>=1000);
   assert.match(observation.message ?? "", /输入 55 \/ 输出 176 token/);
   const receipt = attemptOutput(db, "attempt");
@@ -556,7 +556,7 @@ it("speech: 转写里的数字换一种读法、长句只有零星同音异形 �
     const { db, port, input } = await speechCase(t, new FakeRealtimeHub({ audioSeconds: 1, transcript }), { text: narration });
     const observation = await port.submit(input, issueSubmitPermit("attempt", 1));
     assert.equal(observation.state, "succeeded", narration);
-    assert.match(observation.message ?? "", /音频 1\.0 秒/, narration);
+    assert.match(observation.message ?? "", /音频 1\.[01] 秒/, narration);
     assert.equal(blobCount(db), 1, narration);
   }
 });

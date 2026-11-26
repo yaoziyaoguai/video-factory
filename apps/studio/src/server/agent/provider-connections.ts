@@ -9,14 +9,20 @@ import { checkCommandReceipt, storeCommandReceipt } from "./conversation-store.j
 import { insertEvent } from "./event-log.js";
 import { normalizeApiKey, normalizeBaseUrl, readTextModelView, textBindingOf, textModelsView, type TextExecutionConfig, type TextSettingsView } from "./text-model-settings.js";
 import { findNativeTextModel, resolveThinkingLevel, thinkingCapabilityOf } from "./text-model.js";
-import { readArkVideoCurrent } from "./ark-video-settings.js";
+import { readArkVideoCurrent, arkVideoCatalog, arkVideoModelView } from "./ark-video-settings.js";
 import {
-  DEFAULT_ARK_VIDEO_PROFILE, mediaBinding, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS, minimaxSpeechCatalogEntry, minimaxSpeechModelView,
-  isWanMediaBaseUrl, minimaxRegionOf, minimaxSpeechBinding, minimaxSpeechProfile, minimaxVideoBinding, minimaxVideoProfile, imageBinding, openaiImageProfile, seedreamImageProfile,
-  openaiSpeechBinding, openaiSpeechProfile, OPENAI_IMAGE_MODEL_IDS, OPENAI_SPEECH_MODEL_IDS, wanVideoBinding, wanVideoProfile,
-  type MiniMaxSpeechProfile, type MiniMaxVideoProfile, type ImageProfile, type OpenAISpeechProfile, type WanVideoProfile,
+  arkVideoCatalogEntry, arkVideoModelEntry, arkVideoUnavailableReason,
+  DEFAULT_ARK_VIDEO_PROFILE, mediaBinding, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS, COLAB_VIDEO_MODEL_IDS, minimaxSpeechCatalogEntry, minimaxSpeechModelView,
+  isWanMediaBaseUrl, isColabBaseUrl, minimaxRegionOf, minimaxSpeechBinding, minimaxSpeechProfile, minimaxVideoBinding, minimaxVideoProfile, imageBinding, openaiImageProfile, seedreamImageProfile,
+  openaiSpeechBinding, openaiSpeechProfile, OPENAI_IMAGE_MODEL_IDS, OPENAI_SPEECH_MODEL_IDS, wanVideoBinding, wanVideoProfile, colabVideoBinding, colabVideoProfile, colabVideoCatalogEntry, colabVideoModelView,
+  type MiniMaxSpeechProfile, type MiniMaxVideoProfile, type ImageProfile, type OpenAISpeechProfile, type WanVideoProfile, type ColabVideoProfile, type LocalRenderFacts,
 } from "./media-config.js";
-import { ADDITIONAL_MEDIA_CHANNEL_KIND, insertAdditionalMediaVersion, readAdditionalMediaCurrent, type AdditionalMediaChannel } from "./additional-media-settings.js";
+import {
+  ADDITIONAL_MEDIA_CHANNEL_KIND, additionalChannelCatalogEntry, additionalChannelModelView, additionalMediaCatalog, additionalMediaModelViews,
+  insertAdditionalMediaVersion, readAdditionalMediaCurrent, type AdditionalMediaChannel,
+} from "./additional-media-settings.js";
+import { captureEdgeTtsConfig, clearEdgeTtsDefaultIfSet, readEdgeTtsExplicitDefault } from "./free-service-settings.js";
+import { EDGE_SPEECH_BINDING, edgeSpeechCatalogEntry, edgeSpeechModelView } from "./edge-speech.js";
 import type { QuoteCatalog } from "./artifact-store.js";
 
 // 连接保存当前地址与凭据；执行表仅保存不可变快照，已受理请求继续解析原版本。
@@ -42,6 +48,9 @@ function providerEndpointReason(protocol: ProviderConnection["protocol"], baseUr
   }
   if (protocol === "wan" && !isWanMediaBaseUrl(baseUrl)) {
     return "万相接口地址应为工作空间媒体 API 根地址，例如 https://工作空间.cn-beijing.maas.aliyuncs.com；不要附加 /v1 或完整端点。";
+  }
+  if (protocol === "colab" && !isColabBaseUrl(baseUrl)) {
+    return "Google Colab 接口地址应固定为 https://colab.research.google.com。";
   }
   return null;
 }
@@ -71,6 +80,10 @@ function modelUnavailableReason(connection: ProviderConnection, model: Connectio
     if (connection.protocol === "wan") {
       return WAN_VIDEO_MODEL_IDS.has(model.modelId) && wanVideoProfile(model.modelId, baseUrl) !== null
         ? null : "已登记；此型号的媒体执行参数与报价尚未接入";
+    }
+    if (connection.protocol === "colab") {
+      return COLAB_VIDEO_MODEL_IDS.has(model.modelId) && colabVideoProfile(model.modelId, baseUrl) !== null
+        ? null : "已登记；此 Colab 视频型号尚未接入执行配置";
     }
     // 历史兼容协议连接只读：其视频型号不再接入新执行。
     return "已登记；此型号的媒体执行参数与报价尚未接入";
@@ -112,7 +125,199 @@ export function connectedTextModels(db: AgentDatabase) {
 }
 
 export function connectedMediaEnabled(db: AgentDatabase, kind: "video" | "image" | "speech"): boolean {
-  return readProviderConnections(db).connections.some(connection => connection.models.some(model => model.kind === kind && model.isDefault && modelUnavailableReason(connection, model) === null));
+  if (kind === "speech" && captureEdgeTtsConfig(db) !== null) return true;
+  return readProviderConnections(db).connections.some(connection =>
+    connection.models.some(model => model.kind === kind && modelUnavailableReason(connection, model) === null));
+}
+
+export interface ConnectedMediaPool {
+  catalog: QuoteCatalog;
+  models: Bootstrap["models"];
+  defaultsByKind: Record<"image" | "video" | "speech", ModelBinding | null>;
+}
+
+// 多活媒体模型池投影（0.1.61）：同类别所有已启用且适配的连接×型号并列进入目录，最多一项标默认；
+// 目录主键采用 ${kind}:${configurationRevisionId} 防止同型号双账号碰撞，免费配音启用时并入 speech 池。
+export function connectedMediaPool(db: AgentDatabase, render: LocalRenderFacts): ConnectedMediaPool {
+  const catalog: QuoteCatalog = { ...arkVideoCatalog(null, render) };
+  const models: Bootstrap["models"] = [];
+  const defaultsByKind: Record<"image" | "video" | "speech", ModelBinding | null> = {
+    image: null,
+    video: null,
+    speech: null,
+  };
+  if (!render.probeAvailable) return { catalog, models, defaultsByKind };
+
+  const unifiedConfigured = Boolean(db.prepare("SELECT 1 FROM provider_connection_settings WHERE id=1").get());
+  let paidSpeechCount = 0;
+
+  if (!unifiedConfigured) {
+    const legacyArk = readArkVideoCurrent(db);
+    if (legacyArk?.version.api_key) {
+      const view = arkVideoModelView(legacyArk, render);
+      view.isDefault = true;
+      view.connectionName = "火山方舟";
+      defaultsByKind.video = view.binding;
+      const entry = arkVideoCatalog(legacyArk, render)[`video:${view.binding.modelId}`];
+      if (entry) {
+        const enriched = {
+          ...entry,
+          poolMeta: {
+            kind: "video" as const,
+            isDefault: true,
+            connectionName: "火山方舟",
+            modelName: view.name,
+            ...(view.costSummary ? { costSummary: view.costSummary } : {}),
+          },
+        };
+        catalog[`video:${view.binding.configurationRevisionId}`] = enriched;
+        catalog[`video:${view.binding.modelId}`] = enriched;
+      }
+      models.push(view);
+    }
+    const extraCatalog = additionalMediaCatalog(db, true);
+    for (const view of additionalMediaModelViews(db, true)) {
+      const mediaKind = view.kind as "image" | "video" | "speech";
+      view.isDefault = true;
+      defaultsByKind[mediaKind] = view.binding;
+      if (mediaKind === "speech") paidSpeechCount += 1;
+      const entry = extraCatalog[`${mediaKind}:${view.binding.modelId}`];
+      if (entry) {
+        const enriched = {
+          ...entry,
+          poolMeta: {
+            kind: mediaKind,
+            isDefault: true,
+            connectionName: view.connectionName ?? view.binding.providerId,
+            modelName: view.name,
+            ...(view.costSummary ? { costSummary: view.costSummary } : {}),
+            ...(view.externalUnit ? { externalUnit: view.externalUnit } : {}),
+            ...(view.defaultVoiceId ? { defaultVoiceId: view.defaultVoiceId } : {}),
+          },
+        };
+        catalog[`${mediaKind}:${view.binding.configurationRevisionId}`] = enriched;
+        catalog[`${mediaKind}:${view.binding.modelId}`] = enriched;
+      }
+      models.push(view);
+    }
+  } else {
+    const connections = (
+      db
+        .prepare(
+          `SELECT json_set(configuration_json,'$.apiKey',frame_open(json_extract(configuration_json,'$.apiKey'))) AS configuration_json
+           FROM provider_connections
+           WHERE json_extract(configuration_json,'$.enabled')=1
+             AND json_extract(configuration_json,'$.apiKey') IS NOT NULL
+           ORDER BY rowid`,
+        )
+        .all() as { configuration_json: string }[]
+    ).map(row => JSON.parse(row.configuration_json) as ProviderConnection);
+
+    for (const connection of connections) {
+      if (!connection.enabled || !connection.apiKey) continue;
+      for (const model of connection.models) {
+        if (model.kind === "text" || !model.enabled) continue;
+        if (modelUnavailableReason(connection, model) !== null) continue;
+        const mediaKind = model.kind;
+        if (mediaKind === "video" && connection.protocol === "ark") {
+          const profile = DEFAULT_ARK_VIDEO_PROFILE;
+          const version = db
+            .prepare(
+              "SELECT binding_json FROM ark_video_configuration_versions WHERE profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1",
+            )
+            .get(canonicalJson(profile), connection.apiKey) as { binding_json: string } | undefined;
+          if (!version) continue;
+          const binding = JSON.parse(version.binding_json) as ModelBinding;
+          const view = arkVideoModelEntry(profile, binding, model.name, true, arkVideoUnavailableReason(true, render));
+          view.isDefault = model.isDefault;
+          view.connectionName = connection.name;
+          view.features.push(model.isDefault ? "当前默认视频" : "可按本次选择");
+          const entry = {
+            ...arkVideoCatalogEntry(profile, binding),
+            poolMeta: {
+              kind: "video" as const,
+              isDefault: model.isDefault,
+              connectionName: connection.name,
+              modelName: model.name,
+              ...(view.costSummary ? { costSummary: view.costSummary } : {}),
+            },
+          };
+          catalog[`video:${binding.configurationRevisionId}`] = entry;
+          if (!catalog[`video:${binding.modelId}`] || model.isDefault) {
+            catalog[`video:${binding.modelId}`] = entry;
+          }
+          if (model.isDefault) defaultsByKind.video = binding;
+          models.push(view);
+          continue;
+        }
+        const channel = additionalChannelOf(connection, model);
+        if (!channel) continue;
+        const baseUrl = model.baseUrl ?? connection.baseUrl;
+        const profile =
+          channel === "ark-image"
+            ? seedreamImageProfile(model.modelId, baseUrl)
+            : channel === "openai-image"
+              ? openaiImageProfile(model.modelId, baseUrl)
+              : mediaKind === "speech"
+                ? channel === "minimax-speech"
+                  ? minimaxSpeechProfile(model.modelId, baseUrl)
+                  : openaiSpeechProfile(model.modelId, baseUrl)
+                : channel === "minimax-video"
+                  ? minimaxVideoProfile(model.modelId, baseUrl)
+                  : channel === "colab-video"
+                    ? colabVideoProfile(model.modelId, baseUrl)
+                    : wanVideoProfile(model.modelId, baseUrl);
+        if (!profile) continue;
+        const version = db
+          .prepare(
+            "SELECT binding_json FROM additional_media_versions WHERE channel_id=? AND profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1",
+          )
+          .get(channel, canonicalJson(profile), connection.apiKey) as { binding_json: string } | undefined;
+        if (!version) continue;
+        const binding = JSON.parse(version.binding_json) as ModelBinding;
+        const view = additionalChannelModelView(channel, profile, binding, model.name);
+        view.isDefault = model.isDefault;
+        view.connectionName = connection.name;
+        const kindCn = mediaKind === "image" ? "图片" : mediaKind === "video" ? "视频" : "配音";
+        view.features.push(model.isDefault ? `当前默认${kindCn}` : "可按本次选择");
+        const entry = {
+          ...additionalChannelCatalogEntry(channel, profile, binding),
+          poolMeta: {
+            kind: mediaKind,
+            isDefault: model.isDefault,
+            connectionName: connection.name,
+            modelName: model.name,
+            ...(view.costSummary ? { costSummary: view.costSummary } : {}),
+            ...(view.externalUnit ? { externalUnit: view.externalUnit } : {}),
+            ...(view.defaultVoiceId ? { defaultVoiceId: view.defaultVoiceId } : {}),
+          },
+        };
+        catalog[`${mediaKind}:${binding.configurationRevisionId}`] = entry;
+        if (!catalog[`${mediaKind}:${binding.modelId}`] || model.isDefault) {
+          catalog[`${mediaKind}:${binding.modelId}`] = entry;
+        }
+        if (mediaKind === "speech") paidSpeechCount += 1;
+        if (model.isDefault) defaultsByKind[mediaKind] = binding;
+        models.push(view);
+      }
+    }
+  }
+
+  const edge = captureEdgeTtsConfig(db);
+  if (edge) {
+    // 支持付费默认 / Edge 免费默认 / 无默认手动选三态闭环：显式 isDefault 优先，历史未显式设置时仅在无付费配音时作默认。
+    const explicitEdgeDefault = readEdgeTtsExplicitDefault(db);
+    const edgeIsDefault =
+      defaultsByKind.speech === null &&
+      (explicitEdgeDefault === true || (explicitEdgeDefault === undefined && paidSpeechCount === 0));
+    const entry = edgeSpeechCatalogEntry(edge.voice, edgeIsDefault);
+    catalog[`speech:${EDGE_SPEECH_BINDING.configurationRevisionId}`] = entry;
+    catalog[`speech:${EDGE_SPEECH_BINDING.modelId}`] = entry;
+    if (edgeIsDefault) defaultsByKind.speech = EDGE_SPEECH_BINDING;
+    models.push(edgeSpeechModelView(edge.voice, edgeIsDefault));
+  }
+
+  return { catalog, models, defaultsByKind };
 }
 
 // MiniMax备选沿已有连接与不可变版本进入本次选择，不写当前默认或另造设置服务。
@@ -138,6 +343,46 @@ export function connectedSpeechChoices(db: AgentDatabase, probeAvailable: boolea
       catalog[key] = minimaxSpeechCatalogEntry(profile, binding);
       const entry = minimaxSpeechModelView(profile, binding, model.name);
       entry.features.push(model.isDefault ? "当前默认配音" : "可按本次选择");
+      const index = models.findIndex(item => item.binding.modelId === binding.modelId);
+      if (index < 0) models.push(entry); else models[index] = entry;
+    }
+  }
+  return { catalog, models };
+}
+
+// Colab 视频备选沿已有连接与不可变版本进入本次选择（供选用 colab-ltx-video 技能或对话明确点名调用），不改全局默认视频厂商。
+// SQL 限定只读取已启用且带凭据的 colab 连接行，不为列视频型号额外解密无关服务凭据。
+export function connectedColabVideoChoices(db: AgentDatabase, probeAvailable: boolean): { catalog: QuoteCatalog; models: Bootstrap["models"] } {
+  const catalog: QuoteCatalog = {};
+  const models: Bootstrap["models"] = [];
+  if (!probeAvailable) return { catalog, models };
+  const connections = (
+    db
+      .prepare(
+        `SELECT json_set(configuration_json,'$.apiKey',frame_open(json_extract(configuration_json,'$.apiKey'))) AS configuration_json
+         FROM provider_connections
+         WHERE json_extract(configuration_json,'$.protocol')='colab'
+           AND json_extract(configuration_json,'$.enabled')=1
+           AND json_extract(configuration_json,'$.apiKey') IS NOT NULL
+         ORDER BY rowid`,
+      )
+      .all() as { configuration_json: string }[]
+  ).map(row => JSON.parse(row.configuration_json) as ProviderConnection);
+  for (const connection of connections) {
+    if (connection.protocol !== "colab" || !connection.enabled || !connection.apiKey) continue;
+    for (const model of connection.models) {
+      if (model.kind !== "video" || !model.enabled) continue;
+      const profile = colabVideoProfile(model.modelId, model.baseUrl ?? connection.baseUrl);
+      if (!profile) continue;
+      const version = db.prepare("SELECT binding_json FROM additional_media_versions WHERE channel_id='colab-video' AND profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
+        .get(canonicalJson(profile), connection.apiKey) as { binding_json: string } | undefined;
+      if (!version) continue;
+      const binding = JSON.parse(version.binding_json) as ModelBinding;
+      const key = `video:${binding.modelId}`;
+      if (catalog[key] && !model.isDefault) continue;
+      catalog[key] = colabVideoCatalogEntry(profile, binding);
+      const entry = colabVideoModelView(profile, binding, model.name);
+      entry.features.push(model.isDefault ? "当前默认视频" : "可按本次选择");
       const index = models.findIndex(item => item.binding.modelId === binding.modelId);
       if (index < 0) models.push(entry); else models[index] = entry;
     }
@@ -238,6 +483,7 @@ function additionalChannelOf(connection: ProviderConnection, model: ConnectionMo
   }
   if (model.kind === "video") {
     if (connection.protocol === "minimax") return "minimax-video";
+    if (connection.protocol === "colab") return "colab-video";
     return connection.protocol === "wan" ? "wan-video" : null;
   }
   return null;
@@ -252,6 +498,7 @@ function projectAdditionalMedia(db: AgentDatabase, connection: ProviderConnectio
     : channel === "openai-image" ? openaiImageProfile(model.modelId, baseUrl)
     : model.kind === "speech" ? (channel === "minimax-speech" ? minimaxSpeechProfile(model.modelId, baseUrl) : openaiSpeechProfile(model.modelId, baseUrl))
     : channel === "minimax-video" ? minimaxVideoProfile(model.modelId, baseUrl)
+    : channel === "colab-video" ? colabVideoProfile(model.modelId, baseUrl)
     : channel === "wan-video" ? wanVideoProfile(model.modelId, baseUrl) : null;
   if (!profile) return; // 非已核实站点/型号组合：modelUnavailableReason 已拦截，防御不再投影。
   const profileJson = canonicalJson(profile);
@@ -262,6 +509,7 @@ function projectAdditionalMedia(db: AgentDatabase, connection: ProviderConnectio
     : model.kind === "image" ? imageBinding(profile as ImageProfile, newAgentId("conn"))
     : model.kind === "speech" ? (channel === "minimax-speech" ? minimaxSpeechBinding(profile as MiniMaxSpeechProfile, newAgentId("conn")) : openaiSpeechBinding(profile as OpenAISpeechProfile, newAgentId("conn")))
     : channel === "minimax-video" ? minimaxVideoBinding(profile as MiniMaxVideoProfile, newAgentId("conn"))
+    : channel === "colab-video" ? colabVideoBinding(profile as ColabVideoProfile, newAgentId("conn"))
     : wanVideoBinding(profile as WanVideoProfile, newAgentId("conn"));
   if (!existing) insertAdditionalMediaVersion(db, now, channel, binding, profile, connection.apiKey!);
   if (!model.isDefault) return;
@@ -295,27 +543,26 @@ function projectExecutionVersions(db: AgentDatabase, connections: ProviderConnec
     }
     if (modelUnavailableReason(connection, model) !== null) continue;
     if (model.kind === "video" && connection.protocol === "ark") {
-      // Ark 视频默认型号仍走单行设置表（存量结构保留）。
-      if (!model.isDefault) continue;
-      const current = readArkVideoCurrent(db);
+      // 每个可用 Ark 视频条目都投影不可变版本（与追加通道同构）；仅默认项写入 ark_video_settings 单行。
       const profile = DEFAULT_ARK_VIDEO_PROFILE;
-      let revisionId = current?.version.configuration_revision_id;
-      if (!current || current.version.api_key !== connection.apiKey || current.version.profile_json !== canonicalJson(profile)) {
-        const existing = db.prepare("SELECT configuration_revision_id FROM ark_video_configuration_versions WHERE profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
-          .get(canonicalJson(profile), connection.apiKey) as { configuration_revision_id: string } | undefined;
-        if (existing) revisionId = existing.configuration_revision_id;
-        else {
-          const binding = mediaBinding(profile, newAgentId("conn"));
-          revisionId = binding.configurationRevisionId;
-          db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,frame_seal(?),?)").run(revisionId, canonicalJson(binding), canonicalJson(profile), connection.apiKey, now);
-        }
+      const existing = db.prepare("SELECT configuration_revision_id FROM ark_video_configuration_versions WHERE profile_json=? AND frame_open(api_key) IS ? ORDER BY created_at DESC LIMIT 1")
+        .get(canonicalJson(profile), connection.apiKey) as { configuration_revision_id: string } | undefined;
+      let revisionId: string;
+      if (existing) {
+        revisionId = existing.configuration_revision_id;
+      } else {
+        const binding = mediaBinding(profile, newAgentId("conn"));
+        revisionId = binding.configurationRevisionId;
+        db.prepare("INSERT INTO ark_video_configuration_versions(configuration_revision_id,binding_json,profile_json,api_key,created_at) VALUES(?,?,?,frame_seal(?),?)")
+          .run(revisionId, canonicalJson(binding), canonicalJson(profile), connection.apiKey, now);
       }
+      if (!model.isDefault) continue;
       // ON CONFLICT 恢复：视频默认从追加通道切回 Ark 时单行可能已被清理，纯 UPDATE 会丢当前入口。
       db.prepare(`INSERT INTO ark_video_settings(id,revision,display_name,current_configuration_revision_id,updated_at) VALUES(1,0,?,?,?)
     ON CONFLICT(id) DO UPDATE SET revision=revision+1,display_name=excluded.display_name,current_configuration_revision_id=excluded.current_configuration_revision_id,updated_at=excluded.updated_at
     WHERE ark_video_settings.display_name IS NOT excluded.display_name
        OR ark_video_settings.current_configuration_revision_id IS NOT excluded.current_configuration_revision_id`)
-        .run(model.name, revisionId!, now);
+        .run(model.name, revisionId, now);
       arkVideoDefault = true;
       continue;
     }
@@ -335,33 +582,53 @@ function projectExecutionVersions(db: AgentDatabase, connections: ProviderConnec
   if (textChanged || text.defaultEntryId !== defaultTextId) db.prepare("UPDATE text_model_settings SET revision=revision+1,default_entry_id=?,updated_at=? WHERE id=1").run(defaultTextId, now);
 }
 
-// 当前全部媒体执行身份（Ark 单行 + 五个追加通道）：行存在即当前（projectExecutionVersions 在同一
-// 保存事务里清理失效行），供保存连接时比对被移除的绑定并作废相关未受理提案。
-function currentMediaBindings(db: AgentDatabase): { defaults: string[]; speechChoices: string[] } {
-  const bindings: string[] = [];
-  const video = readArkVideoCurrent(db);
-  if (video) bindings.push(video.version.binding_json);
-  for (const channel of Object.keys(ADDITIONAL_MEDIA_CHANNEL_KIND) as AdditionalMediaChannel[]) {
-    const current = readAdditionalMediaCurrent(db, channel);
-    if (current) bindings.push(current.version.binding_json);
+// 当前池内全部可用媒体执行身份：普通默认切换只要原型号仍在启用池内就不作废 ready 提案；
+// 仅在连接/型号实际停用、删除、更换 Key 或免费配音关闭时将引用该失效绑定的未受理提案标 stale。
+export function currentMediaBindings(db: AgentDatabase): Set<string> {
+  const active = new Set<string>();
+  const unifiedConfigured = Boolean(db.prepare("SELECT 1 FROM provider_connection_settings WHERE id=1").get());
+  if (!unifiedConfigured) {
+    const video = readArkVideoCurrent(db);
+    if (video) active.add(video.version.binding_json);
+    for (const channel of Object.keys(ADDITIONAL_MEDIA_CHANNEL_KIND) as AdditionalMediaChannel[]) {
+      const current = readAdditionalMediaCurrent(db, channel);
+      if (current) active.add(current.version.binding_json);
+    }
+  } else {
+    const pool = connectedMediaPool(db, { available: true, aacAvailable: true, probeAvailable: true, reason: "" });
+    for (const model of pool.models) {
+      active.add(canonicalJson(model.binding));
+    }
+    // 启动纠偏前可能存在尚未清理的遗留单行（如 F13 检验场景）：若其并不属于当前已启用连接，纠偏后会自然进入差集。
+    const legacyArk = readArkVideoCurrent(db);
+    if (legacyArk && !active.has(legacyArk.version.binding_json)) {
+      // 仅当连接表尚未投影该版本时保留到 before 集合，纠偏清理单行后若池内仍无该连接则转 stale。
+      active.add(legacyArk.version.binding_json);
+    }
+    for (const channel of Object.keys(ADDITIONAL_MEDIA_CHANNEL_KIND) as AdditionalMediaChannel[]) {
+      const current = readAdditionalMediaCurrent(db, channel);
+      if (current && !active.has(current.version.binding_json)) {
+        active.add(current.version.binding_json);
+      }
+    }
   }
-  return { defaults: bindings, speechChoices: Object.values(connectedSpeechChoices(db, true).catalog)
-    .flatMap(entry => entry.binding ? [canonicalJson(entry.binding)] : []) };
+  if (captureEdgeTtsConfig(db)) {
+    active.add(canonicalJson(EDGE_SPEECH_BINDING));
+  }
+  return active;
 }
 
 // 保存和启动纠偏共用同一失效规则；派生投影与 ready 提案在调用方事务中一起提交。
-function invalidateRemovedMediaBindings(db: AgentDatabase, now: string, before: ReturnType<typeof currentMediaBindings>): string[] {
+export function invalidateRemovedMediaBindings(db: AgentDatabase, now: string, before: Set<string>): string[] {
   const after = currentMediaBindings(db);
-  // 默认切换沿原失效规则；非默认本次选择则在该备选停用/身份变化时失效。
-  const removed = [...before.defaults.filter(binding => !after.defaults.includes(binding)),
-    ...before.speechChoices.filter(binding => !after.speechChoices.includes(binding))];
+  const removed = [...before].filter(binding => !after.has(binding));
   const changedConversations: string[] = [];
   if (!removed.length) return changedConversations;
   const ready = db.prepare("SELECT id,owner_id,revision,conversation_id,spec_json FROM proposals WHERE state='ready' AND accepted_run_id IS NULL")
     .all() as { id: string; owner_id: string; revision: number; conversation_id: string; spec_json: string }[];
   for (const proposal of ready) {
-    const spec = JSON.parse(proposal.spec_json) as { operations: { model?: ModelBinding }[] };
-    if (!spec.operations.some(op => removed.includes(canonicalJson(op.model)))) continue;
+    const spec = JSON.parse(proposal.spec_json) as { operations: { model?: ModelBinding | null }[] };
+    if (!spec.operations.some(op => op.model && removed.includes(canonicalJson(op.model)))) continue;
     db.prepare("UPDATE proposals SET state='stale',revision=revision+1,updated_at=? WHERE id=?").run(now, proposal.id);
     insertEvent(db, now, { ownerId: proposal.owner_id, conversationId: proposal.conversation_id, kind: "proposal.changed", entityId: proposal.id, entityVersion: proposal.revision + 1 });
     changedConversations.push(proposal.conversation_id);
@@ -435,9 +702,13 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
         || (connection.apiKey !== null && providerName(item.baseUrl) !== null && providerName(item.baseUrl) === providerName(connection.baseUrl))));
     if (duplicate) throw new AgentError("INVALID_INPUT", `已存在同一 Key 的连接「${duplicate.name}」，请在那个连接里“选择型号”，不要重复创建入口。`);
     const allIds = state.connections.filter(item => item.id !== connection.id).flatMap(item => item.models.map(model => model.id));
+    const seenModelKeys = new Set<string>();
     for (const model of connection.models) {
       if (allIds.includes(model.id)) throw new AgentError("INVALID_INPUT", "型号条目标识重复。");
       allIds.push(model.id);
+      const modelKey = `${model.kind}\0${model.modelId}\0${model.baseUrl ?? ""}`;
+      if (seenModelKeys.has(modelKey)) throw new AgentError("INVALID_INPUT", "同一连接内不能重复添加相同用途与型号 ID。");
+      seenModelKeys.add(modelKey);
       if (model.contextWindowTokens !== null && model.maxOutputTokens !== null && model.maxOutputTokens >= model.contextWindowTokens) throw new AgentError("INVALID_INPUT", "最大输出必须小于上下文窗口。");
       if (model.isDefault && modelUnavailableReason(connection, model) !== null) {
         // 停用可清除默认，不强迫自动换用另一个收费型号。
@@ -452,6 +723,7 @@ export function saveProviderConnection(db: AgentDatabase, clock: AgentClock, own
     connections.push(connection);
     for (const item of connections) db.prepare("INSERT INTO provider_connections(id,configuration_json) VALUES(?,json_set(?,'$.apiKey',frame_seal(?))) ON CONFLICT(id) DO UPDATE SET configuration_json=excluded.configuration_json").run(item.id, canonicalJson(item), item.apiKey);
     const now = clock();
+    if (defaults.includes("speech")) clearEdgeTtsDefaultIfSet(db, now);
     projectExecutionVersions(db, connections, now);
     const changedConversations = invalidateRemovedMediaBindings(db, now, before);
     db.prepare("UPDATE provider_connection_settings SET revision=revision+1 WHERE id=1").run();
@@ -474,4 +746,24 @@ export function listAvailableProviderModels(db: AgentDatabase, connectionId: str
 
 export function probeProviderConnection(db: AgentDatabase, connectionId: string, fetcher: typeof fetch = fetch) {
   return probeAccountModels(requireSavedConnection(db, connectionId), fetcher);
+}
+
+/** 当 Edge 免费配音被显式设为默认配音时，在同一事务内清除付费配音连接的默认标记（保留 enabled 池内状态）。 */
+export function clearSpeechProviderDefault(db: AgentDatabase, now: string): void {
+  const settingsRow = db.prepare("SELECT 1 FROM provider_connection_settings WHERE id=1").get();
+  if (!settingsRow) return;
+  const state = readProviderConnections(db);
+  const hasSpeechDefault = state.connections.some(conn => conn.models.some(m => m.kind === "speech" && m.isDefault));
+  if (!hasSpeechDefault) return;
+  const nextConnections = state.connections.map(conn => ({
+    ...conn,
+    models: conn.models.map(m => (m.kind === "speech" && m.isDefault ? { ...m, isDefault: false } : m)),
+  }));
+  for (const item of nextConnections) {
+    db.prepare(
+      "INSERT INTO provider_connections(id,configuration_json) VALUES(?,json_set(?,'$.apiKey',frame_seal(?))) ON CONFLICT(id) DO UPDATE SET configuration_json=excluded.configuration_json",
+    ).run(item.id, canonicalJson(item), item.apiKey);
+  }
+  projectExecutionVersions(db, nextConnections, now);
+  db.prepare("UPDATE provider_connection_settings SET revision=revision+1 WHERE id=1").run();
 }

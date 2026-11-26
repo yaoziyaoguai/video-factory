@@ -881,6 +881,34 @@ export const MIGRATIONS: readonly {
         WHERE id=json_extract(command_receipts.receipt_json,'$.accounts[#-1].id')))
       WHERE operation='createStudioAccount'`,
   ] },
+  { version: 35, statements: [
+    // 原生 Colab/LTX 视频通道扩展：仅扩展 additional_media 两表的 channel_id CHECK，
+    // 不改动已有配置、历史版本、密封凭据或当前选择。
+    `CREATE TABLE additional_media_settings_v35(
+      channel_id TEXT PRIMARY KEY CHECK (channel_id IN ('openai-image','ark-image','openai-speech','minimax-speech','minimax-video','wan-video','colab-video')),
+      revision INTEGER NOT NULL CHECK (revision >= 0),
+      display_name TEXT NOT NULL,
+      current_configuration_revision_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    `INSERT INTO additional_media_settings_v35(channel_id,revision,display_name,current_configuration_revision_id,updated_at)
+      SELECT channel_id,revision,display_name,current_configuration_revision_id,updated_at FROM additional_media_settings`,
+    `DROP TABLE additional_media_settings`,
+    `ALTER TABLE additional_media_settings_v35 RENAME TO additional_media_settings`,
+    `CREATE TABLE additional_media_versions_v35(
+      configuration_revision_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL CHECK (channel_id IN ('ark-image','minimax-speech','openai-image','openai-speech','minimax-video','wan-video','colab-video')),
+      binding_json TEXT NOT NULL,
+      profile_json TEXT NOT NULL,
+      api_key TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `INSERT INTO additional_media_versions_v35(configuration_revision_id,channel_id,binding_json,profile_json,api_key,created_at)
+      SELECT configuration_revision_id,channel_id,binding_json,profile_json,api_key,created_at FROM additional_media_versions`,
+    `DROP TABLE additional_media_versions`,
+    `ALTER TABLE additional_media_versions_v35 RENAME TO additional_media_versions`,
+    `CREATE INDEX additional_media_versions_binding ON additional_media_versions(binding_json)`,
+  ] },
 ];
 
 export function openAgentDatabase(dataDir: string): AgentDatabase {

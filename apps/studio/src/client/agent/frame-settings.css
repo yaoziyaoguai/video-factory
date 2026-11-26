@@ -83,20 +83,24 @@
 .agent-root .agent-config-field input[readonly] { background:var(--frame-soft); color:var(--frame-muted); }
 
 /* 模型页：每类一个当前使用 + 备选；连接与 Key 只在连接配置弹窗中编辑。 */
-.agent-models-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin:0 0 18px; }
-.agent-models-heading p { margin:0; color:var(--frame-muted); font-size:12px; }
-.agent-models-heading .agent-model-config-button { display:flex; align-items:center; gap:6px; }
-.agent-models-heading .agent-model-config-button svg { width:14px; height:14px; }
-.agent-model-tabs { border-bottom:1px solid var(--frame-line); margin-bottom:22px; }
+.agent-models-heading { display:flex; justify-content:space-between; align-items:center; gap:12px 16px; flex-wrap:wrap; margin:0 0 18px; }
+.agent-models-heading p { margin:0; color:var(--frame-muted); font-size:12px; flex:1 1 220px; }
+.agent-models-heading .agent-model-config-button { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; flex-shrink:0; }
+.agent-models-heading .agent-model-config-button svg { width:14px; height:14px; flex-shrink:0; }
+.agent-model-tabs { border-bottom:1px solid var(--frame-line); margin-bottom:22px; flex-wrap:wrap; row-gap:2px; }
 .agent-current-model { border:1px solid var(--frame-line); border-radius:10px; background:#fff; padding:18px 22px 20px; }
-.agent-current-label { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:12px; }
-.agent-current-label > span { display:flex; align-items:center; gap:7px; color:var(--frame-muted); font-size:12px; }
-.agent-current-label > span svg { width:15px; height:15px; }
+.agent-current-label { display:flex; justify-content:space-between; align-items:center; gap:8px 16px; flex-wrap:wrap; margin-bottom:12px; }
+.agent-current-label > span { display:flex; align-items:center; gap:7px; flex-wrap:wrap; color:var(--frame-muted); font-size:12px; }
+.agent-current-label > span svg { width:15px; height:15px; flex-shrink:0; }
 .agent-current-status { color:var(--frame-green) !important; }
-.agent-current-status svg { width:13px; height:13px; }
+.agent-current-status svg { width:13px; height:13px; flex-shrink:0; }
+.agent-pool-count-pill { font-style:normal; font-size:11px; padding:1px 7px; border-radius:999px; background:var(--frame-soft); color:var(--frame-green); border:1px solid #d7e2d9; white-space:nowrap; flex-shrink:0; }
+.agent-pool-ready-badge { display:inline-block; font-style:normal; font-weight:500; font-size:10px; margin-left:8px; padding:1px 6px; border-radius:4px; background:#edf5ee; color:var(--frame-green); border:1px solid #cfe0d2; vertical-align:middle; white-space:nowrap; }
+.agent-clear-default-link { color:var(--frame-muted) !important; font-size:12px; white-space:nowrap; }
+.agent-clear-default-link:hover { color:var(--frame-accent) !important; }
 .agent-connection-unavailable { color:#7a5c3e; }
-.agent-current-model h3 { display:flex; align-items:center; gap:12px; margin:0 0 6px; color:var(--frame-ink); font-size:17px; font-weight:600; }
-.agent-current-model h3 .agent-text-link { font-weight:400; }
+.agent-current-model h3 { display:flex; align-items:center; gap:8px 12px; flex-wrap:wrap; margin:0 0 6px; color:var(--frame-ink); font-size:17px; font-weight:600; }
+.agent-current-model h3 .agent-text-link { font-weight:400; white-space:nowrap; }
 .agent-current-model > code { display:block; overflow-wrap:anywhere; font-size:12px; color:var(--frame-muted); }
 .agent-current-model > p { margin:8px 0 0; font-size:12px; color:var(--frame-muted); line-height:1.7; }
 .agent-model-picker { display:flex; align-items:flex-end; gap:12px; flex-wrap:wrap; margin-top:16px; padding-top:16px; border-top:1px dashed var(--frame-line); }
@@ -206,3 +210,19 @@
 .agent-config-field input,.agent-config-field select,.agent-config-field textarea { display:block; width:100%; margin-top:4px; border:1px solid var(--frame-line); border-radius:6px; padding:8px 10px; font-size:13px; color:var(--frame-ink); background:#fff; }
 .agent-config-field textarea { resize:vertical; }
 .agent-config-summary { margin:2px 0 12px; padding:9px 12px; border:1px dashed var(--frame-line); border-radius:8px; color:var(--frame-muted); font-size:12px; line-height:1.8; }
+@media (max-width:640px) {
+  .agent-settings-page { padding:18px 16px 36px; }
+  .agent-settings-heading { flex-wrap:wrap; padding:6px 0 14px; margin-bottom:16px; }
+  .agent-settings-tabs { gap:12px; }
+  .agent-root .agent-settings-tabs>button { height:44px; font-size:12px; }
+  .agent-current-model { padding:14px 14px 16px; }
+  .agent-current-label { flex-direction:column; align-items:flex-start; gap:6px; }
+  .agent-backup-heading { flex-wrap:wrap; gap:10px; }
+  .agent-backup-row { flex-direction:column; align-items:flex-start; gap:10px; padding:12px 14px; }
+  .agent-backup-actions { width:100%; flex-wrap:wrap; }
+  .agent-root .agent-model-config-button,
+  .agent-model-picker .agent-primary-button,
+  .agent-model-picker select { min-height:44px; }
+  .agent-current-model h3 .agent-text-link { min-height:44px; display:inline-flex; align-items:center; padding:0 4px; }
+  .agent-backup-actions .agent-icon-button { min-width:44px; min-height:44px; display:inline-grid; place-items:center; }
+}

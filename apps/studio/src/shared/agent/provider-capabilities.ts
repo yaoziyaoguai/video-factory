@@ -10,6 +10,7 @@ export const providerAdapters: Record<ProviderConnection["protocol"], Adapter> =
   ark: { supportedKinds: ["text", "image", "video"], textApi: "openai-completions", accountDirectory: true },
   minimax: { supportedKinds: ["text", "video", "speech"], textApi: "openai-completions", accountDirectory: false },
   wan: { supportedKinds: ["video"], textApi: null, accountDirectory: false },
+  colab: { supportedKinds: ["video"], textApi: null, accountDirectory: false },
 };
 
 export function textBaseUrl(protocol: ProviderConnection["protocol"], baseUrl: string): string {

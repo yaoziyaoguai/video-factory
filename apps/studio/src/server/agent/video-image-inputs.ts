@@ -38,6 +38,7 @@ const profiles = {
     bodyLimit: 64_000_000,
   },
   wan: { minSide: 240, maxSide: 8000, maxAspect: 8, maxBytes: 20_000_000, refs: 10, lastOnly: false, bodyLimit: null },
+  colab: { minSide: 256, maxSide: 6000, maxAspect: 2.5, maxBytes: 30_000_000, refs: 0, lastOnly: false, bodyLimit: null },
 } as const;
 const supported = new Map<string, keyof typeof profiles>([
   ["doubao-seedance-2-5-260628", "ark"],
@@ -45,9 +46,13 @@ const supported = new Map<string, keyof typeof profiles>([
   ["MiniMax-H3-Max", "minimax"],
   ["wan3.0-video", "wan"],
   ["wan3.0-video-prime", "wan"],
+  ["Lightricks/LTX-2.5-distilled", "colab"],
 ]);
 export function videoImageFeatures(model: string): string[] {
-  return supported.has(model) ? ["i2v", "first-last-frame", "subject-ref"] : [];
+  const provider = supported.get(model);
+  if (!provider) return [];
+  if (provider === "colab") return ["i2v"];
+  return ["i2v", "first-last-frame", "subject-ref"];
 }
 export function videoImageSlots(p: VideoParameters): Slot[] {
   const slots: Slot[] = [];
@@ -113,6 +118,8 @@ export function validateVideoImages(
     throw new AgentError("CAPABILITY_UNAVAILABLE", "首尾帧和角色参考图须分别制作。");
   if (p.lastFrameSlot !== undefined && p.firstFrameSlot === undefined && !profile.lastOnly)
     throw new AgentError("CAPABILITY_UNAVAILABLE", "该型号的尾帧须和首帧一起使用。");
+  if (provider === "colab" && p.lastFrameSlot !== undefined)
+    throw new AgentError("CAPABILITY_UNAVAILABLE", "Colab LTX-2.5 当前只支持首帧图生视频，不支持尾帧。");
   if ((p.referenceImageSlots?.length ?? 0) > profile.refs)
     throw new AgentError("CAPABILITY_UNAVAILABLE", `该型号每次最多采用 ${profile.refs} 张参考图。`);
   if (!facts) return true;

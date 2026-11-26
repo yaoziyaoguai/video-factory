@@ -31,7 +31,7 @@ export function FrameSettings({ page, bootstrap, conversations, onConversation, 
   useEffect(() => { if (page === "skills") setSkillsVisited(true); }, [page]);
   return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"} data-page={page}><div className="agent-settings-content">
     <header className="agent-settings-heading"><h1>{framePageTitle[page]}</h1><button type="button" className="agent-settings-back" onClick={() => onPage("chat")}><ArrowLeft aria-hidden="true" />返回对话</button></header>
-    {canManage && page === "team" ? <TeamSettings /> : canManage && page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : canManage && page === "services" ? <ServicesDirectory />
+    {canManage && page === "team" ? <TeamSettings /> : canManage && page === "models" ? <ModelConnectionsPanel bootstrap={bootstrap} onPage={onPage} onCatalogRefresh={onCatalogRefresh} /> : canManage && page === "services" ? <ServicesDirectory />
       : page === "library" && onLibraryBringIn ? <WorkLibrary onBringIn={onLibraryBringIn} bringTarget={libraryBringTarget ?? "new"} /> : page === "profile" ? <ProfileEditor onStorageCleaned={onStorageCleaned} bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} budgetPanel={onBudgetRetry ? <ProfileBudget value={budget} issue={budgetIssue} onRetry={onBudgetRetry} /> : null} /> : null}
     {canManage && (skillsVisited || page === "skills") ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}
   </div></section>;

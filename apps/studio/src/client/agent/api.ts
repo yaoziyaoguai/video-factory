@@ -3,7 +3,7 @@ import { notifyAuthenticationLoss } from "../auth-api.js";
 import type {
   ArtifactDraft, ArtifactHead, ArtifactRevision, Bootstrap, Conversation, ConversationPage, FeedbackInput, FeedbackReceipt,
   Message, MessageInput, MessagePage, Proposal, RequestReceipt, Snapshot, Target, ContextStatus, RequestProgress,
-  Error as ContractError, BusinessEvent, TextDelta, ArtifactPage, ProposalPage, Run, RunPage, AdmissionReceipt, AcceptProposal, CancelReceipt, CancelRun,
+  Error as ContractError, BusinessEvent, TextDelta, ArtifactPage, ProposalPage, Run, RunPage, AdmissionReceipt, AcceptProposal, RebindProposal, CancelReceipt, CancelRun,
   LibraryVideo, LibraryVideoPage,
   Work, MaterialBatch, ReviewApprovalHistoryPage, WorkPage,
   UserProfile, SaveUserProfile, SaveUserProfileReceipt, StorageUsage, CleanupStorage, StorageCleanupReceipt,
@@ -190,6 +190,7 @@ export const agentApi = {
   reviewApprovalHistory: (workId: string, groupId: string, itemId: string, cursor?: string) => requestJson<ReviewApprovalHistoryPage>("GET", `/api/agent/v1/works/${encodeURIComponent(workId)}/groups/${encodeURIComponent(groupId)}/items/${encodeURIComponent(itemId)}/approvals${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   readMaterialBatch: (id: string) => requestJson<MaterialBatch>("GET", `/api/agent/v1/material-batches/${encodeURIComponent(id)}`),
   acceptProposal: (id: string, input: AcceptProposal) => requestJson<AdmissionReceipt>("POST", `/api/agent/v1/proposals/${encodeURIComponent(id)}/acceptances`, input),
+  rebindProposal: (id: string, input: RebindProposal) => requestJson<Proposal>("POST", `/api/agent/v1/proposals/${encodeURIComponent(id)}/rebind`, input),
   cancelRun: (id: string, input: CancelRun) => requestJson<CancelReceipt>("POST", `/api/agent/v1/runs/${encodeURIComponent(id)}/cancellations`, input),
   loadMoreRuns: (id: string, cursor: string) => requestJson<RunPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/runs?cursor=${encodeURIComponent(cursor)}`),
   loadMoreWorks: (id: string, cursor: string) => requestJson<WorkPage>("GET", `/api/agent/v1/conversations/${encodeURIComponent(id)}/works?cursor=${encodeURIComponent(cursor)}`),

@@ -10,9 +10,12 @@ import type { Multipart } from "@fastify/multipart";
 import type { ProductionBlobs } from "./production-blobs.js";
 import { uploadConversationMedia, resolveUploads } from "./conversation-uploads.js";
 import type { MediaRetention } from "./media-retention.js";
-import { readProviderConnections, saveProviderConnection, listAvailableProviderModels, probeProviderConnection } from "./provider-connections.js";
+import {
+  readProviderConnections, saveProviderConnection, listAvailableProviderModels, probeProviderConnection,
+  currentMediaBindings, invalidateRemovedMediaBindings, clearSpeechProviderDefault,
+} from "./provider-connections.js";
 import type {
-  AcceptProposal, ArtifactHead, ArtifactRevision, Bootstrap, CancelRun, Conversation, ConversationPage,
+  AcceptProposal, RebindProposal, ArtifactHead, ArtifactRevision, Bootstrap, CancelRun, Conversation, ConversationPage,
   ContentSource, CreateConversation, FeedbackInput, FeedbackReceipt, LibrarySelection, LibraryVideo, LibraryVideoPage, Message,
   MessageInput, MessagePage, MessageReferences, ModelBinding, Proposal, ProposalPage, RenameConversation,
   RequestReceipt, RevisionRef, RunPage, Snapshot, StopRequest, Target,
@@ -36,7 +39,7 @@ import {
 import {
   feedbackNote, getArtifactRow, getProposalRow, getRevisionRow, insertRevision, listArtifactRows, listProposalRows,
   maxArtifactSeq, maxProposalSeq, rowToArtifactHead, rowToArtifactRevision, rowToProposal, productionAudioFacts,
-  bindReviewedVideoImages, applyPrepareProposal, requirePaidProduction, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
+  bindReviewedVideoImages, applyPrepareProposal, applyRebindProposal, requirePaidProduction, sweepExpiredProposals, invalidateLegacyNarrationProposals, hasProductionLock, NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
 import { probeRenderInputs } from "./media-probe.js";
@@ -252,7 +255,20 @@ export class AgentService {
   saveFreeServiceSettings(ownerId: string, serviceId: string, input: unknown): SaveFreeServiceSettingsReceipt {
     const id = freeServiceIdOf(serviceId);
     if (id === "newsnow") return saveNewsNowServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveNewsNowSettings);
-    if (id === "edge-tts") return saveEdgeTtsServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveEdgeTtsSettings);
+    if (id === "edge-tts") {
+      const before = currentMediaBindings(this.options.db);
+      const { receipt, changed } = this.options.db.transaction(() => {
+        const saved = saveEdgeTtsServiceSettings(this.options.db, this.options.clock, ownerId, input as SaveEdgeTtsSettings);
+        if (saved.settings.serviceId === "edge-tts" && saved.settings.enabled && saved.settings.isDefault === true) {
+          clearSpeechProviderDefault(this.options.db, this.options.clock());
+        }
+        const invalidated = invalidateRemovedMediaBindings(this.options.db, this.options.clock(), before);
+        return { receipt: saved, changed: invalidated };
+      })();
+      this.options.refreshMediaModels?.();
+      for (const convId of changed) this.options.hub.notifyCommitted(convId);
+      return receipt;
+    }
     if (id === "pexels" || id === "pixabay" || id === "unsplash" || id === "coverr") {
       return saveKeyedServiceSettings(this.options.db, this.options.clock, ownerId, id, input as SavePexelsSettings);
     }
@@ -1138,6 +1154,59 @@ export class AgentService {
     const row = getProposalRow(this.options.db, ownerId, proposalId);
     if (!row) throw new AgentError("NOT_FOUND", "没有找到这个提案。");
     return rowToProposal(row, this.options.db, this.options.catalog());
+  }
+
+  async rebindProposal(ownerId: string, proposalId: string, input: RebindProposal): Promise<{ proposal: Proposal; replayed: boolean }> {
+    const verdict = validatorFor("RebindProposal")(input);
+    if (!verdict.ok) throw new AgentError("INVALID_INPUT", verdict.message);
+    const existing = getProposalRow(this.options.db, ownerId, proposalId);
+    if (!existing) throw new AgentError("NOT_FOUND", "没有找到这个提案。");
+    const key = { ownerId, operation: "rebindProposal", targetId: proposalId, commandId: input.commandId };
+    const prior = checkCommandReceipt<Proposal>(this.options.db, key, input);
+    if (prior.kind === "replay") return { proposal: prior.receipt, replayed: true };
+
+    const catalog = this.options.catalog();
+    const spec = JSON.parse(existing.spec_json) as ProductionSpec;
+    let probes: Map<string, RenderFileProbe> | undefined;
+    if ("type" in spec && (
+      spec.operations.some(op => op.kind === "video" && videoImageSlots(op.parameters).length)
+      || catalog[RENDER_CATALOG_KEY]?.probeRenderInputs
+      || catalog[NARRATED_CATALOG_KEY]?.probeRenderInputs
+      || catalog[TIMED_NARRATED_CATALOG_KEY]?.probeRenderInputs
+      || catalog["render:mixed_concat"]?.probeRenderInputs
+    )) {
+      const blobs = this.options.production?.blobs ?? this.options.blobs;
+      if (blobs) {
+        probes = await probeRenderInputs(this.options.db, blobs, { ownerId, conversationId: existing.conversation_id }, spec);
+      }
+    }
+
+    const result = this.options.db.transaction(() => {
+      const replay = checkCommandReceipt<Proposal>(this.options.db, key, input);
+      if (replay.kind === "replay") return { proposal: replay.receipt, replayed: true };
+      const fresh = getProposalRow(this.options.db, ownerId, proposalId);
+      if (!fresh) throw new AgentError("NOT_FOUND", "没有找到这个提案。");
+      if (fresh.digest !== input.expectedDigest) {
+        throw new AgentError("PROPOSAL_STALE", "提案内容或摘要已更新，请基于最新报价再调整。");
+      }
+      const now = this.options.clock();
+      const updated = applyRebindProposal(
+        this.options.db,
+        now,
+        { ownerId, conversationId: fresh.conversation_id },
+        fresh,
+        input.changes,
+        this.options.catalog(),
+        probes,
+      );
+      const payload = rowToProposal(updated, this.options.db, this.options.catalog());
+      storeCommandReceipt(this.options.db, now, key, input, payload);
+      touchConversation(this.options.db, now, fresh.conversation_id);
+      return { proposal: payload, replayed: false };
+    }).immediate();
+
+    this.options.hub.notifyCommitted(existing.conversation_id);
+    return result;
   }
 
   acceptProposal(ownerId: string, proposalId: string, input: AcceptProposal) {

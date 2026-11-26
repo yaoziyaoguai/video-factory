@@ -326,6 +326,12 @@ export async function agentRoutes(app: FastifyInstance, options: AgentPluginOpti
     return reply.code(202).send(service.acceptProposal(requireOwner(request), params.proposalId, body(request)));
   });
 
+  app.post("/proposals/:proposalId/rebind", async (request, reply) => {
+    const params = request.params as { proposalId: string };
+    const result = await service.rebindProposal(requireOwner(request), params.proposalId, body(request));
+    return reply.code(200).send(result.proposal);
+  });
+
   // 识音会拉起数百 MB 的 python + ffmpeg 子进程：客户端中途断开（刷新、关页）时立即中止并回收。
   // 断连不是路由故障：连接已不在，不回包也不记错误。
   app.post<{Params:{workId:string}}>("/works/:workId/subtitle-tracks",async(request,reply)=>{

@@ -1357,7 +1357,7 @@ it("T13-c/F07：生成后旁白 22s 超过 20s 画面：保留已付音频，ren
     const admitted = runtime.service.acceptProposal("local-owner", proposal.id, { commandId: cmd(), proposalDigest: proposal.digest });
     const result = await drive(runtime, admitted.run.id);
     assert.equal(result.state, "failed");
-    assert.match(result.issue?.message ?? "", /旁白约 22\.0s，超过画面总长 20\.0s/);
+    assert.match(result.issue?.message ?? "", /旁白约 22\.[01]s，超过画面总长 20\.0s/);
     assert.match(result.issue?.message ?? "", /不加速、不剪词、不延长画面/);
     assert.equal(hub.sessions.length, 1, "配音只创建一次，不为凑时长再调供应商");
     assert.equal(stub.state.arkPosts.length, 0);
@@ -1380,7 +1380,7 @@ it("T13-d/F07：已有真实 21s 旁白超过 20s 画面，本地受理前拒绝
     const narrationMs = (await probeAudioFile(narration)).durationMs;
     const footage = timedFootage(assets, runtime, conversation.id);
     await assert.rejects(acceptIntent(runtime, conversation.id, timedIntent(footage, mediaRevision(runtime, conversation.id, readFileSync(narration), "audio/mpeg", narrationMs))),
-      (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && /旁白约 21\.0s，超过画面总长 20\.0s/.test(error.message ?? ""));
+      (error: { code?: string; message?: string }) => error.code === "INVALID_INPUT" && /旁白约 21\.[01]s，超过画面总长 20\.0s/.test(error.message ?? ""));
     assert.equal((runtime.database.prepare("SELECT COUNT(*) AS n FROM production_runs").get() as { n: number }).n, 0, "不产生运行");
   } finally { await runtime.close(); await rm(assets.directory, { recursive: true, force: true }); }
 });

@@ -1,7 +1,8 @@
 import { providerAdapters } from "../../shared/agent/provider-capabilities.js";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { AudioLines, Check, ChevronDown, Cpu, Film, Image, KeyRound, Plus, RefreshCw, Settings2, Trash2, X } from "lucide-react";
-import type { AvailableProviderModels, ConnectionModel, ProviderConnection, ProviderConnectionSettings, SaveProviderConnection, ThinkingLevel } from "../../shared/agent/generated/contracts.js";
+import type { AvailableProviderModels, Bootstrap, ConnectionModel, ProviderConnection, ProviderConnectionSettings, SaveProviderConnection, ThinkingLevel } from "../../shared/agent/generated/contracts.js";
+import type { FramePage } from "./frame-pages.js";
 import { agentApi, AgentApiError } from "./api.js";
 
 // S3-01 模型页：按已认可 PreviewSettings 结构——每类一个“当前连接+具体型号”，
@@ -9,7 +10,7 @@ import { agentApi, AgentApiError } from "./api.js";
 // 全部事实来自 ProviderConnectionSettings；能力/适配状态如实展示，不自动选第一个。
 
 const kinds = [{ id: "text", label: "文本大模型", icon: Cpu }, { id: "image", label: "图片模型", icon: Image }, { id: "video", label: "视频模型", icon: Film }, { id: "speech", label: "配音模型", icon: AudioLines }] as const;
-const protocols = { openai: "OpenAI", "openai-chat-completions": "OpenAI 兼容", "anthropic-messages": "Anthropic", ark: "火山方舟", minimax: "MiniMax", wan: "万相" } as const;
+const protocols = { openai: "OpenAI", "openai-chat-completions": "OpenAI 兼容", "anthropic-messages": "Anthropic", ark: "火山方舟", minimax: "MiniMax", wan: "万相", colab: "Google Colab (LTX-2.5)" } as const;
 // OpenAI 文本/图片/配音的工程初始输出上限（A2）；保存边界按该型号实际上限核对。
 const OPENAI_DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 const thinkingLabels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
@@ -22,7 +23,15 @@ function connectionSupportsKind(connection: ProviderConnection, kind: Connection
   return providerAdapters[connection.protocol].supportedKinds.includes(kind);
 }
 
-export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: () => Promise<void> }) {
+export function ModelConnectionsPanel({
+  onCatalogRefresh,
+  bootstrap = null,
+  onPage,
+}: {
+  onCatalogRefresh: () => Promise<void>;
+  bootstrap?: Bootstrap | null | undefined;
+  onPage?: ((page: FramePage) => void) | undefined;
+}) {
   const [settings, setSettings] = useState<ProviderConnectionSettings | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -99,6 +108,49 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
     await commit(draft, `当前模型已切换到 ${model.name}。已有制作保持原方案。`);
   };
 
+  const clearDefault = async () => {
+    if (!current || kind === "text") return;
+    const draft = {
+      ...current.connection,
+      models: current.connection.models.map(item => item.kind === kind ? { ...item, isDefault: false } : item),
+    };
+    setPickModelId("");
+    await commit(
+      draft,
+      `已取消默认${kindLabel}；池内已启用的模型仍可在每次制作提案卡片中选用。`,
+    );
+  };
+
+  const setEdgeDefault = async (makeDefault: boolean) => {
+    if (busy || kind !== "speech") return;
+    setBusy(true); setNotice(""); setError("");
+    try {
+      const edgeCurrent = await agentApi.readFreeServiceSettings("edge-tts");
+      if (edgeCurrent.serviceId !== "edge-tts") return;
+      await agentApi.saveFreeServiceSettings("edge-tts", {
+        commandId: agentApi.newCommandId(),
+        expectedRevision: edgeCurrent.revision,
+        enabled: true,
+        voice: edgeCurrent.voice,
+        isDefault: makeDefault,
+      });
+      if (!active.current) return;
+      setPickModelId("");
+      setSettings(await agentApi.readProviderConnections());
+      setNotice(
+        makeDefault
+          ? "当前新提案默认已切换到 Edge 免费配音；池内付费模型仍可按次选用。"
+          : "已取消默认配音模型；池内已启用的模型（含 Edge 免费配音）仍可在每次制作提案卡片中选用。",
+      );
+      try { await onCatalogRefresh(); } catch { setError("配置已保存，但工作台状态刷新失败，请刷新页面。"); }
+    } catch (fault) {
+      if (!active.current) return;
+      setNotice(fault instanceof AgentApiError ? fault.payload.message : "免费配音默认状态保存失败，请重试。");
+    } finally {
+      if (active.current) setBusy(false);
+    }
+  };
+
   const removeModel = (connection: ProviderConnection, model: ConnectionModel) => {
     void commit({ ...connection, models: connection.models.filter(item => item.id !== model.id) }, `已从备选移除，连接和历史记录保留。`);
   };
@@ -125,7 +177,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
       if (!active.current) return;
       setDirectories(state => ({ ...state, [connectionId]: { models, loading: false, error: "" } }));
       const protocol = settings?.connections.find(item => item.id === connectionId)?.protocol;
-      setNotice(protocol === "minimax" || protocol === "wan"
+      setNotice(protocol === "minimax" || protocol === "wan" || protocol === "colab"
         ? "本地适配目录已刷新，账户可用性尚未验证；当前模型与备选保持不变。"
         : "目录已刷新，当前模型与备选保持不变。");
     } catch (fault) {
@@ -177,9 +229,17 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
     if (!directories[connection.id]?.models && !directories[connection.id]?.loading) void syncDirectory(connection.id);
   };
 
+  const isPoolKind = kind !== "text";
+  const edgeSpeechEntry = kind === "speech"
+    ? bootstrap?.models.find(item => item.kind === "speech" && item.binding.providerId === "edge-tts" && item.availability === "configured") ?? null
+    : null;
+  const readyPoolCount = kindConnections
+    .flatMap(connection => modelsOfKind(connection))
+    .filter(model => model.enabled && statusOf(model.id) === null).length + (edgeSpeechEntry ? 1 : 0);
+
   return <>
     <div className="agent-models-heading">
-      <p>每类一个当前使用，按需保留备选。</p>
+      <p>{isPoolKind ? "同类多个已启用连接与型号并存组成模型池；至多设一个默认，制作确认卡可临时改选。" : "文本对话直接使用当前选定模型，也可保留备选。"}</p>
       {settings?.connections.length
         ? <button className="agent-model-config-button" disabled={actionsDisabled}
           onClick={event => openEditor(event.currentTarget, { mode: "connection", connectionId: current?.connection.id ?? settings.connections[0]!.id, modelId: null })}>
@@ -201,21 +261,31 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
     {settings ? <>
       <article className="agent-current-model" aria-label={`当前${kindLabel}`}>
         <div className="agent-current-label">
-          <span>{(() => { const Icon = kinds.find(item => item.id === kind)!.icon; return <Icon aria-hidden="true" />; })()}当前使用</span>
+          <span>{(() => { const Icon = kinds.find(item => item.id === kind)!.icon; return <Icon aria-hidden="true" />; })()}{isPoolKind ? "默认模型（新提案预填）" : "当前使用"}{isPoolKind ? <em className="agent-pool-count-pill">模型池 {readyPoolCount} 项可用</em> : null}</span>
           {current ? (statusOf(current.model.id)
             ? <span className="agent-connection-unavailable">{statusOf(current.model.id)}</span>
-            : <span className="agent-current-status"><Check aria-hidden="true" />用于新的请求和方案</span>) : null}
+            : <span className="agent-current-status"><Check aria-hidden="true" />{isPoolKind ? "新制作提案默认预选 · 卡片可改" : "用于新的请求和方案"}</span>)
+            : edgeSpeechEntry && edgeSpeechEntry.isDefault ? <span className="agent-current-status"><Check aria-hidden="true" />新配音提案默认预选免费配音</span> : null}
         </div>
         {current ? <>
           <h3>{current.model.name}
             <button type="button" className="agent-text-link" disabled={actionsDisabled}
               onClick={event => openEditor(event.currentTarget, { mode: "model", connectionId: current.connection.id, modelId: current.model.id })}>编辑型号</button>
+            {isPoolKind ? <button type="button" className="agent-text-link agent-clear-default-link" disabled={actionsDisabled}
+              onClick={() => void clearDefault()}>取消默认</button> : null}
           </h3>
           {!current.model.name.includes(current.model.modelId) && <code>{current.model.modelId}</code>}
           <p>{current.connection.name}{current.model.features.length ? ` · ${current.model.features.join(" · ")}` : ""}</p>
+        </> : edgeSpeechEntry && edgeSpeechEntry.isDefault ? <>
+          <h3>{edgeSpeechEntry.name}
+            {onPage ? <button type="button" className="agent-text-link" onClick={() => onPage("services")}>配置默认音色</button> : null}
+            <button type="button" className="agent-text-link agent-clear-default-link" disabled={actionsDisabled}
+              onClick={() => void setEdgeDefault(false)}>取消默认</button>
+          </h3>
+          <p>免费服务 · 默认音色 {edgeSpeechEntry.defaultVoiceId ?? "zh-CN-XiaoxiaoNeural"} · {edgeSpeechEntry.costSummary ?? "¥0.00 免费配音"}</p>
         </> : <>
           <h3>还没有当前模型</h3>
-          <p>选择供应商和具体型号后应用。</p>
+          <p>{isPoolKind ? "可选择一项作为新提案预填的默认模型；不设默认时，下方池内已启用的模型仍可在每次制作提案卡片中按需选择。" : "选择供应商和具体型号后应用。"}</p>
         </>}
         <form className="agent-model-picker" onSubmit={event => { event.preventDefault(); if (pickConnection && pickModel) void setCurrent(pickConnection, pickModel); }}>
           <label>{kind === "text" ? "文本连接" : "供应商连接"}
@@ -231,7 +301,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
               {pickChoices.map(item => {
                 const reason = statusOf(item.id);
                 return <option key={item.id} value={item.id} disabled={Boolean(reason)}>
-                  {item.name}{item.name.includes(item.modelId) ? "" : ` · ${item.modelId}`}{reason ? `（${reason}）` : item.isDefault ? "（当前）" : ""}
+                  {item.name}{item.name.includes(item.modelId) ? "" : ` · ${item.modelId}`}{reason ? `（${reason}）` : item.isDefault ? (isPoolKind ? "（默认）" : "（当前）") : ""}
                 </option>;
               })}
             </select>
@@ -253,7 +323,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
         ) : null}
       </article>
       <div className="agent-backup-heading">
-        <h3>备选模型 <span>{backups.length}</span></h3>
+        <h3>{isPoolKind ? "池内其他模型 · 备选模型" : "备选模型"} <span>{backups.length + (edgeSpeechEntry && !edgeSpeechEntry.isDefault ? 1 : 0)}</span></h3>
         <button type="button" className="agent-model-config-button" aria-expanded={managing} disabled={!kindConnections.length} onClick={() => {
           if (!managing && pickConnection) showDirectory(pickConnection);
           setManaging(!managing); setNotice(""); setRemoving(null);
@@ -262,24 +332,36 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
         </button>
       </div>
       {!managing && <div className="agent-backup-list">
+        {edgeSpeechEntry && !edgeSpeechEntry.isDefault ? <div className="agent-backup-row">
+          <div>
+            <strong>{edgeSpeechEntry.name}<em className="agent-pool-ready-badge">池内可用</em></strong>
+            <span>免费服务</span>
+            <code>edge-tts · {edgeSpeechEntry.defaultVoiceId ?? "zh-CN-XiaoxiaoNeural"}</code>
+            <p>{edgeSpeechEntry.costSummary ?? "¥0.00 免费配音"} · 生成 MP3 与词级时间边界</p>
+          </div>
+          <div className="agent-backup-actions">
+            <button type="button" className="agent-model-config-button" disabled={actionsDisabled} onClick={() => void setEdgeDefault(true)}>设为默认</button>
+            {onPage ? <button type="button" className="agent-model-config-button" onClick={() => onPage("services")}>免费服务设置</button> : null}
+          </div>
+        </div> : null}
         {backups.length ? backups.map(({ connection, model }) => {
           const reason = statusOf(model.id);
           return <div className="agent-backup-row" key={model.id}>
             <div>
-              <strong>{model.name}</strong>
+              <strong>{model.name}{isPoolKind && !reason ? <em className="agent-pool-ready-badge">池内可用</em> : null}</strong>
               <span>{connection.name}</span>
               {!model.name.includes(model.modelId) && <code>{model.modelId}</code>}
               {model.features.length ? <p>{model.features.join(" · ")}</p> : null}
             </div>
             <div className="agent-backup-actions">
               {reason ? <span className="agent-connection-unavailable">{reason}</span>
-                : <button type="button" className="agent-model-config-button" disabled={actionsDisabled} onClick={() => void setCurrent(connection, model)}>设为当前</button>}
+                : <button type="button" className="agent-model-config-button" disabled={actionsDisabled} onClick={() => void setCurrent(connection, model)}>{isPoolKind ? "设为默认" : "设为当前"}</button>}
               <button type="button" className="agent-icon-button" aria-label={`编辑型号 ${model.name}`} disabled={actionsDisabled}
                 onClick={event => openEditor(event.currentTarget, { mode: "model", connectionId: connection.id, modelId: model.id })}><Settings2 aria-hidden="true" /></button>
               <button type="button" className="agent-icon-button" aria-label={`移除 ${model.name}`} disabled={actionsDisabled} onClick={() => removeModel(connection, model)}><Trash2 aria-hidden="true" /></button>
             </div>
           </div>;
-        }) : <p className="agent-settings-note">还没有备选；可在“管理备选”里从目录勾选保留。</p>}
+        }) : !(edgeSpeechEntry && !edgeSpeechEntry.isDefault) ? <p className="agent-settings-note">{isPoolKind ? "池内暂无其他备选；可在“管理备选”里勾选启用同类别其他连接或型号。" : "还没有备选；可在“管理备选”里从目录勾选保留。"}</p> : null}
       </div>}
       {removing ? <div className="agent-inline-confirm" role="alert">
         <p>这是当前使用的模型。移除后，此类暂时不可用；不会自动换成其他模型。</p>
@@ -303,7 +385,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
         {directoryConnection && (() => {
           const connection = directoryConnection;
           const directory = directories[connection.id];
-          const localDirectory = connection.protocol === "minimax" || connection.protocol === "wan";
+          const localDirectory = connection.protocol === "minimax" || connection.protocol === "wan" || connection.protocol === "colab";
           const listing = directory?.models ?? null;
           const registered = modelsOfKind(connection);
           const entryOf = (id: string) => listing?.models.find(item => item.id === id) ?? null;
@@ -335,15 +417,15 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
                 }} />
                 <span>
                   <strong>{name}</strong>
-                  {registeredModel?.isDefault && <span className="agent-directory-current">当前使用</span>}
+                  {registeredModel?.isDefault && <span className="agent-directory-current">{isPoolKind ? "默认" : "当前使用"}</span>}
                   {!name.includes(id) && <small>{id}</small>}
                   {status && <small>{status}</small>}
                   {registeredModel && statusOf(registeredModel.id) ? <small className="agent-connection-unavailable">{statusOf(registeredModel.id)}</small> : null}
                 </span>
               </label>
                 {registeredModel && !registeredModel.isDefault && !statusOf(registeredModel.id) &&
-                  <button type="button" className="agent-text-link" disabled={actionsDisabled} aria-label={`将 ${name} 设为当前`}
-                    onClick={() => void setCurrent(connection, registeredModel)}>设为当前</button>}
+                  <button type="button" className="agent-text-link" disabled={actionsDisabled} aria-label={`将 ${name} ${isPoolKind ? "设为默认" : "设为当前"}`}
+                    onClick={() => void setCurrent(connection, registeredModel)}>{isPoolKind ? "设为默认" : "设为当前"}</button>}
               </div>;
             }) : <p className="agent-config-note">{directory?.loading ? "正在读取型号…" : query ? "没有匹配的型号，试试更短的名称或 ID。" : `还没有可选${kindLabel}，可重新同步目录。`}</p>}
             </div>
@@ -360,7 +442,7 @@ export function ModelConnectionsPanel({ onCatalogRefresh }: { onCatalogRefresh: 
       </div> : null}
       {settings.connections.length > 0 && kindConnections.length === 0 ? <div className="agent-settings-empty">
         <Cpu aria-hidden="true" /><h3>{kind === "video" ? "还没有视频供应商连接" : kind === "speech" ? "还没有配音供应商连接" : kind === "image" ? "还没有图片供应商连接" : "还没有 OpenAI 连接"}</h3>
-        <p>{kind === "video" ? "添加火山方舟、MiniMax 或万相连接。" : kind === "speech" ? "添加 OpenAI 或 MiniMax 连接。" : kind === "image" ? "配置 OpenAI 或火山方舟连接。"  : "配置文本模型连接。"}</p>
+        <p>{kind === "video" ? "添加火山方舟、MiniMax、万相或 Google Colab 连接。" : kind === "speech" ? "添加 OpenAI 或 MiniMax 连接。" : kind === "image" ? "配置 OpenAI 或火山方舟连接。"  : "配置文本模型连接。"}</p>
         <button type="button" className="agent-model-config-button" onClick={event => openEditor(event.currentTarget, { mode: "connection", connectionId: null, modelId: null })}><Plus aria-hidden="true" />添加连接</button>
       </div> : null}
       <p className="agent-service-footnote">连接共用 Key。切换当前模型只影响新的请求与方案，正在制作的版本不变。</p>
@@ -485,9 +567,16 @@ function ConnectionEditor({ mode, connectionId, modelId, settings, onSaved, onCl
           <option value={NEW_CONNECTION}>新建连接…</option>
         </select></label>
         <label className="agent-config-field">连接名称<input required maxLength={100} value={connection.name} onChange={event => change({ name: event.target.value })} placeholder="例如：通义千问、我的中转服务" /></label>
-        <label className="agent-config-field">接口协议<select value={connection.protocol} onChange={event => change({ protocol: event.target.value as ProviderConnection["protocol"] })}>{(Object.keys(providerAdapters) as ProviderConnection["protocol"][]).map(id => <option key={id} value={id}>{protocols[id]}</option>)}</select></label>
-        <label className="agent-config-field">接口地址<input required type="url" value={connection.baseUrl} onChange={event => change({ baseUrl: event.target.value })} placeholder={connection.protocol === "openai" ? "https://api.openai.com/v1" : connection.protocol === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : connection.protocol === "minimax" ? "https://api.minimax.cn" : connection.protocol === "wan" ? "https://ws.cn-beijing.maas.aliyuncs.com" : "https://供应商地址"} /></label>
-        <label className="agent-config-field">API Key<input type="text" value={connection.apiKey ?? ""} onChange={event => change({ apiKey: event.target.value || null })} autoComplete="off" spellCheck={false} placeholder={connection.credentialConfigured ? "已保存，不回显；留空保持不变" : "填写一次，所有已选型号共用"} /></label>
+        <label className="agent-config-field">接口协议<select value={connection.protocol} onChange={event => {
+          const nextProtocol = event.target.value as ProviderConnection["protocol"];
+          change({
+            protocol: nextProtocol,
+            ...(nextProtocol === "colab" && !connection.baseUrl ? { baseUrl: "https://colab.research.google.com" } : {}),
+          });
+        }}>{(Object.keys(providerAdapters) as ProviderConnection["protocol"][]).map(id => <option key={id} value={id}>{protocols[id]}</option>)}</select></label>
+        <label className="agent-config-field">接口地址<input required type="url" value={connection.baseUrl} onChange={event => change({ baseUrl: event.target.value })} placeholder={connection.protocol === "openai" ? "https://api.openai.com/v1" : connection.protocol === "ark" ? "https://ark.cn-beijing.volces.com/api/v3" : connection.protocol === "minimax" ? "https://api.minimax.cn" : connection.protocol === "wan" ? "https://ws.cn-beijing.maas.aliyuncs.com" : connection.protocol === "colab" ? "https://colab.research.google.com" : "https://供应商地址"} /></label>
+        <label className="agent-config-field">API Key<input type="text" value={connection.apiKey ?? ""} onChange={event => change({ apiKey: event.target.value || null })} autoComplete="off" spellCheck={false} placeholder={connection.credentialConfigured ? "已保存，不回显；留空保持不变" : connection.protocol === "colab" ? "填写 Hugging Face Read Token（hf_...），或填 host 复用宿主机凭据" : "填写一次，所有已选型号共用"} /></label>
+        {connection.protocol === "colab" ? <p className="agent-config-note">Google Colab 原生通道按实例时长消耗计算单元（CU），与厂商 API 视频型号共存，不产生人民币 API 扣费。</p> : null}
         {connection.protocol === "openai" ? <p className="agent-config-note">OpenAI 连接承载文本、图片、配音，三类共用这一份 Key；视频不在此连接。文本容量与推理档位来自 Pi 精确目录，不需要手填。</p> : null}
         {!creating && connection.credentialConfigured && providerAdapters[connection.protocol].accountDirectory && <button type="button" className="agent-secondary-button" disabled={dirty || probing} onClick={() => void probe()}>{probing ? "测试中…" : "测试连接"}</button>}
         {probeResult && <p role="status">{probeResult}</p>}

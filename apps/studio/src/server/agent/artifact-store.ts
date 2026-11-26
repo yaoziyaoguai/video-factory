@@ -1056,6 +1056,32 @@ export interface QuoteCatalogEntry {
   probeRenderInputs?: boolean;
   /** 待生成输出的冻结时长上界（ms）：视频通道按冻结 durationSeconds 计算，配音通道固定 120s；prepare 据此判断成片上限。 */
   outputDurationBoundMs?: number;
+  /** 多活模型池元数据：供提案快照冻结准备时的原默认、脱敏连接名与选择来源。 */
+  poolMeta?: {
+    kind: "image" | "video" | "speech";
+    isDefault: boolean;
+    connectionName: string;
+    modelName: string;
+    costSummary?: string;
+    externalUnit?: "colab_cu" | "flow_video_credits" | "flow_music_credits";
+    defaultVoiceId?: string;
+  };
+}
+
+/** 目录精确解析：优先按 ${kind}:${configurationRevisionId} 查找防止同型号多账号碰撞；
+ * 仅在完整 4 字段 ModelBinding 一致时兼容离线夹具的 ${kind}:${modelId} 键，绝不跨账号按裸 modelId 回退。 */
+export function lookupCatalogEntry(
+  catalog: QuoteCatalog,
+  op: { kind: string; model: ModelBinding | null; parameters?: unknown },
+): QuoteCatalogEntry | undefined {
+  if (op.model === null) {
+    const assembly = (op.parameters as { assembly?: string } | undefined)?.assembly;
+    return assembly ? catalog[`render:${assembly}`] : undefined;
+  }
+  const byRevision = catalog[`${op.kind}:${op.model.configurationRevisionId}`];
+  if (byRevision) return byRevision;
+  const byModel = catalog[`${op.kind}:${op.model.modelId}`];
+  return byModel?.binding && canonicalJson(byModel.binding) === canonicalJson(op.model) ? byModel : undefined;
 }
 
 /** 单一口径的每次尝试报价：参数化条目按操作参数计算，其余用定值。prepare 与 accept 共用。
@@ -1075,7 +1101,7 @@ export function acceptanceBlockerFor(db: AgentDatabase, ownerId: string, row: Pr
   const spec = JSON.parse(row.spec_json) as ProductionSpec | LegacyProductionSpec;
   // 能力与报价漂移：与 admit 相同的目录/绑定/报价比较。
   for (const op of spec.operations) {
-    const entry = catalog[op.kind === "render" ? `render:${op.parameters.assembly}` : `${op.kind}:${op.model.modelId}`];
+    const entry = lookupCatalogEntry(catalog, op);
     let textCodepoints: number | undefined;
     if (entry?.quoteMinorFor && op.kind === "speech") {
       const input = op.inputs[0] as Extract<typeof op.inputs[number], { kind: "text" | "artifact_revision" }>;
@@ -1085,12 +1111,19 @@ export function acceptanceBlockerFor(db: AgentDatabase, ownerId: string, row: Pr
     }
     if (!entry || canonicalJson(entry.binding) !== canonicalJson(op.model)
       || operationQuoteMinor(entry, op, textCodepoints) !== op.quotePerAttempt.amountMinor || entry.priceKind !== op.priceKind) {
-      return { code: "CAPABILITY_UNAVAILABLE", message: "模型配置或价格已变化，请重新准备提案。", action: "configure_capability" };
+      return { code: "CAPABILITY_UNAVAILABLE", message: "模型配置或价格已变化，请重新选择可用模型或重新准备提案。", action: "configure_capability" };
     }
     try { entry.validate?.(op); }
     catch {
       return { code: "CAPABILITY_UNAVAILABLE", message: "当前能力已不再支持这份提案，请重新准备。", action: "configure_capability" };
     }
+  }
+  if ("type" in spec && spec.selectionSources?.some(item => item.source === "pending_selection")) {
+    return {
+      code: "MODEL_SELECTION_REQUIRED",
+      message: "当前类别尚未设置默认模型，请先在提案卡片中选择本次使用的模型后再确认制作。",
+      action: "select_model",
+    };
   }
   const final = spec.operations.find(op => op.operationId === spec.finalOutput.operationId && op.outputSlot === spec.finalOutput.outputSlot);
   const finalIsVideo = finalOutputIsVideo(final);
@@ -1256,11 +1289,30 @@ export function productionAudioFacts(db: AgentDatabase, spec: AudioFactsSpec, ru
     const operation = source.operations.find(item => item.operationId === id)!;
     if (operation.kind === "speech") {
       const text = readInput(operation.inputs[0]!, source, beforeRun).texts.join("\n") || null;
+      const minimaxLabels: Record<string, string> = {
+        "Chinese (Mandarin)_Gentleman": "温润男声",
+        "Chinese (Mandarin)_News_Anchor": "新闻女声",
+        "Chinese (Mandarin)_Warm_Bestie": "温暖女声",
+        "Chinese (Mandarin)_Radio_Host": "电台男声",
+      };
+      const edgeLabels: Record<string, string> = {
+        "zh-CN-XiaoxiaoNeural": "晓晓 · 中文女声",
+        "zh-CN-YunxiNeural": "云希 · 中文男声",
+        "zh-CN-YunyangNeural": "云扬 · 新闻播报",
+        "zh-CN-XiaoyiNeural": "晓伊 · 活泼女声",
+        "en-US-AriaNeural": "Aria · 英文女声",
+        "en-US-GuyNeural": "Guy · 英文男声",
+      };
+      const providerName = operation.model.providerId === "minimax" ? "MiniMax"
+        : operation.model.providerId === "openai" ? "OpenAI"
+        : operation.model.providerId === "edge-tts" ? "Edge 免费配音" : null;
+      const voiceName = operation.model.providerId === "minimax"
+        ? (minimaxLabels[operation.parameters.voiceId] ?? operation.parameters.voiceId)
+        : operation.model.providerId === "edge-tts"
+        ? (edgeLabels[operation.parameters.voiceId] ?? operation.parameters.voiceId)
+        : operation.parameters.voiceId;
       return { ...empty, texts: text ? [text] : [], unknown: text === null, hasSpeech: true,
-        speech: { text, providerName: operation.model.providerId === "minimax" ? "MiniMax" : operation.model.providerId === "openai" ? "OpenAI" : null,
-          modelName: operation.model.modelId,
-          voiceName: operation.model.providerId === "minimax" && operation.parameters.voiceId === "Chinese (Mandarin)_Gentleman" ? "温润男声" : operation.parameters.voiceId,
-          timelineStartMs: 0, gain: 1 } };
+        speech: { text, providerName, modelName: operation.model.modelId, voiceName, timelineStartMs: 0, gain: 1 } };
     }
     if (operation.kind === "image") return empty;
     if (operation.kind === "video") return operation.parameters.audioMode === "none" ? empty : unknown;
@@ -1375,7 +1427,7 @@ export function normalizeToolIntent(intent: ToolProductionIntent, catalog: Quote
     ...intent,
     operations: intent.operations.map(op => ({
       ...op,
-      maxCreateAttempts: catalog[`${op.kind}:${op.model === null ? op.parameters.assembly : op.model.modelId}`]?.maxCreateAttempts ?? 1,
+      maxCreateAttempts: lookupCatalogEntry(catalog, op)?.maxCreateAttempts ?? 1,
     })) as ProductionIntent["operations"],
   };
 }
@@ -1721,7 +1773,7 @@ export function normalizeOperationInputs(
     }
     if (op.kind === "video" || op.kind === "speech") {
       // 待生成输出的时长未知；通道上界只作守卫，不视为已核实。视频按冻结时长参数取上界。
-      const boundEntry = catalog[`${op.kind}:${op.model.modelId}`];
+      const boundEntry = lookupCatalogEntry(catalog, op);
       durationBounds.set(id, op.kind === "video"
         ? op.parameters.durationSeconds * 1000
         : boundEntry?.outputDurationBoundMs ?? 0);
@@ -1777,6 +1829,7 @@ export function applyPrepareProposal(
   requestSource: RequestSource,
   probes?: Map<string, RenderFileProbe>,
   replacesProposal?: ProposalRef,
+  explicitSkillId?: string | null,
 ): { proposal: ProposalRow; replayed: boolean } {
   const work = intent.workId === null ? null : requireWork(db, scope.ownerId, scope.conversationId, intent.workId);
   // 实际输入与必要认可分开解析（§4.2.1）：inputSources 是执行输入清单，reviewInputs 是受理依据。
@@ -1816,7 +1869,7 @@ export function applyPrepareProposal(
   } else if (intent.outputTarget != null) {
     throw new AgentError("INVALID_INPUT", "只有最终视频制作才声明输出目标。");
   }
-  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, validation, renderParameters);
+  const spec = resolveSpec(intent, catalog, requestSource, inputSources, reviewInputs, validation, renderParameters, explicitSkillId);
   for (const operation of spec.operations) {
     if (operation.kind !== "render" || operation.parameters.assembly !== "mixed_concat") continue;
     const musicSource = musicSources.get(operation.operationId);
@@ -1856,8 +1909,8 @@ export function applyPrepareProposal(
   const estimate = spec.operations.some(op => op.priceKind === "estimate");
   // 估价来源按提案实际使用的目录条目说明（B2）：不写死任何通道的单价文案。
   const estimateNotes = [...new Set(spec.operations
-    .filter(op => (op.kind === "image" || op.kind === "speech") && op.model !== null)
-    .map(op => catalog[`${op.kind}:${op.model?.modelId}`]?.estimateNote)
+    .filter(op => (op.kind === "video" || op.kind === "image" || op.kind === "speech") && op.model !== null)
+    .map(op => lookupCatalogEntry(catalog, op)?.estimateNote)
     .filter((note): note is string => typeof note === "string"))].join("");
   // 仅当最终拼接的全部输入时长都已核实（blob/探测真实时长）才如实披露预计成片时长；
   // 待生成内容的通道上界只用于守卫（T6-09），写进“预计成片”会对用户虚报时长。
@@ -1895,6 +1948,103 @@ export function applyPrepareProposal(
   return { proposal: row, replayed: false };
 }
 
+function buildProposalPoolSnapshot(
+  operations: readonly OperationRequest[],
+  catalog: QuoteCatalog,
+  explicitSkillId?: string | null,
+): Pick<ProductionSpec, "defaultsAtPrepare" | "modelLabels" | "selectionSources"> {
+  const poolEntries = Object.values(catalog).filter(entry => entry.binding !== null && entry.poolMeta !== undefined);
+  if (poolEntries.length === 0) return {};
+
+  const involvedKinds = new Set<"image" | "video" | "speech">();
+  for (const op of operations) {
+    if (op.kind !== "render") involvedKinds.add(op.kind);
+  }
+  if (involvedKinds.size === 0) return {};
+
+  const defaultsAtPrepare: NonNullable<ProductionSpec["defaultsAtPrepare"]> = {};
+  const labelMap = new Map<string, NonNullable<ProductionSpec["modelLabels"]>[number]>();
+  const recordLabel = (entry: QuoteCatalogEntry | undefined) => {
+    if (!entry?.binding || !entry.poolMeta) return;
+    labelMap.set(entry.binding.configurationRevisionId, {
+      configurationRevisionId: entry.binding.configurationRevisionId,
+      connectionName: entry.poolMeta.connectionName,
+      modelName: entry.poolMeta.modelName,
+      ...(entry.poolMeta.costSummary ? { costSummary: entry.poolMeta.costSummary } : {}),
+      ...(entry.poolMeta.externalUnit ? { externalUnit: entry.poolMeta.externalUnit } : {}),
+      ...(entry.poolMeta.defaultVoiceId ? { defaultVoiceId: entry.poolMeta.defaultVoiceId } : {}),
+    });
+  };
+
+  for (const kind of involvedKinds) {
+    const defEntry = poolEntries.find(entry => entry.poolMeta?.kind === kind && entry.poolMeta.isDefault);
+    defaultsAtPrepare[kind] = defEntry?.binding ?? null;
+    recordLabel(defEntry);
+  }
+
+  const selectionSources: NonNullable<ProductionSpec["selectionSources"]> = [];
+  for (const op of operations) {
+    if (op.kind === "render") continue;
+    const entry = lookupCatalogEntry(catalog, op);
+    recordLabel(entry);
+    const defaultBinding = defaultsAtPrepare[op.kind] ?? null;
+    const declaredSource = "modelSource" in op ? op.modelSource : undefined;
+    const skillNamedColab = op.kind === "video" && explicitSkillId === "colab-ltx-video" && op.model.providerId === "colab";
+    if (defaultBinding !== null) {
+      const sameBinding = canonicalJson(defaultBinding) === canonicalJson(op.model);
+      const defEntry = catalog[`${op.kind}:${defaultBinding.configurationRevisionId}`];
+      const sameDefaultVoice = op.kind !== "speech"
+        || !defEntry?.poolMeta?.defaultVoiceId
+        || op.parameters.voiceId === defEntry.poolMeta.defaultVoiceId;
+      selectionSources.push({
+        operationId: op.operationId,
+        source: sameBinding && sameDefaultVoice ? "default" : "user_named",
+      });
+    } else if (declaredSource === "user_named" || skillNamedColab) {
+      selectionSources.push({ operationId: op.operationId, source: "user_named" });
+    } else {
+      selectionSources.push({ operationId: op.operationId, source: "pending_selection" });
+    }
+  }
+
+  return {
+    defaultsAtPrepare,
+    modelLabels: [...labelMap.values()],
+    selectionSources,
+  };
+}
+
+function buildPriceDisclosure(
+  spec: ProductionSpec,
+  catalog: QuoteCatalog,
+  durationBounds: Map<string, number>,
+  durationVerified: Map<string, boolean>,
+  insufficientReplacement = false,
+): string {
+  const final = spec.operations.find(op => op.operationId === spec.finalOutput.operationId)!;
+  const totalMinor = spec.operations.reduce((sum, op) => sum + (op.quotePerAttempt.amountMinor ?? 0) * op.maxCreateAttempts, 0);
+  const estimate = spec.operations.some(op => op.priceKind === "estimate");
+  const estimateNotes = [...new Set(spec.operations
+    .filter(op => (op.kind === "video" || op.kind === "image" || op.kind === "speech") && op.model !== null)
+    .map(op => lookupCatalogEntry(catalog, op)?.estimateNote)
+    .filter((note): note is string => typeof note === "string"))].join("");
+  const finalDurationBound = final.kind === "render" && durationVerified.get(final.operationId) === true
+    ? durationBounds.get(final.operationId) ?? 0 : 0;
+  const hasOrderedRender = spec.operations.some(op => op.kind === "render" && op.parameters.assembly === "ordered_concat");
+  const orderedPreserve = spec.operations.some(op => op.kind === "render" && op.parameters.assembly === "ordered_concat"
+    && (op.parameters as Extract<typeof op.parameters, { assembly: "ordered_concat" }>).audioMode === "preserve");
+  const audioPlanNote = spec.operations.some(op => op.kind === "render" && op.parameters.assembly === "mixed_concat")
+    ? "按冻结方案混音，原声、音乐与独立配音的实际选择见声音摘要；画面不延长、配音不剪词。" + (spec.operations.every(op => op.kind === "render") ? "本次仅本地重合成，复用已有媒体；render不产生媒体供应商费用。" : "新生成的配音或画面单独计费。")
+    : spec.operations.some(op => op.kind === "render" && op.parameters.assembly === "timed_narrated_concat")
+    ? "按方案裁切片段并用旁白替换原声；旁白不足补静音，超过画面总长则如实失败，不加速、不剪词、不延长画面。"
+    : spec.operations.some(op => op.kind === "render" && op.parameters.assembly === "narrated_concat")
+    ? "使用旁白替换原声；保留完整内容，必要时停留尾帧/补静音。"
+    : orderedPreserve
+    ? "按画面顺序拼接并保留各镜头原声，无音轨片段补等长静音。"
+    : hasOrderedRender ? "按画面顺序拼接并输出全片静音，不保留镜头原声。" : "";
+  return `${insufficientReplacement ? "旧报价已撤，本次报价未就绪：授权额度不足以覆盖制作，请按所需费用重新准备。" : ""}${spec.operations.length} 个操作，${estimate ? "估算" : "报价"} ${(totalMinor / 100).toFixed(2)} CNY；本次授权 ${(spec.maxSpend.amountMinor / 100).toFixed(2)} CNY。${estimate ? "估算不代表供应商账单封顶。" : ""}${estimateNotes}${audioPlanNote}${finalDurationBound > 0 ? `按当前输入预计成片约 ${(finalDurationBound / 1000).toFixed(1)} 秒（${spec.operations.some(op => op.kind === "render" && (op.parameters.assembly === "timed_narrated_concat" || op.parameters.assembly === "mixed_concat")) ? "时长取冻结片段之和，按片段顺序裁切" : "拼接完整保留素材与旁白长度，不做裁剪"}）。` : ""}${spec.operations.some(op => op.model?.providerId === "fixture-text") ? "模拟媒体，仅验证流程，不发生真实扣费。" : ""}`;
+}
+
 // 服务端解析：报价与能力都来自本地核实目录；render 也必须有显式条目，不存在“model=null 即免费可用”。
 // 准备时校验能力并派生报价；受理仅复核当时的目录/绑定/报价，不重验冻结结构。
 export function resolveSpec(
@@ -1905,15 +2055,28 @@ export function resolveSpec(
   reviewInputs: ReviewInput[],
   ctx: CatalogValidationContext,
   renderParameters: Map<string, RenderParameters>,
+  explicitSkillId?: string | null,
 ): ProductionSpec {
+  const poolSnapshot = buildProposalPoolSnapshot(intent.operations, catalog, explicitSkillId);
   return {
     workId: intent.workId,
     title: intent.title,
     operations: intent.operations.map((op): OperationSpec => {
       // render 目录键按冻结 assembly 分支路由（§10）：prepare 与 accept 必须落到同一条目。
-      const key = op.model === null ? `render:${op.parameters.assembly}` : `${op.kind}:${op.model.modelId}`;
-      const entry = catalog[key];
-      if (!entry) throw new AgentError("CAPABILITY_UNAVAILABLE", "该能力没有本地可信目录条目，不能准备制作提案。");
+      const entry = lookupCatalogEntry(catalog, op);
+      if (!entry) {
+        const hasSameModelDifferentBinding =
+          op.model !== null &&
+          Object.entries(catalog).some(
+            ([key, candidate]) => key.startsWith(`${op.kind}:`) && candidate.binding?.modelId === op.model!.modelId,
+          );
+        throw new AgentError(
+          "CAPABILITY_UNAVAILABLE",
+          hasSameModelDifferentBinding
+            ? "模型绑定与本地目录不一致，不能准备制作提案。"
+            : "该能力没有本地可信目录条目，不能准备制作提案。",
+        );
+      }
       if (op.model === null ? entry.binding !== null : !entry.binding || canonicalJson(entry.binding) !== canonicalJson(op.model)) {
         throw new AgentError("CAPABILITY_UNAVAILABLE", "模型绑定与本地目录不一致，不能准备制作提案。");
       }
@@ -1922,10 +2085,11 @@ export function resolveSpec(
         entry.validate?.(render, ctx.trusted.get(op.operationId), ctx);
         return { ...render, quotePerAttempt: { currency: "CNY", amountMinor: 0 }, priceKind: "bounded" };
       }
-      entry.validate?.(op, ctx.trusted.get(op.operationId), ctx);
+      const { modelSource: _modelSource, ...cleanOp } = op;
+      entry.validate?.(cleanOp, ctx.trusted.get(op.operationId), ctx);
       return {
-        ...op,
-        quotePerAttempt: { currency: "CNY" as const, amountMinor: operationQuoteMinor(entry, op, ctx.textCodepoints?.get(op.operationId)) },
+        ...cleanOp,
+        quotePerAttempt: { currency: "CNY" as const, amountMinor: operationQuoteMinor(entry, cleanOp, ctx.textCodepoints?.get(op.operationId)) },
         priceKind: entry.priceKind,
       };
     }) as [OperationSpec, ...OperationSpec[]],
@@ -1938,7 +2102,239 @@ export function resolveSpec(
     scope: intent.scope,
     type: "paid_production",
     requestSource,
+    ...poolSnapshot,
   };
+}
+
+// 提案内确定性换绑与重报价（0.1.61）：不经过文本大模型，按原提案摘要锁定作品、输入修订、未改镜头与交付目标；
+// 仅允许更新用户明确指定的媒体操作绑定与配音音色，在同一事务内重算精确报价与新 digest。
+export function applyRebindProposal(
+  db: AgentDatabase,
+  now: string,
+  scope: { ownerId: string; conversationId: string },
+  proposal: ProposalRow,
+  changes: import("../../shared/agent/generated/contracts.js").RebindProposal["changes"],
+  catalog: QuoteCatalog,
+  probes?: Map<string, RenderFileProbe>,
+): ProposalRow {
+  if (proposal.accepted_run_id || proposal.state === "accepted") {
+    throw new AgentError("PROPOSAL_STALE", "提案已受理执行，不能再更换本次模型。");
+  }
+  if (proposal.state === "expired" || proposal.expires_at <= now) {
+    throw new AgentError("PROPOSAL_STALE", "提案已过期，请重新准备。");
+  }
+  const previous = JSON.parse(proposal.spec_json) as ProductionSpec | LegacyProductionSpec;
+  if (!("type" in previous)) {
+    throw new AgentError("PROPOSAL_STALE", "历史旧格式提案不支持原卡换绑，请重新准备提案。");
+  }
+  if (proposal.state !== "ready") {
+    const hasDisabledPoolModel =
+      proposal.state === "stale" &&
+      !proposal.price_disclosure.startsWith("旧报价已撤") &&
+      previous.operations.some(op => op.kind !== "render" && lookupCatalogEntry(catalog, op) === undefined);
+    const supersededByNewer = Boolean(
+      db
+        .prepare(
+          `SELECT 1 FROM proposals
+           WHERE conversation_id = ? AND created_seq > ?
+             AND json_extract(spec_json, '$.workId') IS ?
+           LIMIT 1`,
+        )
+        .get(scope.conversationId, proposal.created_seq, previous.workId),
+    );
+    if (!hasDisabledPoolModel || supersededByNewer) {
+      throw new AgentError("PROPOSAL_STALE", "该提案已作废或已被新方案替代，请使用最新提案。");
+    }
+  }
+
+  const changeByOpId = new Map<string, (typeof changes)[number]>();
+  for (const change of changes) {
+    if (changeByOpId.has(change.operationId)) {
+      throw new AgentError("INVALID_INPUT", `操作 ${change.operationId} 在同一次换绑中重复出现。`);
+    }
+    changeByOpId.set(change.operationId, change);
+  }
+
+  for (const operationId of changeByOpId.keys()) {
+    const existing = previous.operations.find(op => op.operationId === operationId);
+    if (!existing) throw new AgentError("INVALID_INPUT", `提案中不存在操作 ${operationId}。`);
+    if (existing.kind === "render") throw new AgentError("INVALID_INPUT", "本地合成操作不能绑定生成模型。");
+  }
+
+  const requestedOperations: OperationRequest[] = previous.operations.map((op): OperationRequest => {
+    if (op.kind === "render") {
+      const { quotePerAttempt: _quote, priceKind: _price, musicSource: _music, ...renderOp } = op;
+      return renderOp;
+    }
+    const { quotePerAttempt: _quote, priceKind: _price, ...mediaOp } = op;
+    const change = changeByOpId.get(op.operationId);
+    if (!change) return mediaOp;
+
+    // 新增与未执行换绑严格按 4 字段精确匹配 configurationRevisionId，绝不按裸 modelId 回退。
+    const entry = catalog[`${op.kind}:${change.model.configurationRevisionId}`];
+    if (!entry || !entry.binding || canonicalJson(entry.binding) !== canonicalJson(change.model)) {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "所选模型未启用或不在当前可用池中，请刷新后重试。");
+    }
+    const maxCreateAttempts = entry.maxCreateAttempts ?? 1;
+    if (maxCreateAttempts !== 1 && maxCreateAttempts !== 2 && maxCreateAttempts !== 3) {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "所选模型的尝试次数配置不可用。");
+    }
+    if (mediaOp.kind === "speech") {
+      const nextVoiceId = change.voiceId ?? entry.poolMeta?.defaultVoiceId ?? mediaOp.parameters.voiceId;
+      return {
+        ...mediaOp,
+        model: change.model,
+        maxCreateAttempts,
+        parameters: { ...mediaOp.parameters, voiceId: nextVoiceId },
+      };
+    }
+    if (mediaOp.kind === "video") {
+      if (change.voiceId !== undefined) throw new AgentError("INVALID_INPUT", "视频操作不接受音色参数。");
+      let resolution = mediaOp.parameters.resolution;
+      // 720p 与 720P 为同一分辨率的供应商大小写差异（Seedance/Colab vs 万相），保持用户原分辨率意图对齐格式。
+      if (resolution.toLowerCase() === "720p") {
+        resolution = change.model.providerId === "wan" ? "720P" : "720p";
+      }
+      return {
+        ...mediaOp,
+        model: change.model,
+        maxCreateAttempts,
+        parameters: { ...mediaOp.parameters, resolution },
+      };
+    }
+    if (change.voiceId !== undefined) throw new AgentError("INVALID_INPUT", "图片操作不接受音色参数。");
+    let imageResolution = mediaOp.parameters.resolution;
+    if (mediaOp.parameters.aspectRatio === "16:9") {
+      if (change.model.providerId === "openai") imageResolution = "1536x864";
+      else if (change.model.providerId === "ark") imageResolution = "2560x1440";
+    }
+    return {
+      ...mediaOp,
+      model: change.model,
+      maxCreateAttempts,
+      parameters: { ...mediaOp.parameters, resolution: imageResolution },
+    };
+  });
+
+  const { validation, renderParameters, musicSources, durationBounds, durationVerified, hasUnusedRevisions } =
+    normalizeOperationInputs(db, scope, previous.inputSources, requestedOperations, catalog, probes, undefined, previous.workId);
+  if (hasUnusedRevisions) throw new AgentError("INVALID_INPUT", "输入来源中存在未被使用的修订。");
+
+  const provisionalIntent: ProductionIntent = {
+    workId: previous.workId,
+    title: previous.title,
+    operations: requestedOperations as [OperationRequest, ...OperationRequest[]],
+    finalOutput: previous.finalOutput,
+    maxSpend: previous.maxSpend,
+    inputSources: previous.inputSources,
+    reviewInputs: previous.reviewInputs,
+    outputTarget: previous.outputTarget ?? null,
+    purpose: previous.purpose,
+    scope: previous.scope,
+  };
+
+  const resolved = resolveSpec(
+    provisionalIntent,
+    catalog,
+    previous.requestSource,
+    previous.inputSources,
+    previous.reviewInputs,
+    validation,
+    renderParameters,
+  );
+  for (const operation of resolved.operations) {
+    if (operation.kind !== "render" || operation.parameters.assembly !== "mixed_concat") continue;
+    const musicSource = musicSources.get(operation.operationId);
+    if (musicSource) operation.musicSource = musicSource;
+  }
+
+  const nextTotalMinor = resolved.operations.reduce(
+    (sum, op) => sum + (op.quotePerAttempt.amountMinor ?? 0) * op.maxCreateAttempts,
+    0,
+  );
+  resolved.maxSpend = { currency: "CNY", amountMinor: nextTotalMinor };
+
+  // 保留建卡当时的方案原默认快照（外部窗口改全局默认不篡改本卡原默认），合并新旧展示名并更新选择来源。
+  if (previous.defaultsAtPrepare) {
+    resolved.defaultsAtPrepare = previous.defaultsAtPrepare;
+  }
+  const mergedLabels = new Map<string, NonNullable<ProductionSpec["modelLabels"]>[number]>();
+  for (const item of previous.modelLabels ?? []) mergedLabels.set(item.configurationRevisionId, item);
+  for (const item of resolved.modelLabels ?? []) mergedLabels.set(item.configurationRevisionId, item);
+  if (mergedLabels.size > 0) resolved.modelLabels = [...mergedLabels.values()];
+
+  const previousSources = new Map((previous.selectionSources ?? []).map(item => [item.operationId, item.source]));
+  const nextSources: NonNullable<ProductionSpec["selectionSources"]> = [];
+  for (const op of resolved.operations) {
+    if (op.kind === "render") continue;
+    if (!changeByOpId.has(op.operationId)) {
+      const priorSource = previousSources.get(op.operationId);
+      if (priorSource) nextSources.push({ operationId: op.operationId, source: priorSource });
+      continue;
+    }
+    const defaultBinding = resolved.defaultsAtPrepare?.[op.kind] ?? null;
+    const defaultLabel = defaultBinding ? mergedLabels.get(defaultBinding.configurationRevisionId) : undefined;
+    const matchesDefault = defaultBinding !== null
+      && canonicalJson(defaultBinding) === canonicalJson(op.model)
+      && (op.kind !== "speech" || !defaultLabel?.defaultVoiceId || op.parameters.voiceId === defaultLabel.defaultVoiceId);
+    nextSources.push({
+      operationId: op.operationId,
+      source: matchesDefault ? "default" : "card_selected",
+    });
+  }
+  if (nextSources.length > 0) resolved.selectionSources = nextSources;
+
+  // 窄范围不变量硬校验：除指定操作的绑定/尝试次数/报价/允许的声线或同画幅档位及汇总授权额外，其余快照范围完全锁死。
+  const narrowScope = (value: ProductionSpec) => canonicalJson({
+    workId: value.workId,
+    title: value.title,
+    purpose: value.purpose,
+    scope: value.scope,
+    inputSources: value.inputSources,
+    reviewInputs: value.reviewInputs,
+    finalOutput: value.finalOutput,
+    outputTarget: value.outputTarget ?? null,
+    requestSource: value.requestSource,
+    operations: value.operations.map(op => {
+      if (!changeByOpId.has(op.operationId)) {
+        const { quotePerAttempt: _q, priceKind: _p, ...untouched } = op;
+        return untouched;
+      }
+      return {
+        operationId: op.operationId,
+        outputSlot: op.outputSlot,
+        kind: op.kind,
+        inputs: op.inputs,
+        parameters: op.kind === "speech"
+          ? { format: op.parameters.format, ...(op.parameters.rate ? { rate: op.parameters.rate } : {}) }
+          : op.kind === "video"
+          ? { ...op.parameters, resolution: op.parameters.resolution.toLowerCase() }
+          : op.kind === "image"
+          ? { aspectRatio: op.parameters.aspectRatio }
+          : op.parameters,
+      };
+    }),
+  });
+  if (narrowScope(previous) !== narrowScope(resolved)) {
+    throw new AgentError("INVALID_INPUT", "卡内换模只能调整指定操作的模型绑定或音色，不能改动作品、输入、其他镜头或制作参数。");
+  }
+
+  validateProductionAudio(db, resolved);
+
+  const disclosure = buildPriceDisclosure(resolved, catalog, durationBounds, durationVerified);
+  const nextDigest = digestOf(resolved);
+  const nextRevision = proposal.revision + 1;
+  db.prepare(
+    "UPDATE proposals SET digest = ?, spec_json = ?, state = 'ready', price_disclosure = ?, revision = ?, updated_at = ? WHERE id = ?",
+  ).run(nextDigest, canonicalJson(resolved), disclosure, nextRevision, now, proposal.id);
+  insertEvent(db, now, {
+    conversationId: scope.conversationId,
+    ownerId: scope.ownerId,
+    kind: "proposal.changed",
+    entityId: proposal.id,
+    entityVersion: nextRevision,
+  });
+  return db.prepare("SELECT * FROM proposals WHERE id = ?").get(proposal.id) as ProposalRow;
 }
 
 // 后台清理：ready→expired，升版并发事件；accepted 不受过期影响。

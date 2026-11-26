@@ -63,7 +63,13 @@ python3 -m venv .local/edge-tts
 
 管理员在应用环境文件（生产为 `.env.docker.prod`）设置 `FRAME_EDGE_TTS_PYTHON` 为容器内解释器的绝对路径。Compose 将它注入应用的 `AGENT_EDGE_TTS_PYTHON`；直接启动应用时使用后一个变量。也可将该 venv 的 `bin` 加入应用 PATH 以使用默认的 `python3`。这里是可执行文件名/路径，不是带参数的 shell 命令；实际启动为 `pythonCommand -I -c <内嵌驱动>`，不能依赖用户 site-packages。不要迁移开发机绝对路径。保存与启用只登记配置，不会联网合成；缺依赖或调用失败会明确报错，不转用付费配音。
 
-驱动通过客户端公开 `proxy` 参数沿 `HTTPS_PROXY → https_proxy → HTTP_PROXY → http_proxy` 选路，`NO_PROXY` 优先于 `no_proxy`，命中客户端实际目标主机时直连。只设 `HTTPS_PROXY` 也适用于语音 WebSocket；不能仅凭客户端的 `trust_env` 推断这一点。未配置代理变量时走宿主默认路由，此状态不证明服务器 VPN 出口可用。客户端依赖与隔离启动、代理参数消费、真实外部合成和试听效果应分别验证；免费在线服务没有官方 SLA。
+驱动通过客户端公开 `proxy` 参数沿 `HTTPS_PROXY → https_proxy → HTTP_PROXY → http_proxy` 选路，`NO_PROXY` 优先于 `no_proxy`，命中客户端实际目标主机时直连。只设 `HTTPS_PROXY` 也适用于语音 WebSocket；不能仅凭客户端的 `trust_env` 推断这一点。未配置代理变量时走宿主默认路由，此状态不证明服务器 VPN 出口可用。客户端依赖与隔离启动、代理参数消费、真实外部合成和试听效果应分别验证；免费在线服务没有官方 SLA。对话中新发起的 `Edge 免费配音` 与付费配音共用提案确认门（`¥0.00` 授权，可在「模型配置 → 配音」与付费语音互设默认或留空），确认执行后落盘 MP3 并自动登记词级 `tts_word` 字幕轨。
+
+### Google Colab（LTX-2.5）可选视频通道
+
+正式应用镜像在独立构建阶段基于 Python 3.12 与 [colab-cli-requirements.txt](../../docker/colab-cli-requirements.txt) 安装官方 `google-colab-cli`（Apache-2.0，固定提交 `5cafdfaef456cfc7b3e218638c506df8f7088997`）与 `keyrings.alt==5.0.2` 到 `/opt/frame-colab/venv/bin/colab`（仅进入 `video-factory` 应用镜像，不进入禁网 `frame-creative` 镜像；构建与容器冒烟阶段均做不申请 GPU、无外网的 `colab --help` 启动核验），同时内置 `ColabLtxVideoPort`、受控执行器 `.agents/skills/colab-ltx-video/scripts/colab_ltx.py`、远端内核脚本 `ltx25_remote_worker.py`、引导脚本 `scripts/ultra_config.py` 以及内置技能 `video-generation`、`colab-ltx-video`。`PATH` 末尾追加 `/opt/frame-colab/venv/bin` 且 `docker-compose.prod.yml` 默认将 `COLAB_CLI_BIN` 设为 `/opt/frame-colab/venv/bin/colab`，无需保留旧版手工安装 CLI，也不遮蔽 `/opt/frame-tts/bin/python3` 默认免费配音解释器。
+
+线上启用 Colab `LTX-2.5` 视频通道（`720p`、`5` 秒、单张首帧图、`16:9` 或 `9:16`）前，仅需完成生产环境自身的账号授权：先确认境外出口可达 `colab.research.google.com`、`*.googleapis.com` 与 `huggingface.co`，执行 `docker exec video_factory_prod python3 scripts/ultra_config.py google-auth-url` 并在浏览器完成授权后，运行 `docker exec -it video_factory_prod python3 scripts/ultra_config.py google-auth-code` 按隐藏输入提示粘贴授权码，将刷新令牌以 `0600` 权限写入持久数据卷 `/data/factory/.local/share/python_keyring/keyring_pass.cfg`（后续滚动发布自动沿用）；随后登录网页「模型配置 → 连接配置」添加 `Google Colab (LTX-2.5)` 连接并勾选启用 `Lightricks/LTX-2.5-distilled`，API Key 可直接填入加密存储的 Hugging Face Read Token（`hf_...`）或复用持久卷凭据的 `host` 占位值。模型权重（约 64 GiB）仅在 Colab 云端 GPU 侧下载，不落盘应用服务器；未完成账号授权时，厂商 API 与免费配音照常运行，选中 Colab 会在申请 GPU 前以 `¥0.00` 明确返回未授权提示。Colab 任务按 `CU` 与厂商人民币账单分开展示，真实 GPU 运行保留 `CU` 用量证据，不写入虚假人民币零元账单。
 
 ## 阿里云出口：按真实目标分流
 
@@ -73,7 +79,7 @@ python3 -m venv .local/edge-tts
 
 | 实际目的地 | 路径 |
 | --- | --- |
-| OpenAI API（文本、图片、语音、Web Search）、Pexels、Wikimedia、FreeToUse、Incompetech | 境外出口。OpenAI 的流式请求及语音 WebSocket 使用同一 API 域名。 |
+| OpenAI API（文本、图片、语音、Web Search）、Google Colab 控制面（`colab.research.google.com`、`*.googleapis.com`）、Hugging Face（`huggingface.co`）、Pexels、Wikimedia、FreeToUse、Incompetech | 境外出口。OpenAI 的流式请求及语音 WebSocket 使用同一 API 域名；Colab 权重由云端 GPU 实例拉取，应用侧仅传输控制指令、首帧图与成片 MP4。 |
 | 火山方舟北京、百炼大陆、MiniMax 中国站，以及已核实的国内媒体下载域名 | 阿里云物理出口直连。不要把同一品牌的国际站一起归为国内。 |
 | 同机 NewsNow 等热点服务 | `video-factory-trends` 内网，用配置的服务地址。 |
 | 抖音与 TikTok 榜单 | 按实际榜源路由：Frame 访问 DataXAPI 和 Kabo；中文榜单不表示请求一定发往国内平台服务器。 |

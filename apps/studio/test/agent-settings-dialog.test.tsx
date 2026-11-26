@@ -446,3 +446,58 @@ it("ISS-16 兼容连接可手动登记供应商部署 ID 与真实容量", async
   await waitFor(()=>expect(api.posts).toHaveLength(1));
   expect(api.posts[0]!.connection.models).toMatchObject([{modelId:"ep-director",contextWindowTokens:32000,maxOutputTokens:4096,isDefault:false}]);
 });
+
+it("Colab 原生视频连接在设置面板与厂商连接共存，自动填充官方地址并可切换为当前视频模型", async () => {
+  const settings = fixture();
+  settings.connections.push({
+    id: "provider-colab",
+    name: "Google Colab",
+    protocol: "colab",
+    baseUrl: "https://colab.research.google.com",
+    apiKey: "hf_synthetic",
+    credentialConfigured: true,
+    enabled: true,
+    models: [
+      {
+        id: "colab-ltx-1",
+        name: "LTX-2.5 Distilled (Colab)",
+        modelId: "Lightricks/LTX-2.5-distilled",
+        kind: "video",
+        features: ["首帧生视频", "Colab CU"],
+        contextWindowTokens: null,
+        maxOutputTokens: null,
+        enabled: true,
+        isDefault: false,
+      },
+    ],
+  });
+  settings.modelStatuses.push({ modelEntryId: "colab-ltx-1", unavailableReason: null, thinking: null });
+  const api = routes({
+    settings,
+    directory: () =>
+      Response.json({
+        models: [
+          {
+            id: "Lightricks/LTX-2.5-distilled",
+            name: "Lightricks/LTX-2.5-distilled",
+            kinds: ["video"],
+            status: "listed",
+            contextWindowTokens: null,
+            maxOutputTokens: null,
+          },
+        ],
+        hasMore: false,
+        syncedAt: "2026-11-25T16:00:00Z",
+      }),
+  });
+  page();
+  await screen.findByText("型号甲");
+  await userEvent.click(screen.getByRole("tab", { name: /视频模型/ }));
+  await userEvent.selectOptions(screen.getByLabelText("供应商连接"), "provider-colab");
+  await userEvent.selectOptions(screen.getByLabelText("具体型号"), "colab-ltx-1");
+  await userEvent.click(screen.getByRole("button", { name: "应用选择" }));
+  expect(await screen.findByText(/当前模型已切换到 LTX-2.5 Distilled \(Colab\)/)).toBeVisible();
+  expect(api.posts).toHaveLength(1);
+  expect(api.posts[0]!.connection.protocol).toBe("colab");
+  expect(api.posts[0]!.connection.models[0]!.isDefault).toBe(true);
+});
