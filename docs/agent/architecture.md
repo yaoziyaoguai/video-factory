@@ -29,7 +29,7 @@ flowchart LR
 
 **恢复。** 工作台先读快照，再按游标订阅事件；断线后的重复事件不表示新动作。Pi 会话负责重建模型上下文，SQLite 负责回答“哪个版本已确认、工作是否已受理、费用有无终局”。供应商结果不明时保留已有尝试供核查，不把超时当作可免费重发的依据。
 
-**设置与扩展。** 模型连接按用途投影，切换只影响后续执行。Skill 安装使用应用专属 Pi 包目录。素材、免费音乐、热歌榜和资讯由 Agent 工具访问；可自托管的服务使用配置地址。旧流水线的 broker 不参与 Frame 在线请求。
+**设置与扩展。** 文本连接投影单个当前型号；图片、视频、配音将所有已启用且适配的条目投影为四字段 `ModelBinding`（`providerId`、`modelId`、`executionVersionId`、`configurationRevisionId`）模型池及可选默认值，改选默认仅影响新提案，提案内换型通过确定性 `rebind` 窄范围重算报价并刷新摘要，无需重新唤醒 Pi；Google Colab（`ColabLtxVideoPort`）与 Edge 免费配音（`EdgeSpeechPort`）共用同一套提案受理与 `ProductionWorker` 执行边界。Skill 安装使用应用专属 Pi 包目录。素材、免费音乐、热歌榜和资讯由 Agent 工具访问；可自托管的服务使用配置地址。旧流水线的 broker 不参与 Frame 在线请求。
 
 接口变更以 [契约索引](../../contracts/agent/v1/IMPORT.md) 为入口。
 
