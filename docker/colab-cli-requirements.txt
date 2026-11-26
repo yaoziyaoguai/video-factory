@@ -1,0 +1,2 @@
+google-colab-cli @ git+https://github.com/googlecolab/google-colab-cli.git@5cafdfaef456cfc7b3e218638c506df8f7088997
+keyrings.alt==5.0.2

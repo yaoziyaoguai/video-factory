@@ -1,6 +1,6 @@
 # Frame v1 的行为约定
 
-本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.59**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
+本文件解释 [OpenAPI](openapi.json) 和 [JSON Schema](contracts.schema.json) 的使用语义。当前修订为 **0.1.61**；接口字段、错误码及可选项以这两份机器可读文档为准。Schema 是 HTTP、SSE、工具和执行端口的同一形状来源。
 
 1. **会话、作品和版本分开。** 一个会话可容纳闲聊和多件作品。正式开始作品才建 work；选择素材、索要 Prompt、发布工程都不自动建作品或启动制作。`start_work` 的 title-only 调用保持原行为；用户明确开始视频并采用已有文稿时，可选 adoptContent:ContentSourceInput 引用准确已存在文本修订或消息。宿主核对归属和文本来源，以当前真实用户来源在同一事务创建 work、内容采用组/事项及该 work 的真实确认；不复制正文或创建文稿修订，不把独立稿 confirmationId 复用为 work 审批，也不自动制作。工具不能自报认可来源消息、身份或独立认可 ID。新 Work 只写有序 `reviewGroups`，每组有稳定 item 身份与准确 draft/approved。role 表示用途，媒体类型看 ArtifactHead.kind，不以标题猜类型。
 2. **认可精确到单项版本。** ReviewConfirmation / ToolConfirmReview 的旧 work 分支保持无 kind 的 workId/groupId/items/action 形状，显式列出 group、item 与 ContentSourceInput；不加整组版本锁阻止未变化单项。独立稿分支为 `kind=standalone_artifact, artifactId, revisionId, action=approve`，仅认可无 work 的独立 script；不伪造 work，不创建提案或运行。ArtifactHead 的可选只读 standaloneApproval 保存真实 confirmationId、revisionId、approvedAt；改稿后可继续指向已认可旧版，读取旧修订沿用 read_artifact。只提交本次实际认可的项，空 items 不是“继续”。认可不改其他项，也不把新 draft 自动加入确认区；调整组成员、required 或建议内容要发布用户可见的后继组版本。
@@ -58,3 +58,7 @@ SSE `request.progress` 是不带业务游标的暂态真实进展：requestId、
 0.1.58 新增成员启停、角色调整与密码重置。成员列表修订递增，修改携带原修订与命令 ID。停用、重置密码或更换角色使该成员的旧登录失效。创作者通过 `GET /profile/budget` 读取个人和共享空间的预算用量，可附带自己的会话 ID。预算日、月按工作空间时区切分，在途预留跨期占用。附件响应包含 `nosniff` 和私有禁缓存头。
 
 0.1.59 新增 `GET /settings/services` 目录快照：一条响应按固定顺序返回全部 15 项免费服务的当前配置，设置页挂载单次读取；单服务读取保留给重试与保存后回读。
+
+0.1.60 新增 `ProviderConnection.protocol=colab` 原生视频通道，与方舟、MiniMax、万相在视频模型选择体系中共存；Colab 计算单元（`colab_cu`）、Flow 视频积分（`flow_video_credits`）、Flow Music 积分（`flow_music_credits`）、实际显卡、模型修订、权重缓存来源与分阶段耗时记录在 `ProviderUsage` 可选字段中，与厂商人民币 `Finance`/`BillingFact` 分开核算，账户余额差值仅作为观测值（`observedBalanceDelta`）标记，不伪造逐笔人民币扣费。
+
+0.1.61 升级图片、视频、配音为同类多活模型池并统一制作前确认：`ModelEntry` 可选携带所属连接显示名、计费口径、算力单位、可选音色与能力边界；`ProductionSpec` 可选冻结准备当时的原默认快照（`defaultsAtPrepare`）、脱敏展示名（`modelLabels`）与操作选择来源（`selectionSources`），`AcceptanceBlocker` 新增 `MODEL_SELECTION_REQUIRED`（无默认且未明确指定型号时须先选型方可受理）；新增 `POST /proposals/{proposalId}/rebind` 在单事务内按准确原摘要确定性更换指定媒体操作的模型绑定与音色、重算报价并更新摘要；免费新配音（`edge-tts`）纳入同一提案确认与后台执行路径，保留音频、词级边界与字幕生成。

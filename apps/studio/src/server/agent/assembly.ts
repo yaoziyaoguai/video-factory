@@ -63,6 +63,8 @@ export interface MediaChannel {
   catalog: () => QuoteCatalog;
   /** 当前媒体目录条目（Bootstrap 与每回合 context 用）；空数组表示媒体不出现在公开目录。 */
   models: () => Bootstrap["models"];
+  /** 生产装配开启：新生成的免费配音也须经 prepare_production 提案确认门受理。 */
+  requireSpeechConfirmation?: boolean;
 }
 
 /** 工厂返回的文本接线：动态目录、新请求默认绑定与冻结绑定解析、设置读写。 */
@@ -124,7 +126,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions): Promise<
     // Pixabay 服务条款要求缓存 API 响应 24h；缓存放在数据目录，不进用户媒体库。
     cacheRoot: options.materials?.cacheRoot ?? path.join(options.dataDir, "stock-cache"),
     ...(options.materials?.stockFetch ? { stockFetch: options.materials.stockFetch } : {}),
-  }, production, options.creative ? { runner: options.creative.runner, workspace: editingWorkspace } : undefined);
+  }, production, options.creative ? { runner: options.creative.runner, workspace: editingWorkspace } : undefined, channel?.requireSpeechConfirmation ?? false);
   // §11.7 来源6/7：作品明确后把已发送选材原字节准备到该作品输入位置；与 BusinessTools 同一 runner/blobs 边界。
   const prepareLibraryInputs = options.creative
     ? (ownerId: string, conversationId: string, workId: string) =>

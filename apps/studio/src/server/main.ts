@@ -1,4 +1,4 @@
-import { connectedTextModels, connectedMediaEnabled, connectedSpeechChoices } from "./agent/provider-connections.js";
+import { connectedTextModels, connectedMediaPool } from "./agent/provider-connections.js";
 import { access } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -11,17 +11,19 @@ import { ArkMediaPort, RealMediaGateway } from "./agent/ark-media.js";
 import { MiniMaxSpeechPort } from "./agent/minimax-speech.js";
 import { MiniMaxVideoPort } from "./agent/minimax-video.js";
 import { WanVideoPort } from "./agent/wan-video.js";
+import { COLAB_EXECUTOR_RELATIVE_PATH, ColabLtxVideoPort } from "./agent/colab-ltx-video.js";
 import { localRenderAvailability, LocalRenderPort } from "./agent/local-render.js";
 import {
-  arkVideoCatalog, arkVideoModelView, initializeArkVideoSettings, readArkVideoCurrent,
+  initializeArkVideoSettings,
   readLegacyArkConfig, resolveArkBinding,
 } from "./agent/ark-video-settings.js";
 import {
-  additionalMediaCatalog, additionalMediaModelViews, resolveMinimaxSpeechBinding, resolveMinimaxVideoBinding,
-  resolveImageBinding, resolveOpenAISpeechBinding, resolveWanVideoBinding,
+  resolveMinimaxSpeechBinding, resolveMinimaxVideoBinding,
+  resolveImageBinding, resolveOpenAISpeechBinding, resolveWanVideoBinding, resolveColabVideoBinding,
 } from "./agent/additional-media-settings.js";
 import { ImageGenerationPort } from "./agent/image-generation.js";
 import { OpenAISpeechPort } from "./agent/openai-speech.js";
+import { EdgeSpeechPort, isEdgeSpeechBinding } from "./agent/edge-speech.js";
 import { CreativeRunner } from "./agent/creative-runner.js";
 import { sweepAttemptFiles } from "./agent/media-port-support.js";
 import { scheduleHistoryTrim } from "./agent/history-trim.js";
@@ -61,7 +63,7 @@ const workRoot = path.join(agentDataDir, "media-work");
 // 隔离创作环境（原生创作工具与 code_project 执行）经宿主 UDS 入口装配；未提供时相关工具如实不可用。
 const creativeSocket = process.env.AGENT_CREATIVE_RUNNER_SOCKET?.trim();
 const creativeRunner = creativeSocket ? new CreativeRunner({ socketPath: creativeSocket }) : undefined;
-console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}；隔离创作环境${creativeSocket ? `已接入（${creativeSocket}）` : "未装配（code_project 与原生创作工具不可用）"}`);
+console.log(`[frame] 媒体通道：视频 Ark Seedance/MiniMax/万相/Google Colab(LTX-2.5)，图片 OpenAI/火山 Seedream，配音 OpenAI/MiniMax（当前能力由统一连接选择）；旧配置${legacyConfigFile ? "已指定，是否导入由数据库资格和凭据授权决定" : "未提供"}；本地拼接${render.available ? `可用${render.aacAvailable ? "" : "（无声；缺少 AAC 编码器，有声拼接未启用）"}` : `不可用：${render.reason}`}；隔离创作环境${creativeSocket ? `已接入（${creativeSocket}）` : "未装配（code_project 与原生创作工具不可用）"}`);
 const runtime = await createAgentRuntime({
   dataDir: agentDataDir,
   providerConnections: true,
@@ -92,37 +94,35 @@ const runtime = await createAgentRuntime({
       const minimaxSpeechPort = new MiniMaxSpeechPort(db, blobs, systemClock, { resolve: binding => resolveMinimaxSpeechBinding(db, binding), workRoot });
       const minimaxVideoPort = new MiniMaxVideoPort(db, blobs, systemClock, { resolve: binding => resolveMinimaxVideoBinding(db, binding), workRoot });
       const wanVideoPort = new WanVideoPort(db, blobs, systemClock, { resolve: binding => resolveWanVideoBinding(db, binding), workRoot });
+      const colabVideoPort = new ColabLtxVideoPort(db, blobs, systemClock, {
+        resolve: binding => resolveColabVideoBinding(db, binding),
+        workRoot,
+        stateDir: path.join(agentDataDir, "colab-ltx-state"),
+        executorScriptPath: path.join(repositoryRoot, COLAB_EXECUTOR_RELATIVE_PATH),
+      });
+      const edgeSpeechPort = new EdgeSpeechPort(db, blobs, systemClock, { workRoot });
       return {
+        requireSpeechConfirmation: true,
         port: new RealMediaGateway(
           new LocalRenderPort(db, blobs, systemClock, { workRoot }, creativeRunner),
           {
             resolveProviderPort: binding => {
+              if (isEdgeSpeechBinding(binding)) return edgeSpeechPort;
               if (resolveImageBinding(db, binding)) return imagePort;
               if (resolveOpenAISpeechBinding(db, binding)) return openaiSpeechPort;
               if (resolveMinimaxSpeechBinding(db, binding)) return minimaxSpeechPort;
               if (resolveMinimaxVideoBinding(db, binding)) return minimaxVideoPort;
               if (resolveWanVideoBinding(db, binding)) return wanVideoPort;
+              if (resolveColabVideoBinding(db, binding)) return colabVideoPort;
               if (resolveArkBinding(db, binding)) return arkPort;
               return null;
             },
             clock: systemClock,
+            closeables: [colabVideoPort],
           },
         ),
-        catalog: () => ({
-          ...arkVideoCatalog(connectedMediaEnabled(db, "video") ? readArkVideoCurrent(db) : null, render),
-          ...additionalMediaCatalog(db, render.probeAvailable),
-          ...connectedSpeechChoices(db, render.probeAvailable).catalog,
-        }),
-        models: () => {
-          const entries = additionalMediaModelViews(db, render.probeAvailable);
-          for (const entry of entries) if (entry.kind === "speech") entry.features.push("当前默认配音");
-          for (const choice of connectedSpeechChoices(db, render.probeAvailable).models) {
-            if (!entries.some(entry => entry.binding.configurationRevisionId === choice.binding.configurationRevisionId)) entries.push(choice);
-          }
-          const video = readArkVideoCurrent(db);
-          if (video && connectedMediaEnabled(db, "video")) entries.unshift(arkVideoModelView(video, render));
-          return entries;
-        },
+        catalog: () => connectedMediaPool(db, render).catalog,
+        models: () => connectedMediaPool(db, render).models,
       };
     },
   },

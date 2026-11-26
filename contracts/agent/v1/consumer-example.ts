@@ -1,5 +1,5 @@
 import type {
-  MessageInput, AcceptProposal, ToolDelivery, DeliveryItem,
+  MessageInput, AcceptProposal, RebindProposal, AcceptanceBlocker, ToolDelivery, DeliveryItem,
   InstallSkillPackage, RemoveSkillPackage, SkillPackagesView,
   ReviewConfirmation, ToolConfirmReview, CreationBinding,
   StandaloneArtifactConfirmation, AdoptPreviewConfirmation, ArtifactHead,
@@ -256,3 +256,25 @@ const installWithCommand: InstallSkillPackage = { source: "npm:example-skills@1.
 const removeBySource: RemoveSkillPackage = { source: "/srv/fixtures/creative-skills" };
 void installWithCommand;
 void removeBySource;
+
+export const rebindSingleShot = {
+  commandId: "cmd_rebind_1",
+  expectedDigest: "b".repeat(64),
+  changes: [
+    {
+      operationId: "shot_2",
+      model: {
+        providerId: "colab",
+        modelId: "Lightricks/LTX-2.5-distilled",
+        connectionId: "conn_colab_1",
+        configurationRevisionId: "cfg-colab0000000000000000001",
+      },
+    },
+  ],
+} satisfies RebindProposal;
+
+export const modelSelectionRequiredBlocker = {
+  code: "MODEL_SELECTION_REQUIRED",
+  message: "请先选择本次使用的视频模型。",
+  action: "select_model",
+} satisfies AcceptanceBlocker;

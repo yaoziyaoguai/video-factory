@@ -1,6 +1,6 @@
 # Frame Agent v1 接口索引
 
-工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.59**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
+工作台 API 前缀是 `/api/agent/v1`。当前契约修订 **0.1.61**；HTTP 操作以 [OpenAPI](openapi.json) 为准，HTTP、SSE、Pi 工具和领域对象的结构以 [JSON Schema](contracts.schema.json) 为准。
 
 | 文件 | 用途 |
 | --- | --- |
@@ -69,3 +69,5 @@
 0.1.58 新增成员启停、角色调整与密码重置。成员列表修订递增，修改携带原修订与命令 ID。停用、重置密码或更换角色使该成员的旧登录失效。创作者通过 `GET /profile/budget` 读取个人和共享空间的预算用量，可附带自己的会话 ID。预算日、月按工作空间时区切分，在途预留跨期占用。附件响应包含 `nosniff` 和私有禁缓存头。
 
 0.1.59 新增 `GET /settings/services` 目录快照：一条响应按固定顺序返回全部 15 项免费服务的当前配置，设置页挂载单次读取；单服务读取保留给重试与保存后回读。
+
+0.1.61 新增 `POST /proposals/{proposalId}/rebind`（`RebindProposal`）、`ProposalDefaultsSnapshot`、`ProposalModelLabel`、`OperationSelectionSource` 与 `AcceptanceBlocker` 的 `MODEL_SELECTION_REQUIRED` 分支，`ModelEntry` 可选携带连接别名、音色清单、计费口径与能力摘要。

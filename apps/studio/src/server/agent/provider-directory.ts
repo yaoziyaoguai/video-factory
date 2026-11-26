@@ -3,7 +3,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import type { AvailableProviderModels, ProviderConnection, ProviderDirectoryModel } from "../../shared/agent/generated/contracts.js";
 import { AgentError } from "./errors.js";
 import { findNativeTextModel, openaiChatCatalog } from "./text-model.js";
-import { SEEDREAM_IMAGES, OPENAI_IMAGE_MODEL_IDS, OPENAI_SPEECH_MODEL_IDS, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS } from "./media-config.js";
+import { SEEDREAM_IMAGES, OPENAI_IMAGE_MODEL_IDS, OPENAI_SPEECH_MODEL_IDS, MINIMAX_SPEECH_MODEL_IDS, MINIMAX_VIDEO_MODEL_IDS, WAN_VIDEO_MODEL_IDS, COLAB_VIDEO_MODEL_IDS } from "./media-config.js";
 
 interface DirectoryItem {
   id: string; name?: string; display_name?: string; status?: string; lifecycle?: string;
@@ -32,11 +32,13 @@ const validatePage = new Ajv2020().compile<{ data: DirectoryItem[]; has_more?: b
 // MiniMax/万相没有已核实的账号级型号列表端点：不猜 /models 地址，同步返回本地已适配的
 // 可执行型号目录（与 modelUnavailableReason 同一冻结集合），不把静态目录说成账号实时可见。
 export async function readProviderDirectory(connection: ProviderConnection, fetcher: typeof fetch = fetch): Promise<AvailableProviderModels> {
-  if (connection.protocol === "minimax" || connection.protocol === "wan") {
+  if (connection.protocol === "minimax" || connection.protocol === "wan" || connection.protocol === "colab") {
     const entries: { id: string; kind: ProviderDirectoryModel["kinds"][number] }[] = [];
     if (connection.protocol === "minimax") {
       for (const id of MINIMAX_SPEECH_MODEL_IDS) entries.push({ id, kind: "speech" });
       for (const id of MINIMAX_VIDEO_MODEL_IDS) entries.push({ id, kind: "video" });
+    } else if (connection.protocol === "colab") {
+      for (const id of COLAB_VIDEO_MODEL_IDS) entries.push({ id, kind: "video" });
     } else {
       for (const id of WAN_VIDEO_MODEL_IDS) entries.push({ id, kind: "video" });
     }

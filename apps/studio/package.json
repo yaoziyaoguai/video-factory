@@ -14,7 +14,7 @@
   "start": "node dist/server/server/main.js",
   "test": "vitest run && node --import tsx --test --test-concurrency=4 --test-timeout=300000 test/auth.test.ts && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
-  "test:agent": "vitest run test/agent-workbench.test.tsx test/agent-work-stage.test.tsx test/agent-work-center.test.tsx test/agent-work-library.test.tsx test/agent-settings-dialog.test.tsx test/agent-text-settings-dialog.test.tsx test/agent-services-dialog.test.tsx && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
+  "test:agent": "vitest run test/agent-workbench.test.tsx test/agent-work-stage.test.tsx test/agent-work-center.test.tsx test/agent-work-library.test.tsx test/agent-settings-dialog.test.tsx test/agent-text-settings-dialog.test.tsx test/agent-services-dialog.test.tsx test/agent-model-pool-ui.test.tsx && node --import tsx --test --test-concurrency=1 --test-timeout=300000 test/agent-*.test.ts",
   "agent:offline": "tsx src/server/agent/offline-main.ts"
  },
  "dependencies": {

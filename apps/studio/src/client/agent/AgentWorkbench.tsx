@@ -771,6 +771,10 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
   };
   const bindTarget = (artifact: ArtifactHead) => updateDraft({ targetArtifactId: artifact.id, targetRevisionId: selection?.revisionId ?? artifact.revisionId, targetWorkId: null, targetSegment: null, proposalId: null, proposalDigest: null });
   const model = bootstrap?.models.find(entry => entry.kind === "text" && entry.isDefault);
+  const mediaPoolModels = useMemo(
+    () => (bootstrap?.models ?? []).filter(entry => entry.kind !== "text" && !entry.features.includes("offline-fixture")),
+    [bootstrap?.models],
+  );
   // render没有模型条目；具体提案能否受理由服务端实际目录与受理事务判断。
   // 模拟媒体只指测试装配的目录条目；文本 features 已是用户备注，不决定运行状态（T2）。
   const isSimulated = bootstrap?.models.some(model => model.kind !== "text" && model.features.includes("offline-fixture")) ?? false;
@@ -784,7 +788,16 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
     acceptanceInFlight.current.add(proposal.id); setAccepting([...acceptanceInFlight.current]);
     const key = agentStorageKey("accept", proposal.id, storageOwner);
     let command: AcceptProposal = { commandId: agentApi.newCommandId(), proposalDigest: proposal.digest };
-    try { const saved = localStorage.getItem(key); if (saved) command = JSON.parse(saved) as AcceptProposal; else localStorage.setItem(key, JSON.stringify(command)); } catch { /* 本次内存请求仍有身份。 */ }
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        const parsed = JSON.parse(saved) as AcceptProposal;
+        if (parsed.proposalDigest === proposal.digest) command = parsed;
+        else localStorage.setItem(key, JSON.stringify(command));
+      } else {
+        localStorage.setItem(key, JSON.stringify(command));
+      }
+    } catch { /* 本次内存请求仍有身份。 */ }
     try {
       await agentApi.acceptProposal(proposal.id, command);
       localStorage.removeItem(key);
@@ -793,6 +806,24 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
       if (error instanceof AgentApiError && error.payload.status < 500) localStorage.removeItem(key);
       if (activeId.current === proposal.conversationId) setActionError(error instanceof Error ? error.message : "确认结果未返回，可用原请求重试。");
     } finally { acceptanceInFlight.current.delete(proposal.id); setAccepting([...acceptanceInFlight.current]); }
+  };
+  const rebindProposal = async (proposal: Proposal, changes: import("../../shared/agent/generated/contracts.js").RebindProposal["changes"]): Promise<Proposal> => {
+    const updated = await agentApi.rebindProposal(proposal.id, {
+      commandId: agentApi.newCommandId(),
+      expectedDigest: proposal.digest,
+      changes,
+    });
+    const prior = cache.current.get(proposal.conversationId);
+    if (prior) {
+      const next = { ...prior, proposals: mergeProposals(prior.proposals, [updated]) };
+      cache.current.set(proposal.conversationId, next);
+      if (activeId.current === proposal.conversationId) setView(next);
+    }
+    if (currentDraft.proposalId === proposal.id) {
+      updateDraft({ proposalDigest: updated.digest });
+    }
+    setBudgetAttempt(n => n + 1);
+    return updated;
   };
   const cancelProduction = async (run: Run) => {
     const command = cancelCommands.current.get(run.id) ?? { commandId: agentApi.newCommandId(), expectedRevision: run.revision };
@@ -1244,18 +1275,21 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
   const backToWork = () => { openIntent.current++; setSelection(null); setInspectedRun(null); setOpenBatchId(null); };
   const selectWork = (id: string | null) => { backToWork(); setReviewNavigation(null); setSelectedWorkId(id); };
   const openReview = (target: ReviewNavigation) => { setChatDrawer(false); backToWork(); setSelectedWorkId(target.workId); setReviewNavigation(target); };
-  const messageCallbacks = useRef({ openArtifact, openRun, openBatch, acceptProposal, replyToProposal, retryReferences });
-  messageCallbacks.current = { openArtifact, openRun, openBatch, acceptProposal, replyToProposal, retryReferences };
+  const openModelsSettings = useCallback(() => setPage("models"), []);
+  const messageCallbacks = useRef({ openArtifact, openRun, openBatch, acceptProposal, rebindProposal, replyToProposal, retryReferences });
+  messageCallbacks.current = { openArtifact, openRun, openBatch, acceptProposal, rebindProposal, replyToProposal, retryReferences };
   const messageActions = useMemo(() => ({
     onOpenArtifact: (id: string, rev?: string) => messageCallbacks.current.openArtifact(id, rev),
     onOpenRun: (id: string) => void messageCallbacks.current.openRun(id),
     onOpenBatch: (id: string) => messageCallbacks.current.openBatch(id),
     onAccept: (proposal: Proposal) => void messageCallbacks.current.acceptProposal(proposal),
+    onRebind: (proposal: Proposal, changes: import("../../shared/agent/generated/contracts.js").RebindProposal["changes"]) =>
+      messageCallbacks.current.rebindProposal(proposal, changes),
     onReply: (proposal: Proposal) => { messageCallbacks.current.replyToProposal(proposal); composerInput.current?.focus(); },
     onRetry: () => void messageCallbacks.current.retryReferences(),
   }), []);
-  const historyRows = useMemo(() => sortedMessages.map(message => <Fragment key={message.id}><MessageRow budgetRemaining={budgetRemaining} works={view.works} message={message} anchored={view.windowAnchor?.messageId === message.id} {...messageActions} artifacts={view.artifacts} proposals={view.proposals} runs={view.runs} materialBatches={view.materialBatches} accepting={accepting} revisions={revisionCache} errors={referenceErrors} /><ExecutionRecord message={message} works={view.works} /></Fragment>),
-    [sortedMessages, view.works, view.windowAnchor, messageActions, view.artifacts, view.proposals, view.runs, view.materialBatches, accepting, revisionCache, referenceErrors, budgetRemaining]);
+  const historyRows = useMemo(() => sortedMessages.map(message => <Fragment key={message.id}><MessageRow budgetRemaining={budgetRemaining} poolModels={mediaPoolModels} onOpenModelsSettings={canManage ? openModelsSettings : undefined} works={view.works} message={message} anchored={view.windowAnchor?.messageId === message.id} {...messageActions} artifacts={view.artifacts} proposals={view.proposals} runs={view.runs} materialBatches={view.materialBatches} accepting={accepting} revisions={revisionCache} errors={referenceErrors} /><ExecutionRecord message={message} works={view.works} /></Fragment>),
+    [sortedMessages, view.works, view.windowAnchor, messageActions, view.artifacts, view.proposals, view.runs, view.materialBatches, accepting, revisionCache, referenceErrors, budgetRemaining, mediaPoolModels, canManage, openModelsSettings]);
   const cacheRevision = useCallback((revision: ArtifactRevision) => {
     const key = `${revision.artifactId}:${revision.revisionId}`;
     if (!conversationId) return;
@@ -1420,7 +1454,20 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
                   <div className="agent-send-actions">{view.activeRequestId ? <button type="button" disabled={!!currentDraft.proposalId || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]} onClick={() => void sendMessage("steer")} title={activeWork ? `补充正在处理的「${activeWork.title}」` : "补充当前正在处理的请求"}>{activeWork ? `补充「${activeWork.title}」` : "补充当前请求"}</button> : null}<button className="agent-send" data-queued={Boolean(view.activeRequestId) || undefined} type="button" aria-label={view.activeRequestId ? "排队发送" : "发送"} title={view.activeRequestId ? "等待当前请求完成后处理" : "发送"} onClick={() => void sendMessage()} disabled={!canSend || Boolean(skillMutation) || (!currentDraft.text.trim() && !currentDraft.uploads?.length) || pendingFiles.length > 0 || sendingNow || !!pendingSend[conversationId!]}>{view.activeRequestId ? <span>排队</span> : null}<ArrowUp /></button></div>
                 </div>
               </div>
-              {canSend ? <span id="agent-composer-hint" className="agent-composer-hint">Enter {view.activeRequestId ? "排队发送" : "发送"} · Shift + Enter 换行</span> : <div id="agent-composer-hint" className="agent-config-note" role="status">{canManage ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : bootstrap ? "可以先写草稿，请联系管理员配置文本模型后发送。" : "可以先写草稿。"}</div>}
+              {canSend ? <div className="agent-composer-footer-meta">
+                {mediaPoolModels.length > 0 ? <span className="agent-composer-default-models" aria-label="当前配置默认模型">
+                  当前配置默认：{(["video", "image", "speech"] as const)
+                    .filter(k => mediaPoolModels.some(m => m.kind === k))
+                    .map(k => {
+                      const label = { video: "视频", image: "图片", speech: "配音" }[k];
+                      const def = mediaPoolModels.find(m => m.kind === k && m.isDefault);
+                      return `${label} ${def ? `${def.connectionName ? `${def.connectionName}·` : ""}${def.name}` : "每次手动选"}`;
+                    })
+                    .join(" · ")}
+                  {canManage ? <button type="button" className="agent-text-link" onClick={() => setPage("models")}>模型配置</button> : null}
+                </span> : null}
+                <span id="agent-composer-hint" className="agent-composer-hint">Enter {view.activeRequestId ? "排队发送" : "发送"} · Shift + Enter 换行</span>
+              </div> : <div id="agent-composer-hint" className="agent-config-note" role="status">{canManage ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : bootstrap ? "可以先写草稿，请联系管理员配置文本模型后发送。" : "可以先写草稿。"}</div>}
               {conversationId && pendingSend[conversationId] && !sendingNow ? <button type="button" className="agent-retry-send" onClick={() => void sendMessage("new", true)}>重试上次发送（保留原请求）</button> : null}
             </footer>
             {libraryPickerOpen ? <Suspense fallback={null}><LibraryPickerDialog
@@ -1501,7 +1548,7 @@ export function AgentWorkbench({ onLogout, storageOwner }: {
                 simulated={isSimulated} openBatchId={openBatchId}
                 onRevisionLoaded={cacheRevision}
               /></WorkCenter></div> : null}
-              {view.proposals.length || view.proposalCursor ? <details className="agent-proposals-list" open={proposalsOpen} onToggle={event => setProposalsOpen(event.currentTarget.open)}><summary>制作提案 · {view.proposals.length}</summary>{proposalsOpen ? <>{view.proposals.map(proposal => <ProposalCard key={proposal.id} budgetRemaining={budgetRemaining} proposal={proposal} onAccept={p => void acceptProposal(p)} onReply={replyToProposal} busy={accepting.includes(proposal.id)} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onOpen={openArtifact} onOpenRun={runId => void openRun(runId)} />)}{view.proposalCursor ? <button type="button" onClick={() => void loadMoreOutputs("proposals")}>更多提案</button> : null}</> : null}</details> : null}
+              {view.proposals.length || view.proposalCursor ? <details className="agent-proposals-list" open={proposalsOpen} onToggle={event => setProposalsOpen(event.currentTarget.open)}><summary>制作提案 · {view.proposals.length}</summary>{proposalsOpen ? <>{view.proposals.map(proposal => <ProposalCard key={proposal.id} budgetRemaining={budgetRemaining} poolModels={mediaPoolModels} onRebind={rebindProposal} onOpenModelsSettings={canManage ? openModelsSettings : undefined} proposal={proposal} onAccept={p => void acceptProposal(p)} onReply={replyToProposal} busy={accepting.includes(proposal.id)} artifacts={view.artifacts} revisions={revisionCache} works={view.works} onOpen={openArtifact} onOpenRun={runId => void openRun(runId)} />)}{view.proposalCursor ? <button type="button" onClick={() => void loadMoreOutputs("proposals")}>更多提案</button> : null}</> : null}</details> : null}
             </div>
           </section>
         </Panel>
@@ -1515,6 +1562,9 @@ type MessageRowProps = {
   works: Work[]; message: Message; anchored?: boolean; onOpenArtifact: (artifactId: string, revisionId: string) => void; artifacts: ArtifactHead[];
   proposals: Proposal[]; runs: Run[]; onOpenRun: (runId: string) => void; onOpenBatch: (batchId: string) => void; materialBatches: MaterialBatchIndexItem[];
   budgetRemaining?: number | null | undefined;
+  poolModels?: Bootstrap["models"] | undefined;
+  onRebind?: ((proposal: Proposal, changes: import("../../shared/agent/generated/contracts.js").RebindProposal["changes"]) => Promise<Proposal>) | undefined;
+  onOpenModelsSettings?: (() => void) | undefined;
   onAccept?: ((proposal: Proposal) => void) | undefined; onReply: (proposal: Proposal) => void; accepting: string[];
   revisions: Record<string, ArtifactRevision>; errors: Record<string, string>; onRetry: () => void;
 };
@@ -1550,15 +1600,16 @@ function areMessageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): 
   if (prev.message !== next.message || prev.anchored !== next.anchored) return false;
   // 回调经 messageActions 的 ref 转发是稳定引用，出现新引用即视为行为变化。
   if (prev.onOpenArtifact !== next.onOpenArtifact || prev.onOpenRun !== next.onOpenRun || prev.onOpenBatch !== next.onOpenBatch
-    || prev.onAccept !== next.onAccept || prev.onReply !== next.onReply || prev.onRetry !== next.onRetry) return false;
+    || prev.onAccept !== next.onAccept || prev.onRebind !== next.onRebind || prev.onOpenModelsSettings !== next.onOpenModelsSettings
+    || prev.onReply !== next.onReply || prev.onRetry !== next.onRetry) return false;
   if (next.message.references.proposalIds.length) {
-    for (const key of ["works", "artifacts", "proposals", "runs", "materialBatches", "revisions", "errors", "accepting", "budgetRemaining"] as const) if (prev[key] !== next[key]) return false;
+    for (const key of ["works", "artifacts", "proposals", "runs", "materialBatches", "revisions", "errors", "accepting", "budgetRemaining", "poolModels"] as const) if (prev[key] !== next[key]) return false;
     return true;
   }
   return messageRowSignature(prev) === messageRowSignature(next);
 }
 
-export const MessageRow = memo(function MessageRow({ works, message, budgetRemaining, anchored, onOpenArtifact, artifacts, proposals, runs, onOpenRun, onOpenBatch, materialBatches, onAccept, onReply, accepting, revisions, errors, onRetry }: MessageRowProps) {
+export const MessageRow = memo(function MessageRow({ works, message, budgetRemaining, poolModels, onRebind, onOpenModelsSettings, anchored, onOpenArtifact, artifacts, proposals, runs, onOpenRun, onOpenBatch, materialBatches, onAccept, onReply, accepting, revisions, errors, onRetry }: MessageRowProps) {
   const isUser = message.role === "user", notice = message.role === "system_notice";
   const targetTitle = message.feedback?.workId ? works.find(work => work.id === message.feedback?.workId)?.title ?? "已选创作"
     : message.target ? artifacts.find(artifact => artifact.id === message.target?.artifactId)?.title ?? "已选作品" : null;
@@ -1602,7 +1653,7 @@ export const MessageRow = memo(function MessageRow({ works, message, budgetRemai
       })}</div>
       {message.references.proposalIds.map(id => {
         const proposal = proposals.find(item => item.id === id);
-        return proposal ? <ProposalCard key={id} budgetRemaining={budgetRemaining} proposal={proposal} onAccept={onAccept} onReply={onReply} busy={accepting.includes(id)} artifacts={artifacts} revisions={revisions} works={works} onOpen={onOpenArtifact} onOpenRun={onOpenRun} /> : unavailable(`proposal:${id}`, "制作提案");
+        return proposal ? <ProposalCard key={id} budgetRemaining={budgetRemaining} poolModels={poolModels} onRebind={onRebind} onOpenModelsSettings={onOpenModelsSettings} proposal={proposal} onAccept={onAccept} onReply={onReply} busy={accepting.includes(id)} artifacts={artifacts} revisions={revisions} works={works} onOpen={onOpenArtifact} onOpenRun={onOpenRun} /> : unavailable(`proposal:${id}`, "制作提案");
       })}
     </div>
   </div>;

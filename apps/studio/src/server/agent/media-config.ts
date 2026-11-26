@@ -494,6 +494,7 @@ export function imageCatalogEntry(profile: ImageProfile, binding: ModelBinding):
 }
 
 export function imageModelView(profile: ImageProfile, binding: ModelBinding, displayName: string): Bootstrap["models"][number] {
+  const costSummary = `¥${(profile.quote.quoteMinor / 100).toFixed(2)}/张 估价`;
   return {
     binding, name: displayName, kind: "image",
     features: ["text-to-image", profile.image.resolution, profile.image.aspectRatio, profile.image.format.toUpperCase()],
@@ -502,6 +503,11 @@ export function imageModelView(profile: ImageProfile, binding: ModelBinding, dis
       ? `单张 JPEG，${profile.image.resolution} · ¥${(profile.quote.quoteMinor / 100).toFixed(2)}/张（火山方舟公开估价）。`
       : `已核实范围：${profile.image.resolution}、${profile.image.aspectRatio}、low 单张 PNG。估价 ${(profile.quote.quoteMinor / 100).toFixed(2)} CNY/次（estimate：官方 Standard 美元单价 ${profile.quote.pricedAt} 采价，USD→CNY ${profile.quote.usdCny}；low 档每张 token 数官方未公布，按实测 medium 档保守估）；不是供应商账单。`,
     isDefault: false,
+    costSummary,
+    capabilitySummary: {
+      resolutions: [profile.image.resolution],
+      aspectRatios: [profile.image.aspectRatio],
+    },
   };
 }
 
@@ -562,6 +568,9 @@ export function openaiSpeechValidator(profile: OpenAISpeechProfile): NonNullable
     if (op.parameters.voiceId !== profile.speech.voice || op.parameters.format !== profile.speech.output.format) {
       throw new AgentError("CAPABILITY_UNAVAILABLE", `配音参数与已核实的启用组合不一致（${profile.speech.voice} 音色、${profile.speech.output.format} 输出）。`);
     }
+    if (op.parameters.rate !== undefined && op.parameters.rate !== "+0%") {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "OpenAI 配音通道不支持自定义语速倍率（rate），请恢复默认语速或改选 Edge 免费配音。");
+    }
     if (!inputs) return;
     const input = inputs[0];
     if (op.inputs.length !== 1 || !input || (input.kind !== "text" && (input.kind !== "artifact_revision" || input.content.format !== "markdown"))) {
@@ -585,6 +594,9 @@ export function openaiSpeechModelView(profile: OpenAISpeechProfile, binding: Mod
     availability: "configured",
     verificationNote: `已核实范围：${profile.speech.voice} 音色逐字朗读、${profile.speech.output.format} ${profile.speech.output.sampleRateHz / 1000}kHz 单声道、≤1000 码点、实际音频 ≤120 秒。估价 ${(profile.quote.quoteMinor / 100).toFixed(2)} CNY/条（estimate：官方 Standard 美元单价 ${profile.quote.pricedAt} 采价，USD→CNY ${profile.quote.usdCny}，按用量上限保守估）；不是每条实收。`,
     isDefault: false,
+    costSummary: `¥${(profile.quote.quoteMinor / 100).toFixed(2)}/条 上限估价`,
+    defaultVoiceId: profile.speech.voice,
+    voices: [{ id: profile.speech.voice, label: "Marin · 自然英文/多语声线" }],
   };
 }
 
@@ -626,8 +638,15 @@ export function minimaxRegionOf(baseUrl: string): "io" | "cn" | null {
 }
 
 export const MINIMAX_SPEECH_MODEL_IDS: ReadonlySet<string> = new Set(["speech-2.8-turbo", "speech-2.8-hd"]);
-// 首轮冻结的已核实中文系统声线（官方声线目录：温润男声，旁白/讲故事）；声线集合后续按目录扩，不改内部 Id。
+// 首轮冻结的已核实中文系统声线（官方声线目录：温润男声，旁白/讲故事）；声线集合按已核实官方系统声线提供选择，不改默认 profile 身份。
 export const MINIMAX_SPEECH_VOICE = "Chinese (Mandarin)_Gentleman";
+export const MINIMAX_SPEECH_VOICES: ReadonlyArray<{ id: string; label: string }> = [
+  { id: "Chinese (Mandarin)_Gentleman", label: "温润男声 · 普通话" },
+  { id: "Chinese (Mandarin)_News_Anchor", label: "新闻女声 · 普通话" },
+  { id: "Chinese (Mandarin)_Warm_Bestie", label: "温暖女声 · 普通话" },
+  { id: "Chinese (Mandarin)_Radio_Host", label: "电台男声 · 普通话" },
+];
+const MINIMAX_SPEECH_VOICE_IDS: ReadonlySet<string> = new Set(MINIMAX_SPEECH_VOICES.map(item => item.id));
 
 export interface MiniMaxSpeechProfile {
   providerId: "minimax";
@@ -691,8 +710,12 @@ export function minimaxSpeechValidator(profile: MiniMaxSpeechProfile): NonNullab
   return (op, inputs): void => {
     if (op.kind !== "speech") throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 speech 操作。");
     if (op.maxCreateAttempts !== 1) throw new AgentError("INVALID_INPUT", "本通道每个操作只允许一次创建尝试。");
-    if (op.parameters.voiceId !== profile.speech.voice || op.parameters.format !== profile.speech.output.format) {
-      throw new AgentError("CAPABILITY_UNAVAILABLE", `配音参数与已核实的启用组合不一致（${profile.speech.voice} 声线、${profile.speech.output.format} 输出）。`);
+    if ((!MINIMAX_SPEECH_VOICE_IDS.has(op.parameters.voiceId) && op.parameters.voiceId !== profile.speech.voice)
+      || op.parameters.format !== profile.speech.output.format) {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", `配音参数与已核实的启用组合不一致（${profile.speech.voice} 等系统声线、${profile.speech.output.format} 输出）。`);
+    }
+    if (op.parameters.rate !== undefined && op.parameters.rate !== "+0%") {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "MiniMax 配音通道不支持自定义语速倍率（rate），请恢复默认语速或改选 Edge 免费配音。");
     }
     if (!inputs) return;
     const input = inputs[0];
@@ -716,12 +739,18 @@ export function minimaxSpeechCatalogEntry(profile: MiniMaxSpeechProfile, binding
 }
 
 export function minimaxSpeechModelView(profile: MiniMaxSpeechProfile, binding: ModelBinding, displayName: string): Bootstrap["models"][number] {
+  const rateLabel = profile.quote.currency === "USD"
+    ? `$${profile.quote.perMillionChars}/百万字符 估价`
+    : `¥${profile.quote.perMillionChars}/百万字符 估价`;
   return {
     binding, name: displayName, kind: "speech",
     features: ["text-to-speech", profile.speech.voice, profile.speech.output.format, "32kHz 单声道", `≤${profile.speech.maxTextLength} 码点`],
     availability: "configured",
     verificationNote: `已核实范围：${profile.speech.voice} 声线、${profile.speech.output.format} ${profile.speech.output.sampleRateHz / 1000}kHz 单声道、≤${profile.speech.maxTextLength} 码点旁白。估价 ${(minimaxSpeechQuoteMinor(profile) / 100).toFixed(2)} CNY/条（estimate：${profile.quote.source}）；账户可用性尚未验证，实际以供应商账单为准。`,
     isDefault: false,
+    costSummary: rateLabel,
+    defaultVoiceId: profile.speech.voice,
+    voices: [...MINIMAX_SPEECH_VOICES] as [{ id: string; label: string }, ...{ id: string; label: string }[]],
   };
 }
 
@@ -806,6 +835,98 @@ export function wanVideoBinding(profile: WanVideoProfile, connectionId: string):
   };
 }
 
+// —— Google Colab 原生 LTX-2.5 Distilled 视频通道（与厂商 API 共存；消耗 Colab CU，人民币 API 费用为 0） ——
+
+export const COLAB_VIDEO_MODEL_IDS: ReadonlySet<string> = new Set(["Lightricks/LTX-2.5-distilled"]);
+export const DEFAULT_COLAB_MODEL_REVISION = "main";
+
+export interface ColabVideoProfile {
+  providerId: "colab";
+  modelId: string;
+  baseUrl: string;
+  modelRevision: string;
+  mountDrive: boolean;
+  video: RangedVideoCapability;
+  quote: RangedVideoQuoteConfig;
+}
+
+export function isColabBaseUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return url.protocol === "https:" && url.hostname === "colab.research.google.com"
+      && url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password;
+  } catch { return false; }
+}
+
+export function colabVideoProfile(modelId: string, baseUrl: string): ColabVideoProfile | null {
+  if (!isColabBaseUrl(baseUrl) || !COLAB_VIDEO_MODEL_IDS.has(modelId)) return null;
+  return {
+    providerId: "colab",
+    modelId,
+    baseUrl,
+    modelRevision: DEFAULT_COLAB_MODEL_REVISION,
+    mountDrive: false,
+    video: { durationSecondsMin: 5, durationSecondsMax: 5, aspectRatio: "16:9", resolution: "720p", audioModes: ["none", "native"] },
+    quote: {
+      kind: "estimate", perSecondMinor: { "720p": 0 }, perSecondUsd: null, usdCny: null,
+      version: "2026-11-colab-cu", source: "Google Colab 计算单元（CU）按实例运行时长消耗，无厂商人民币 API 扣费", verifiedAt: "2026-11-25",
+    },
+  };
+}
+
+export function colabVideoBinding(profile: ColabVideoProfile, connectionId: string): ModelBinding {
+  const { providerId, modelId, baseUrl, modelRevision, mountDrive, video, quote } = profile;
+  return {
+    providerId, modelId, connectionId,
+    configurationRevisionId: `cfg-${digestOf({ providerId, modelId, baseUrl, modelRevision, mountDrive, video, quote, connectionId }).slice(0, 24)}`,
+  };
+}
+
+export function colabVideoValidator(profile: ColabVideoProfile): NonNullable<QuoteCatalogEntry["validate"]> {
+  return (op, inputs, context): void => {
+    if (op.kind !== "video") throw new AgentError("CAPABILITY_UNAVAILABLE", "该目录条目只支持 video 操作。");
+    if (op.maxCreateAttempts !== 1) throw new AgentError("INVALID_INPUT", "本通道每个操作只允许一次创建尝试。");
+    const withImages = validateVideoImages(profile.modelId, op, inputs, context);
+    if (!withImages || op.parameters.firstFrameSlot === undefined) {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "Colab LTX-2.5 需要冻结一张首帧图片（firstFrameSlot）和一份镜头提示词。");
+    }
+    if (op.parameters.aspectRatio !== "16:9" && op.parameters.aspectRatio !== "9:16") {
+      throw new AgentError("CAPABILITY_UNAVAILABLE", "Colab LTX-2.5 当前只支持 16:9 或 9:16 冻结画幅。");
+    }
+    validateRangedVideoParameters(profile.video, op.parameters, "Colab LTX-2.5", true);
+  };
+}
+
+export function colabVideoCatalogEntry(profile: ColabVideoProfile, binding: ModelBinding): QuoteCatalogEntry {
+  return {
+    binding, quoteMinor: 0, priceKind: "estimate",
+    validate: colabVideoValidator(profile), maxCreateAttempts: 1,
+    quoteMinorFor: () => 0,
+    estimateNote: `Colab LTX-2.5 消耗 Google Colab 计算单元（CU），不产生厂商人民币 API 扣费（CNY ¥0.00）；单镜预计约 0.22–1.43 CU（视卡型与缓存而定，模型修订 ${profile.modelRevision}），实际显卡、分阶段耗时与账户余额观测差值记录于尝试用量。`,
+  };
+}
+
+export function colabVideoModelView(profile: ColabVideoProfile, binding: ModelBinding, displayName: string): Bootstrap["models"][number] {
+  return {
+    binding, name: displayName, kind: "video",
+    features: ["i2v", "5s", profile.video.resolution, "16:9 / 9:16", "无声或原生音画", "Colab CU"],
+    availability: "configured",
+    verificationNote: `已核实范围：首帧图生视频、5 秒、${profile.video.resolution}（16:9 或 9:16）、无声或原生音画、固定模型修订 ${profile.modelRevision}。消耗 Google Colab 计算单元（CU），人民币 API 费用 ¥0.00；账户余额差值仅作观测记录。`,
+    isDefault: false,
+    costSummary: "¥0.00 + Colab CU（约 0.22–1.43 CU/镜）",
+    externalUnit: "colab_cu",
+    capabilitySummary: {
+      durationSecondsMin: profile.video.durationSecondsMin,
+      durationSecondsMax: profile.video.durationSecondsMax,
+      resolutions: [profile.video.resolution],
+      aspectRatios: ["16:9", "9:16"],
+      requiresFirstFrame: true,
+      supportsReferenceImages: false,
+      audioModes: [...profile.video.audioModes] as ["none" | "native", ...("none" | "native")[]],
+    },
+  };
+}
+
 // 参数化视频通道共用：校验器/目录条目/型号视图（Seedance 参数化行、H3、万相同一形状）。
 export function rangedVideoValidator(video: RangedVideoCapability, channelLabel: string, modelId?: string): NonNullable<QuoteCatalogEntry["validate"]> {
   return (op, inputs, context): void => {
@@ -829,13 +950,25 @@ export function rangedVideoCatalogEntry(binding: ModelBinding, video: RangedVide
 
 export function rangedVideoModelView(binding: ModelBinding, displayName: string, video: RangedVideoCapability,
   quote: RangedVideoQuoteConfig, channelLabel: string, available = true, unavailableReason = ""): Bootstrap["models"][number] {
+  const perSecMinor = rangedQuoteMinor(quote, 1, video.resolution);
+  const imageFeats = videoImageFeatures(binding.modelId);
   return {
     binding, name: displayName, kind: "video",
-    features: ["text-to-video", ...videoImageFeatures(binding.modelId), `${video.durationSecondsMin}–${video.durationSecondsMax}s`, video.resolution, video.aspectRatio,
+    features: ["text-to-video", ...imageFeats, `${video.durationSecondsMin}–${video.durationSecondsMax}s`, video.resolution, video.aspectRatio,
       video.audioModes.includes("native") ? video.audioModes.includes("none") ? "无声或原生音画" : "原生音画" : "无声输出"],
     availability: available ? "configured" : "unavailable",
     verificationNote: `${unavailableReason}已核实范围：${video.durationSecondsMin}–${video.durationSecondsMax} 整数秒、${video.resolution} ${video.aspectRatio}、${
       video.audioModes.includes("native") ? video.audioModes.includes("none") ? "无声或原生音画" : "原生音画（官方无静音字段）" : "无声输出"}。按冻结秒数 × 每秒单价估价（${quote.source}，核实 ${quote.verifiedAt}）；账户可用性尚未验证，实际以供应商账单为准。`,
     isDefault: false,
+    costSummary: `¥${(perSecMinor / 100).toFixed(2)}/秒（${video.resolution} 估价）`,
+    capabilitySummary: {
+      durationSecondsMin: video.durationSecondsMin,
+      durationSecondsMax: video.durationSecondsMax,
+      resolutions: [video.resolution],
+      aspectRatios: imageFeats.length > 0 ? ["16:9", "9:16", "1:1"] : [video.aspectRatio],
+      requiresFirstFrame: false,
+      supportsReferenceImages: imageFeats.includes("reference-images"),
+      audioModes: [...video.audioModes] as ["none" | "native", ...("none" | "native")[]],
+    },
   };
 }

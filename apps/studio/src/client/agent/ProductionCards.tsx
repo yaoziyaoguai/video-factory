@@ -1,5 +1,9 @@
 import { lazy, Suspense, useEffect, useState, type CSSProperties } from "react";
-import type { ArtifactHead, ArtifactRevision, AudioSummary, ContentSource, CreativeProjectContent, FileContent, InputRef, MediaContent, OperationSpec, Proposal, RenderFitMode, RenderParameters, Run, Work } from "../../shared/agent/generated/contracts.js";
+import type {
+  ArtifactHead, ArtifactRevision, AudioSummary, Bootstrap, ContentSource, CreativeProjectContent,
+  FileContent, InputRef, MediaContent, ModelBinding, OperationSpec, Proposal, ProposalModelLabel,
+  RebindProposal, RenderFitMode, RenderParameters, Run, Work,
+} from "../../shared/agent/generated/contracts.js";
 import { projectFileMime } from "../../shared/agent/project-files.js";
 import { AudioSummaryView, MediaSourceDetails } from "./AudioSummaryView.js";
 import { blobUrl } from "./review-content.js";
@@ -191,10 +195,244 @@ function VideoAnchors({ spec, works, artifacts, revisions, onOpen }: {
   });
 }
 
-function ProposalScope({ spec, audioSummary, artifacts = [], revisions = {}, works = [], onOpen }: ScopeProps & { spec: Proposal["spec"]; audioSummary?: AudioSummary | undefined }) {
+type MediaKind = "image" | "video" | "speech";
+type MediaOperationSpec = Exclude<OperationSpec, { kind: "render" }>;
+type PoolModelEntry = Bootstrap["models"][number];
+
+const MEDIA_KIND_ORDER: readonly MediaKind[] = ["video", "image", "speech"];
+
+function sameBinding(a: ModelBinding | null | undefined, b: ModelBinding | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.providerId === b.providerId
+    && a.modelId === b.modelId
+    && a.connectionId === b.connectionId
+    && a.configurationRevisionId === b.configurationRevisionId;
+}
+
+function modelLabelOf(
+  binding: ModelBinding | null | undefined,
+  spec: Proposal["spec"],
+  poolModels: readonly PoolModelEntry[],
+): { connectionName: string; modelName: string; full: string; costSummary?: string; externalUnit?: ProposalModelLabel["externalUnit"]; defaultVoiceId?: string } {
+  if (!binding) return { connectionName: "", modelName: "未选定模型", full: "未选定模型" };
+  const fromSpec = "modelLabels" in spec
+    ? spec.modelLabels?.find(item => item.configurationRevisionId === binding.configurationRevisionId)
+    : undefined;
+  const fromPool = poolModels.find(item => sameBinding(item.binding, binding));
+  const connectionName = fromSpec?.connectionName ?? fromPool?.connectionName ?? (
+    binding.providerId === "ark" ? "火山方舟"
+      : binding.providerId === "colab" ? "Google Colab"
+      : binding.providerId === "minimax" ? "MiniMax"
+      : binding.providerId === "wan" ? "万相"
+      : binding.providerId === "openai" ? "OpenAI"
+      : binding.providerId === "edge-tts" ? "免费服务"
+      : binding.providerId
+  );
+  const modelName = fromSpec?.modelName ?? fromPool?.name ?? binding.modelId;
+  const costSummary = fromSpec?.costSummary ?? fromPool?.costSummary;
+  const externalUnit = fromSpec?.externalUnit ?? fromPool?.externalUnit;
+  const defaultVoiceId = fromSpec?.defaultVoiceId ?? fromPool?.defaultVoiceId;
+  return {
+    connectionName,
+    modelName,
+    full: connectionName ? `${connectionName} · ${modelName}` : modelName,
+    ...(costSummary !== undefined ? { costSummary } : {}),
+    ...(externalUnit !== undefined ? { externalUnit } : {}),
+    ...(defaultVoiceId !== undefined ? { defaultVoiceId } : {}),
+  };
+}
+
+function voiceLabelOf(voiceId: string, binding: ModelBinding, poolModels: readonly PoolModelEntry[]): string {
+  const poolEntry = poolModels.find(item => sameBinding(item.binding, binding));
+  const matched = poolEntry?.voices?.find(v => v.id === voiceId);
+  if (matched) return matched.label;
+  const fallbackLabels: Record<string, string> = {
+    "Chinese (Mandarin)_Gentleman": "温润男声 · 普通话",
+    "Chinese (Mandarin)_News_Anchor": "新闻女声 · 普通话",
+    "Chinese (Mandarin)_Warm_Bestie": "温暖女声 · 普通话",
+    "Chinese (Mandarin)_Radio_Host": "电台男声 · 普通话",
+    "zh-CN-XiaoxiaoNeural": "晓晓 · 中文女声",
+    "zh-CN-YunxiNeural": "云希 · 中文男声",
+    "zh-CN-YunyangNeural": "云扬 · 新闻播报",
+    "zh-CN-XiaoyiNeural": "晓伊 · 活泼女声",
+    "en-US-AriaNeural": "Aria · 英文女声",
+    "en-US-GuyNeural": "Guy · 英文男声",
+    marin: "Marin · 自然声线",
+  };
+  return fallbackLabels[voiceId] ?? voiceId;
+}
+
+function operationCompatibilityReason(entry: PoolModelEntry, op: MediaOperationSpec): string | null {
+  if (entry.availability !== "configured") return "尚未完成配置";
+  if (op.kind === "speech" && op.parameters.rate && op.parameters.rate !== "+0%" && entry.binding.providerId !== "edge-tts") {
+    return "自定义语速仅 Edge 免费配音支持 — 请回对话调整";
+  }
+  const cap = entry.capabilitySummary;
+  if (!cap) return null;
+  if (op.kind === "video") {
+    const p = op.parameters;
+    if (cap.requiresFirstFrame && p.firstFrameSlot === undefined) {
+      return "需单张首帧图 — 请回对话上传或审阅分镜";
+    }
+    if (cap.supportsReferenceImages === false && (p.referenceImageSlots?.length || p.lastFrameSlot !== undefined)) {
+      return "不支持尾帧或多参考图 — 请回对话调整";
+    }
+    if (cap.durationSecondsMin !== undefined && cap.durationSecondsMax !== undefined) {
+      if (p.durationSeconds < cap.durationSecondsMin || p.durationSeconds > cap.durationSecondsMax) {
+        const range = cap.durationSecondsMin === cap.durationSecondsMax
+          ? `固定 ${cap.durationSecondsMin}s`
+          : `${cap.durationSecondsMin}–${cap.durationSecondsMax}s`;
+        return `仅支持 ${range}（当前 ${p.durationSeconds}s）— 请回对话调整`;
+      }
+    }
+    if (cap.resolutions?.length) {
+      const normalized = p.resolution.toLowerCase();
+      const allowed = cap.resolutions.map(r => r.toLowerCase());
+      if (!allowed.includes(normalized)) {
+        return `需 ${cap.resolutions.join("/")}（当前 ${p.resolution}）— 请回对话调整`;
+      }
+    }
+    if (cap.aspectRatios?.length && !cap.aspectRatios.includes(p.aspectRatio)) {
+      return `不支持 ${p.aspectRatio} 画幅 — 请回对话调整`;
+    }
+    if (cap.audioModes?.length && !cap.audioModes.includes(p.audioMode)) {
+      return `仅支持${cap.audioModes.includes("native") ? "原生音画" : "静音"} — 请回对话调整`;
+    }
+  }
+  if (op.kind === "image" && cap.aspectRatios?.length && !cap.aspectRatios.includes(op.parameters.aspectRatio)) {
+    return `不支持 ${op.parameters.aspectRatio} 画幅 — 请回对话调整`;
+  }
+  return null;
+}
+
+function batchCompatibilityReason(entry: PoolModelEntry, ops: readonly MediaOperationSpec[]): string | null {
+  for (const op of ops) {
+    const reason = operationCompatibilityReason(entry, op);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+// 多镜头平局时（如双镜头单改第 1 镜为 1:1），优先把未被卡片单独覆盖（非 card_selected）或匹配原默认的修订判为主选。
+function choosePrimaryRevision(
+  ops: readonly MediaOperationSpec[],
+  selectionSources: ReadonlyMap<string, string>,
+  defaultBinding: ModelBinding | null | undefined,
+): string {
+  const stats = new Map<string, { count: number; nonOverridden: number; isDefault: number }>();
+  for (const op of ops) {
+    const rev = op.model.configurationRevisionId;
+    const prev = stats.get(rev) ?? { count: 0, nonOverridden: 0, isDefault: defaultBinding && sameBinding(op.model, defaultBinding) ? 1 : 0 };
+    prev.count += 1;
+    if (selectionSources.get(op.operationId) !== "card_selected") prev.nonOverridden += 1;
+    stats.set(rev, prev);
+  }
+  return [...stats.entries()].sort((a, b) =>
+    b[1].count - a[1].count
+    || b[1].nonOverridden - a[1].nonOverridden
+    || b[1].isDefault - a[1].isDefault,
+  )[0]![0];
+}
+
+function operationDisplayName(op: OperationSpec, all: readonly OperationSpec[], reuses: boolean): string {
+  if (op.kind === "render") return reuses ? "重新合成" : KINDS.render;
+  const peers = all.filter(item => item.kind === op.kind);
+  return peers.length > 1 ? `${KINDS[op.kind]} ${peers.indexOf(op) + 1}` : KINDS[op.kind];
+}
+
+function ModelPoolSelect({
+  id,
+  label,
+  currentBinding,
+  isPendingSelection,
+  defaultBinding,
+  poolOptions,
+  targetOps,
+  disabled,
+  spec,
+  allPoolModels,
+  onSelect,
+}: {
+  id: string;
+  label: string;
+  currentBinding: ModelBinding | null;
+  isPendingSelection: boolean;
+  defaultBinding: ModelBinding | null | undefined;
+  poolOptions: readonly PoolModelEntry[];
+  targetOps: readonly MediaOperationSpec[];
+  disabled: boolean;
+  spec: Proposal["spec"];
+  allPoolModels: readonly PoolModelEntry[];
+  onSelect: (entry: PoolModelEntry) => void;
+}) {
+  const currentInPool = currentBinding ? poolOptions.some(item => sameBinding(item.binding, currentBinding)) : false;
+  const selectValue = isPendingSelection || !currentBinding ? "" : currentBinding.configurationRevisionId;
+  const currentLabel = modelLabelOf(currentBinding, spec, allPoolModels);
+  return <label className="agent-pool-select-field" htmlFor={id}>
+    <span>{label}</span>
+    <select
+      id={id}
+      aria-label={label}
+      value={selectValue}
+      disabled={disabled || poolOptions.length === 0}
+      onChange={event => {
+        const chosen = poolOptions.find(item => item.binding.configurationRevisionId === event.target.value);
+        if (chosen) onSelect(chosen);
+      }}
+    >
+      {isPendingSelection ? <option value="" disabled>请选择本次使用的模型…</option> : null}
+      {!isPendingSelection && currentBinding && !currentInPool ? (
+        <option value={currentBinding.configurationRevisionId} disabled>
+          {currentLabel.full}（已停用 · 请改选可用模型）
+        </option>
+      ) : null}
+      {poolOptions.map(entry => {
+        const reason = batchCompatibilityReason(entry, targetOps);
+        const isDef = defaultBinding ? sameBinding(entry.binding, defaultBinding) : entry.isDefault;
+        const connPrefix = entry.connectionName ? `${entry.connectionName} · ` : "";
+        const costSuffix = entry.costSummary ? ` · ${entry.costSummary}` : "";
+        const badgeSuffix = isDef ? " [默认]" : "";
+        return (
+          <option
+            key={entry.binding.configurationRevisionId}
+            value={entry.binding.configurationRevisionId}
+            disabled={Boolean(reason)}
+          >
+            {connPrefix}{entry.name}{costSuffix}{badgeSuffix}{reason ? `（不可用：${reason}）` : ""}
+          </option>
+        );
+      })}
+    </select>
+  </label>;
+}
+
+function ProposalScope({
+  spec,
+  audioSummary,
+  artifacts = [],
+  revisions = {},
+  works = [],
+  onOpen,
+  canEditModels = false,
+  rebinding = false,
+  poolModels = [],
+  onRebindOperation,
+}: ScopeProps & {
+  spec: Proposal["spec"];
+  audioSummary?: AudioSummary | undefined;
+  canEditModels?: boolean;
+  rebinding?: boolean;
+  poolModels?: readonly PoolModelEntry[];
+  onRebindOperation?: ((op: MediaOperationSpec, model: ModelBinding, voiceId?: string) => void) | undefined;
+}) {
   const final = spec.operations.find(item => item.operationId === spec.finalOutput.operationId);
+  const [scopeOpen, setScopeOpen] = useState(false);
   const reuses = specReusesMedia(spec);
   const targetLine = outputTargetLabel(spec, works);
+  const defaultsMap = "defaultsAtPrepare" in spec ? spec.defaultsAtPrepare : undefined;
+  const sourceMap = new Map(
+    ("selectionSources" in spec ? spec.selectionSources ?? [] : []).map(item => [item.operationId, item.source]),
+  );
   // 保留/重做摘要（B4/E3）：只统计 final render 的视觉输入与旁白，从冻结规格直接数出来。
   let keptLine: string | null = null;
   if (final?.kind === "render" && reuses && final.parameters.assembly !== "code_project") {
@@ -234,15 +472,40 @@ function ProposalScope({ spec, audioSummary, artifacts = [], revisions = {}, wor
         ? <>画面顺序：{op.parameters.videoInputSlots.map(slot => inputLabel(op.inputs[slot]!, spec, artifacts, revisions) + slotFitLabel(op.parameters, slot)).join(" → ")} · 旁白：{inputLabel(op.inputs[op.parameters.narrationInputSlot]!, spec, artifacts, revisions)}</>
         : <>拼接顺序：{op.inputs.map((ref, slot) => inputLabel(ref, spec, artifacts, revisions) + slotFitLabel(op.parameters, slot)).join(" → ")}</>}
     </p>)}
-    <details className="agent-scope-details"><summary>查看制作范围 · {spec.operations.length} 项操作</summary>
-      <ul className="agent-proposal-operations">{spec.operations.map(op => <li key={op.operationId}>
-        <strong>{op.kind === "render" && reuses ? "重新合成" : KINDS[op.kind]}</strong><span className="agent-operation-line">{operationSummary(op)}</span>
-        <span className="agent-operation-line">每次 {money(op.quotePerAttempt.amountMinor ?? 0)}（{op.priceKind === "estimate" ? "估价" : "封顶"}） · 最多 {op.maxCreateAttempts} 次</span>
-        <ol className="agent-operation-inputs" aria-label={`${op.operationId} 的输入`}>{op.inputs.map((ref, index) => <li key={index}>
-          {ref.kind === "text" ? <span className="agent-production-text"><small>本次使用的文字</small><span>{ref.text}</span></span> : ref.kind === "artifact_revision" && onOpen ? <button type="button" onClick={() => onOpen(ref.artifactId, ref.revisionId)}>{inputLabel(ref, spec, artifacts, revisions)}</button> : inputLabel(ref, spec, artifacts, revisions)}
-        </li>)}</ol>
-        {op.model ? <dl className="agent-model-binding"><dt>模型</dt><dd>{op.model.providerId} / {op.model.modelId}</dd></dl> : null}
-      </li>)}</ul>
+    <details className="agent-scope-details" onToggle={event => setScopeOpen(event.currentTarget.open)}><summary>查看制作范围 · {spec.operations.length} 项操作</summary>
+      <ul className="agent-proposal-operations">{spec.operations.map(op => {
+        const opTitle = operationDisplayName(op, spec.operations, reuses);
+        const kindPool = op.kind !== "render" ? poolModels.filter(m => m.kind === op.kind && m.availability === "configured") : [];
+        const modelInfo = op.model ? modelLabelOf(op.model, spec, poolModels) : null;
+        const isColabOp = op.model?.providerId === "colab" || modelInfo?.externalUnit === "colab_cu";
+        return <li key={op.operationId}>
+          <strong>{opTitle}</strong><span className="agent-operation-line">{operationSummary(op)}</span>
+          <span className="agent-operation-line">
+            {isColabOp
+              ? "每次 ¥0.00 + Colab CU（预计约 0.22–1.43 CU，按实际运行时长） · 最多 1 次"
+              : `每次 ${money(op.quotePerAttempt.amountMinor ?? 0)}（${op.priceKind === "estimate" ? "估价" : "封顶"}） · 最多 ${op.maxCreateAttempts} 次`}
+          </span>
+          <ol className="agent-operation-inputs" aria-label={`${op.operationId} 的输入`}>{op.inputs.map((ref, index) => <li key={index}>
+            {ref.kind === "text" ? <span className="agent-production-text"><small>本次使用的文字</small><span>{ref.text}</span></span> : ref.kind === "artifact_revision" && onOpen ? <button type="button" onClick={() => onOpen(ref.artifactId, ref.revisionId)}>{inputLabel(ref, spec, artifacts, revisions)}</button> : inputLabel(ref, spec, artifacts, revisions)}
+          </li>)}</ol>
+          {op.model ? <dl className="agent-model-binding"><dt>模型</dt><dd>{modelInfo ? `${modelInfo.full}（${op.model.modelId}）` : `${op.model.providerId} / ${op.model.modelId}`}</dd></dl> : null}
+          {scopeOpen && canEditModels && op.kind !== "render" && onRebindOperation && kindPool.length > 0 ? <div className="agent-op-model-picker">
+            <ModelPoolSelect
+              id={`op-model-${op.operationId}`}
+              label={`更换 ${opTitle} 的模型`}
+              currentBinding={op.model}
+              isPendingSelection={sourceMap.get(op.operationId) === "pending_selection"}
+              defaultBinding={defaultsMap?.[op.kind]}
+              poolOptions={kindPool}
+              targetOps={[op]}
+              disabled={rebinding}
+              spec={spec}
+              allPoolModels={poolModels}
+              onSelect={chosen => onRebindOperation(op, chosen.binding, chosen.defaultVoiceId)}
+            />
+          </div> : null}
+        </li>;
+      })}</ul>
     </details>
   </>;
 }
@@ -253,44 +516,424 @@ function ProposalPrice({ proposal }: { proposal: Proposal }) {
   const simulated = proposal.spec.operations.some(op => op.model?.providerId === "fixture-text");
   const speech = proposal.spec.operations.filter(op => op.kind === "speech");
   const speechMinor = speech.reduce((sum, op) => sum + (op.quotePerAttempt.amountMinor ?? 0) * op.maxCreateAttempts, 0);
+  const colabCount = proposal.spec.operations.filter(op => op.model?.providerId === "colab").length;
   const zeroLocalRender = proposal.spec.operations.some(op => op.kind === "render" && op.quotePerAttempt.amountMinor === 0);
   return <>
-    <p>{estimated ? "估算" : "报价"} {money(totalMinor)} · 本次授权 {money(proposal.spec.maxSpend.amountMinor)}。{estimated ? "估算不代表实际账单或供应商账单封顶。" : "报价不代表实际账单。"}</p>
+    <p className="agent-proposal-price-headline">{estimated ? "估算" : "报价"} {money(totalMinor)} · 本次授权 {money(proposal.spec.maxSpend.amountMinor)}。{estimated ? "估算不代表实际账单或供应商账单封顶。" : "报价不代表实际账单。"}</p>
+    {colabCount > 0 ? <p className="agent-model-note agent-colab-cu-note">算力分开核算：含 {colabCount} 镜 Google Colab 计算单元（预计约 0.22–1.43 CU/镜，实际用量按运行时长记录，不计入厂商人民币账单）。</p> : null}
     {zeroLocalRender ? <p className="agent-model-note">{speech.length ? `本次新配音 ${money(speechMinor)}；` : ""}本地合成 ¥0.00 仅指该操作无媒体供应商费用，其他制作操作与运行成本需分别核对。</p> : null}
     {simulated ? <p className="agent-model-note">模拟媒体，仅验证流程，不发生真实扣费。</p> : null}
     <details className="agent-scope-details"><summary>费用说明</summary><p>{proposal.priceDisclosure}</p></details>
   </>;
 }
 
-export function ProposalCard({ proposal, budgetRemaining, onAccept, onReply, busy = false, artifacts, revisions, works = [], onOpen, onOpenRun }: ScopeProps & {
-  proposal: Proposal; onAccept?: ((proposal: Proposal) => void) | undefined; onReply?: (proposal: Proposal) => void;
+export function ProposalCard({
+  proposal,
+  budgetRemaining,
+  onAccept,
+  onReply,
+  busy = false,
+  artifacts,
+  revisions,
+  works = [],
+  onOpen,
+  onOpenRun,
+  poolModels = [],
+  onRebind,
+  onOpenModelsSettings,
+}: ScopeProps & {
+  proposal: Proposal;
+  onAccept?: ((proposal: Proposal) => void) | undefined;
+  onReply?: (proposal: Proposal) => void;
   budgetRemaining?: number | null | undefined;
-  busy?: boolean; onOpenRun?: ((runId: string) => void) | undefined;
+  busy?: boolean;
+  onOpenRun?: ((runId: string) => void) | undefined;
+  poolModels?: readonly PoolModelEntry[] | undefined;
+  onRebind?: ((proposal: Proposal, changes: RebindProposal["changes"]) => Promise<Proposal>) | undefined;
+  onOpenModelsSettings?: (() => void) | undefined;
 }) {
   const [now, setNow] = useState(Date.now);
+  const [editingModels, setEditingModels] = useState(false);
+  const [rebinding, setRebinding] = useState(false);
+  const [rebindError, setRebindError] = useState("");
+  const [failedChanges, setFailedChanges] = useState<RebindProposal["changes"] | null>(null);
+
   useEffect(() => {
     const delay = Date.parse(proposal.expiresAt) - Date.now();
     if (delay <= 0) { setNow(Date.now()); return; }
     const timer = window.setTimeout(() => setNow(Date.now()), Math.min(delay + 50, 2_147_483_647));
     return () => window.clearTimeout(timer);
   }, [proposal.expiresAt]);
-  const expired = proposal.state === "ready" && Date.parse(proposal.expiresAt) <= now;
+
+  const expired = Date.parse(proposal.expiresAt) <= now && proposal.state !== "accepted";
   const ready = proposal.state === "ready" && !expired;
-  // 受理门以服务端推导的 blocker 为准（目录/绑定/报价、输入漂移、必要认可）；
-  // 客户端不再从阶段状态自行推导可否确认。
-  const startable = ready && proposal.acceptanceBlocker === null;
+  const mediaOps = proposal.spec.operations.filter((op): op is MediaOperationSpec => op.kind !== "render");
+  const involvedKinds = MEDIA_KIND_ORDER.filter(kind => mediaOps.some(op => op.kind === kind));
+  const modernSpec = "type" in proposal.spec ? proposal.spec : null;
+  const hasPoolSnapshot = Boolean(modernSpec?.defaultsAtPrepare);
+  const defaultsAtPrepare = modernSpec?.defaultsAtPrepare;
+  const selectionSources = new Map((modernSpec?.selectionSources ?? []).map(item => [item.operationId, item.source]));
+
+  // 检查是否因绑定停用而变为 stale（仍未受理且未过期，允许在卡内换绑恢复就绪）。
+  const hasDisabledBoundModel = involvedKinds.some(kind => {
+    const kindPool = poolModels.filter(m => m.kind === kind && m.availability === "configured");
+    if (kindPool.length === 0) return false;
+    return mediaOps.filter(op => op.kind === kind).some(op => !kindPool.some(m => sameBinding(m.binding, op.model)));
+  });
+  const canEditModels = Boolean(
+    onRebind
+    && modernSpec
+    && involvedKinds.length > 0
+    && proposal.acceptedRunId === null
+    && proposal.state !== "accepted"
+    && !expired
+    && (proposal.state === "ready" || hasDisabledBoundModel),
+  );
+
+  const needsInitialSelection = proposal.acceptanceBlocker?.code === "MODEL_SELECTION_REQUIRED";
+  const drawerOpen = editingModels || (canEditModels && (needsInitialSelection || hasDisabledBoundModel));
+
+  const isOpMatchingDefault = (op: MediaOperationSpec): boolean => {
+    if (!defaultsAtPrepare) return true;
+    const defBinding = defaultsAtPrepare[op.kind] ?? null;
+    if (!defBinding || !sameBinding(op.model, defBinding)) return false;
+    if (sourceMapHasPending(op.operationId)) return false;
+    if (op.kind === "speech") {
+      const defLabel = modelLabelOf(defBinding, proposal.spec, poolModels);
+      if (defLabel.defaultVoiceId && op.parameters.voiceId !== defLabel.defaultVoiceId) return false;
+    }
+    return true;
+  };
+  function sourceMapHasPending(operationId: string): boolean {
+    return selectionSources.get(operationId) === "pending_selection";
+  }
+
+  const allMatchingDefault = hasPoolSnapshot && mediaOps.length > 0 && mediaOps.every(isOpMatchingDefault);
+  const hasOverriddenOps = hasPoolSnapshot && mediaOps.some(op => !isOpMatchingDefault(op) && !sourceMapHasPending(op.operationId));
+  const canRestoreDefaults = Boolean(
+    canEditModels
+    && hasOverriddenOps
+    && defaultsAtPrepare
+    && mediaOps.every(op => !isOpMatchingDefault(op) ? Boolean(defaultsAtPrepare[op.kind]) : true),
+  );
+
+  const submitRebind = async (changes: RebindProposal["changes"]) => {
+    if (!onRebind || rebinding || !changes.length) return;
+    setRebinding(true);
+    setRebindError("");
+    setFailedChanges(changes);
+    try {
+      await onRebind(proposal, changes);
+      setFailedChanges(null);
+    } catch (error) {
+      setRebindError(error instanceof Error ? error.message : "报价更新失败，原选择已保留，请重试。");
+    } finally {
+      setRebinding(false);
+    }
+  };
+
+  const restoreProposalDefaults = () => {
+    if (!defaultsAtPrepare) return;
+    const changes = mediaOps
+      .filter(op => !isOpMatchingDefault(op) && defaultsAtPrepare[op.kind])
+      .map(op => {
+        const defBinding = defaultsAtPrepare[op.kind]!;
+        const defInfo = modelLabelOf(defBinding, proposal.spec, poolModels);
+        return {
+          operationId: op.operationId,
+          model: defBinding,
+          ...(op.kind === "speech" && defInfo.defaultVoiceId ? { voiceId: defInfo.defaultVoiceId } : {}),
+        };
+      });
+    if (changes.length) {
+      void submitRebind(changes as RebindProposal["changes"]);
+    }
+  };
+
+  // 受理门以服务端推导的 blocker 为准；换绑请求在途期间禁用确认防止提交旧 digest。
+  const startable = ready && proposal.acceptanceBlocker === null && !rebinding;
+  const confirmButtonLabel = proposal.state === "accepted"
+    ? "已受理"
+    : rebinding
+    ? "正在更新报价…"
+    : busy
+    ? "正在确认…"
+    : needsInitialSelection
+    ? "请先选择模型"
+    : hasPoolSnapshot && mediaOps.length > 0
+    ? allMatchingDefault
+      ? "使用默认模型并开始制作"
+      : "按本次选择开始制作"
+    : "确认制作";
+
+  const showPrimaryButton = startable || proposal.state === "accepted" || rebinding || (ready && needsInitialSelection);
+
   return <div className="frame-production-proposal" data-state={proposal.state}>
-    <header><strong>{proposal.spec.title}</strong><span>{expired ? "已过期" : PROPOSAL_STATE_LABEL[proposal.state]}</span></header>
+    <header><strong>{proposal.spec.title}</strong><span>{expired && proposal.state !== "accepted" ? "已过期" : PROPOSAL_STATE_LABEL[proposal.state]}</span></header>
+    <ProposalScope
+      spec={proposal.spec}
+      audioSummary={proposal.audioSummary}
+      artifacts={artifacts}
+      revisions={revisions}
+      works={works}
+      onOpen={onOpen}
+      canEditModels={canEditModels}
+      rebinding={rebinding}
+      poolModels={poolModels}
+      onRebindOperation={(op, model, defaultVoiceId) => {
+        const voiceId = op.kind === "speech"
+          ? (sameBinding(op.model, model) ? op.parameters.voiceId : defaultVoiceId)
+          : undefined;
+        void submitRebind([{ operationId: op.operationId, model, ...(voiceId ? { voiceId } : {}) }]);
+      }}
+    />
+
+    {involvedKinds.length > 0 && (hasPoolSnapshot || poolModels.some(m => m.kind !== "text")) ? (
+      <section className="agent-proposal-models" aria-label="本次生成模型与费用摘要">
+        <div className="agent-proposal-models-header">
+          <strong>本次生成模型</strong>
+          <div className="agent-proposal-models-tools">
+            {canRestoreDefaults ? (
+              <button type="button" className="agent-text-link" disabled={rebinding || busy} onClick={restoreProposalDefaults}>
+                恢复本方案默认
+              </button>
+            ) : null}
+            {canEditModels ? (
+              <button
+                type="button"
+                className="agent-proposal-adjust-btn"
+                aria-expanded={drawerOpen}
+                disabled={rebinding || busy}
+                onClick={() => { setEditingModels(open => !open); setRebindError(""); }}
+              >
+                {drawerOpen && !needsInitialSelection && !hasDisabledBoundModel ? "收起调整" : "调整模型"}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        <ul className="agent-proposal-model-rows">
+          {involvedKinds.map(kind => {
+            const ops = mediaOps.filter(op => op.kind === kind);
+            const distinctRevs = [...new Set(ops.map(op => op.model.configurationRevisionId))];
+            const primaryOp = ops[0]!;
+            const primaryInfo = modelLabelOf(primaryOp.model, proposal.spec, poolModels);
+            const defBinding = defaultsAtPrepare?.[kind];
+            const defInfo = defBinding !== undefined ? (defBinding ? modelLabelOf(defBinding, proposal.spec, poolModels) : null) : undefined;
+            const kindPending = ops.some(op => sourceMapHasPending(op.operationId));
+            const kindAllDefault = hasPoolSnapshot && ops.every(isOpMatchingDefault);
+            const cnyMinor = ops
+              .filter(op => op.model.providerId !== "colab")
+              .reduce((sum, op) => sum + (op.quotePerAttempt.amountMinor ?? 0) * op.maxCreateAttempts, 0);
+            const colabOpsCount = ops.filter(op => op.model.providerId === "colab").length;
+            const costText = colabOpsCount === ops.length
+              ? `¥0.00 + Colab CU（${ops.length > 1 ? `${ops.length} 镜，` : ""}预计约 0.22–1.43 CU/镜）`
+              : colabOpsCount > 0
+              ? `${money(cnyMinor)} 估价 + ${colabOpsCount} 镜 Colab CU`
+              : primaryOp.model.providerId === "edge-tts"
+              ? "¥0.00 免费配音"
+              : `${money(cnyMinor)}${ops.some(op => op.priceKind === "estimate") ? " 估价" : ""}`;
+
+            // 统计同类多镜中的逐镜例外，收起态也常显每个例外的具体连接与型号。
+            const baseRev = choosePrimaryRevision(ops, selectionSources, defBinding);
+            const baseOp = ops.find(op => op.model.configurationRevisionId === baseRev)!;
+            const baseInfo = modelLabelOf(baseOp.model, proposal.spec, poolModels);
+            const exceptionOps = distinctRevs.length > 1
+              ? ops.filter(op => op.model.configurationRevisionId !== baseRev)
+              : [];
+
+            return <li key={kind} className="agent-proposal-model-row">
+              <div className="agent-proposal-model-main">
+                <span className="agent-proposal-kind-pill">
+                  {KINDS[kind]}{ops.length > 1 ? ` · ${ops.length} ${kind === "video" ? "镜" : "项"}` : ""}
+                </span>
+                <span className="agent-proposal-model-identity">
+                  {kindPending ? (
+                    <span className="agent-model-pending-text">待选择模型（候选：{primaryInfo.full}）</span>
+                  ) : distinctRevs.length === 1 ? (
+                    <>
+                      <strong>{primaryInfo.full}</strong>
+                      {kind === "speech" && primaryOp.kind === "speech" ? (
+                        <span className="agent-proposal-voice-tag">
+                          音色：{voiceLabelOf(primaryOp.parameters.voiceId, primaryOp.model, poolModels)}
+                        </span>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      <strong>主选：{baseInfo.full}</strong>
+                      <span className="agent-proposal-shot-exceptions">
+                        单镜例外：{exceptionOps.map(ex => {
+                          const idx = ops.indexOf(ex) + 1;
+                          return `镜头 ${idx} 用 ${modelLabelOf(ex.model, proposal.spec, poolModels).full}`;
+                        }).join("；")}
+                      </span>
+                    </>
+                  )}
+                </span>
+                {hasPoolSnapshot ? (
+                  <span
+                    className="agent-proposal-source-badge"
+                    data-source={kindPending ? "pending" : kindAllDefault ? "default" : "selected"}
+                  >
+                    {kindPending ? "待选" : kindAllDefault ? "默认" : "本次选用"}
+                  </span>
+                ) : null}
+              </div>
+              <div className="agent-proposal-model-meta">
+                <span className="agent-proposal-model-cost">{costText}</span>
+                {hasPoolSnapshot && !kindAllDefault && !kindPending ? (
+                  <small className="agent-proposal-original-default">
+                    方案原默认：{defInfo ? defInfo.full : "未设默认"}
+                  </small>
+                ) : null}
+              </div>
+            </li>;
+          })}
+        </ul>
+
+        {drawerOpen && canEditModels ? (
+          <div className="agent-proposal-model-editor" role="group" aria-label="调整本次模型">
+            {involvedKinds.map(kind => {
+              const ops = mediaOps.filter(op => op.kind === kind);
+              const kindPool = poolModels.filter(m => m.kind === kind && m.availability === "configured");
+              const defBinding = defaultsAtPrepare?.[kind];
+              // 批量切换保留已单独钉住的例外镜头（除非全部相同），平局时优先保留单改镜头不动。
+              const counts = new Map<string, number>();
+              for (const op of ops) counts.set(op.model.configurationRevisionId, (counts.get(op.model.configurationRevisionId) ?? 0) + 1);
+              const majorityRev = choosePrimaryRevision(ops, selectionSources, defBinding);
+              const batchTargetOps = ops.length > 1 && counts.size > 1
+                ? ops.filter(op => op.model.configurationRevisionId === majorityRev)
+                : ops;
+              const representativeOp = batchTargetOps[0]!;
+              const speechEntry = kind === "speech"
+                ? kindPool.find(m => sameBinding(m.binding, representativeOp.model))
+                : undefined;
+              const unifyChosen = kindPool.find(m => sameBinding(m.binding, representativeOp.model));
+              const unifyReason = unifyChosen ? batchCompatibilityReason(unifyChosen, ops) : "当前型号不可用";
+              const hasIncompatibleOption = kindPool.some(entry => batchCompatibilityReason(entry, batchTargetOps) !== null);
+
+              if (kindPool.length === 0) {
+                return <div key={kind} className="agent-proposal-empty-pool">
+                  <span>当前没有已启用的{KINDS[kind]}模型。</span>
+                  {onOpenModelsSettings ? <button type="button" className="agent-text-link" onClick={onOpenModelsSettings}>前往模型配置</button> : null}
+                </div>;
+              }
+
+              return <div key={kind} className="agent-proposal-editor-group">
+                <ModelPoolSelect
+                  id={`proposal-${proposal.id}-kind-${kind}`}
+                  label={ops.length > 1 ? `整批${KINDS[kind]}模型` : `选择本次${KINDS[kind]}模型`}
+                  currentBinding={representativeOp.model}
+                  isPendingSelection={ops.some(op => sourceMapHasPending(op.operationId))}
+                  defaultBinding={defBinding}
+                  poolOptions={kindPool}
+                  targetOps={batchTargetOps}
+                  disabled={rebinding || busy}
+                  spec={proposal.spec}
+                  allPoolModels={poolModels}
+                  onSelect={chosen => {
+                    const changes = batchTargetOps.map(op => ({
+                      operationId: op.operationId,
+                      model: chosen.binding,
+                      ...(op.kind === "speech" && chosen.defaultVoiceId ? { voiceId: chosen.defaultVoiceId } : {}),
+                    }));
+                    void submitRebind(changes as RebindProposal["changes"]);
+                  }}
+                />
+                {ops.length > 1 && counts.size > 1 ? (
+                  <div className="agent-proposal-batch-note">
+                    <span>已保留 {ops.length - batchTargetOps.length} 个单独调整的镜头；</span>
+                    <button
+                      type="button"
+                      className="agent-text-link"
+                      disabled={rebinding || busy || unifyReason !== null}
+                      title={unifyReason ?? undefined}
+                      onClick={() => {
+                        if (!unifyChosen || unifyReason !== null) return;
+                        void submitRebind(
+                          ops.map(op => ({
+                            operationId: op.operationId,
+                            model: unifyChosen.binding,
+                            ...(op.kind === "speech" && unifyChosen.defaultVoiceId ? { voiceId: unifyChosen.defaultVoiceId } : {}),
+                          })) as RebindProposal["changes"],
+                        );
+                      }}
+                    >
+                      全部 {ops.length} 镜统一为此型号
+                    </button>
+                    {unifyReason ? <small className="agent-proposal-editor-hint">（不可统一：{unifyReason}）</small> : null}
+                  </div>
+                ) : ops.length > 1 ? (
+                  <small className="agent-proposal-editor-hint">只需改单镜？展开上方「查看制作范围」可在指定镜头旁单独更换。</small>
+                ) : null}
+                {kind === "speech" && representativeOp.kind === "speech" && speechEntry?.voices && speechEntry.voices.length > 0 ? (
+                  <label className="agent-pool-select-field" htmlFor={`proposal-${proposal.id}-voice`}>
+                    <span>配音音色</span>
+                    <select
+                      id={`proposal-${proposal.id}-voice`}
+                      aria-label="选择本次配音音色"
+                      value={representativeOp.parameters.voiceId}
+                      disabled={rebinding || busy}
+                      onChange={event => {
+                        const nextVoice = event.target.value;
+                        void submitRebind(
+                          batchTargetOps.map(op => ({ operationId: op.operationId, model: op.model, voiceId: nextVoice })) as RebindProposal["changes"],
+                        );
+                      }}
+                    >
+                      {speechEntry.voices.map(voice => (
+                        <option key={voice.id} value={voice.id}>
+                          {voice.label}{speechEntry.defaultVoiceId === voice.id ? " [默认音色]" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {hasIncompatibleOption ? (
+                  <small className="agent-proposal-editor-hint">
+                    不可选型号需单张首帧图或不同时长/画幅，可点下方「回复这份提案」回对话调整或先完成分镜审阅。
+                  </small>
+                ) : null}
+              </div>;
+            })}
+          </div>
+        ) : null}
+
+        {rebindError ? (
+          <div className="agent-proposal-rebind-error" role="alert">
+            <span>{rebindError}</span>
+            {failedChanges ? (
+              <button type="button" className="agent-text-link" disabled={rebinding} onClick={() => void submitRebind(failedChanges)}>
+                重试更新报价
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    ) : null}
+
     <ProposalPrice proposal={proposal} />
     {ready && proposal.spec.maxSpend.amountMinor > 0 && budgetRemaining !== undefined
       ? <p className="agent-model-note">{budgetRemaining === null ? "当前未设额度上限" : "当前可用额度 " + money(budgetRemaining)}</p> : null}
-    <ProposalScope spec={proposal.spec} audioSummary={proposal.audioSummary} artifacts={artifacts} revisions={revisions} works={works} onOpen={onOpen} />
     {ready && startable ? <p className="agent-model-note">确认后锁定本次输入，意见留给下一版。</p> : null}
     {ready && !startable && proposal.acceptanceBlocker ? <p className="agent-model-note" role="status">{proposal.acceptanceBlocker.message}</p> : null}
+    {hasDisabledBoundModel && !ready && canEditModels ? (
+      <p className="agent-model-note" role="status">原选模型已停用，请在上方改选池内其他可用模型以更新报价。</p>
+    ) : null}
     <div className="agent-production-actions">
-      {startable || proposal.state === "accepted" ? <button type="button" disabled={!ready || !startable || !onAccept || busy} onClick={() => onAccept?.(proposal)} title={!onAccept ? "制作能力尚未接入" : undefined}>{busy ? "正在确认…" : proposal.state === "accepted" ? "已受理" : "确认制作"}</button> : null}
+      {showPrimaryButton ? (
+        <button
+          type="button"
+          disabled={!ready || !startable || !onAccept || busy || rebinding}
+          onClick={() => onAccept?.(proposal)}
+          title={!onAccept ? "制作能力尚未接入" : undefined}
+        >
+          {confirmButtonLabel}
+        </button>
+      ) : null}
       {proposal.acceptedRunId && onOpenRun ? <button type="button" onClick={() => onOpenRun(proposal.acceptedRunId!)}>查看制作记录</button> : null}
-      {ready && onReply ? <button type="button" onClick={() => onReply(proposal)}>回复这份提案</button> : null}
+      {(ready || (canEditModels && !expired)) && onReply ? <button type="button" onClick={() => onReply(proposal)}>回复这份提案</button> : null}
     </div>
   </div>;
 }

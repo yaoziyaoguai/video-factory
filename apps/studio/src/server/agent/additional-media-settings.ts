@@ -4,23 +4,23 @@ import { canonicalJson } from "./util.js";
 import {
   MINIMAX_SPEECH_MODEL_IDS, minimaxSpeechCatalogEntry, minimaxSpeechModelView, minimaxSpeechProfile, minimaxVideoProfile,
   imageCatalogEntry, imageModelView, openaiSpeechCatalogEntry, openaiSpeechModelView,
-  rangedVideoCatalogEntry, rangedVideoModelView, wanVideoProfile,
-  type MiniMaxSpeechProfile, type MiniMaxVideoProfile, type ImageProfile, type OpenAISpeechProfile, type WanVideoProfile,
+  rangedVideoCatalogEntry, rangedVideoModelView, wanVideoProfile, colabVideoCatalogEntry, colabVideoModelView,
+  type MiniMaxSpeechProfile, type MiniMaxVideoProfile, type ImageProfile, type OpenAISpeechProfile, type WanVideoProfile, type ColabVideoProfile,
 } from "./media-config.js";
 import type { QuoteCatalog } from "./artifact-store.js";
 
 // 当前选择和不可变执行版本分开保存。旧火山图片和 MiniMax 配音快照按原身份只读。
-export type AdditionalMediaChannel = "ark-image" | "openai-image" | "openai-speech" | "minimax-speech" | "minimax-video" | "wan-video";
+export type AdditionalMediaChannel = "ark-image" | "openai-image" | "openai-speech" | "minimax-speech" | "minimax-video" | "wan-video" | "colab-video";
 
 /** channel → 操作类别（供当前绑定收集与投影清理按类别对齐）。 */
 export const ADDITIONAL_MEDIA_CHANNEL_KIND: Record<AdditionalMediaChannel, "image" | "speech" | "video"> = {
-  "ark-image": "image", "openai-image": "image", "openai-speech": "speech", "minimax-speech": "speech", "minimax-video": "video", "wan-video": "video",
+  "ark-image": "image", "openai-image": "image", "openai-speech": "speech", "minimax-speech": "speech", "minimax-video": "video", "wan-video": "video", "colab-video": "video",
 };
 
-// 追加通道的当前目录/型号视图：按 channel 当前行的 profile 形状分发生成（M2 三家新通道）。
-type AdditionalMediaView = ReturnType<typeof imageModelView> | ReturnType<typeof minimaxSpeechModelView> | ReturnType<typeof rangedVideoModelView>;
+// 追加通道的当前目录/型号视图：按 channel 当前行的 profile 形状分发生成（M2 三家新通道 + Colab 原生通道）。
+type AdditionalMediaView = ReturnType<typeof imageModelView> | ReturnType<typeof minimaxSpeechModelView> | ReturnType<typeof rangedVideoModelView> | ReturnType<typeof colabVideoModelView>;
 
-function additionalChannelCatalogEntry(channel: AdditionalMediaChannel, profile: unknown, binding: ModelBinding): QuoteCatalog[string] {
+export function additionalChannelCatalogEntry(channel: AdditionalMediaChannel, profile: unknown, binding: ModelBinding): QuoteCatalog[string] {
   switch (channel) {
     case "ark-image":
     case "openai-image": return imageCatalogEntry(profile as ImageProfile, binding);
@@ -30,6 +30,7 @@ function additionalChannelCatalogEntry(channel: AdditionalMediaChannel, profile:
       const video = profile as MiniMaxVideoProfile;
       return rangedVideoCatalogEntry(binding, video.video, video.quote, "MiniMax H3");
     }
+    case "colab-video": return colabVideoCatalogEntry(profile as ColabVideoProfile, binding);
     default: {
       const video = profile as WanVideoProfile;
       return rangedVideoCatalogEntry(binding, video.video, video.quote, "万相");
@@ -37,7 +38,7 @@ function additionalChannelCatalogEntry(channel: AdditionalMediaChannel, profile:
   }
 }
 
-function additionalChannelModelView(channel: AdditionalMediaChannel, profile: unknown, binding: ModelBinding, displayName: string): AdditionalMediaView {
+export function additionalChannelModelView(channel: AdditionalMediaChannel, profile: unknown, binding: ModelBinding, displayName: string): AdditionalMediaView {
   switch (channel) {
     case "ark-image":
     case "openai-image": return imageModelView(profile as ImageProfile, binding, displayName);
@@ -47,6 +48,7 @@ function additionalChannelModelView(channel: AdditionalMediaChannel, profile: un
       const video = profile as MiniMaxVideoProfile;
       return rangedVideoModelView(binding, displayName, video.video, video.quote, "MiniMax H3");
     }
+    case "colab-video": return colabVideoModelView(profile as ColabVideoProfile, binding, displayName);
     default: {
       const video = profile as WanVideoProfile;
       return rangedVideoModelView(binding, displayName, video.video, video.quote, "万相");
@@ -144,6 +146,13 @@ export function resolveWanVideoBinding(db: AgentDatabase, binding: ModelBinding)
   return profile.providerId === "wan" ? { profile, apiKey: row.apiKey } : null;
 }
 
+export function resolveColabVideoBinding(db: AgentDatabase, binding: ModelBinding): { profile: ColabVideoProfile; apiKey: string | null } | null {
+  const row = resolveAdditionalMediaBinding(db, binding);
+  if (row?.channelId !== "colab-video") return null;
+  const profile = JSON.parse(row.profileJson) as ColabVideoProfile;
+  return profile.providerId === "colab" ? { profile, apiKey: row.apiKey } : null;
+}
+
 /** 当前 channel 通道的活跃身份（目录条目与 Bootstrap 型号视图共用）；Key 未配置时没有可执行条目。 */
 export function activeAdditionalMediaBinding(db: AgentDatabase, channelId: AdditionalMediaChannel): { profile: unknown; binding: ModelBinding } | null {
   const current = readAdditionalMediaCurrent(db, channelId);
@@ -176,6 +185,7 @@ export function additionalMediaModelViews(db: AgentDatabase, probeAvailable: boo
         : channel === "openai-speech" ? `OpenAI 配音（${active.binding.modelId}）`
         : channel === "minimax-speech" ? `MiniMax 配音（${active.binding.modelId}）`
         : channel === "minimax-video" ? `MiniMax 视频（${active.binding.modelId}）`
+        : channel === "colab-video" ? `Colab 视频（${active.binding.modelId}）`
         : `万相视频（${active.binding.modelId}）`));
   }
   return views;

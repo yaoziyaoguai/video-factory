@@ -616,6 +616,7 @@ export type OperationRequest =
       maxCreateAttempts: number;
       kind: "video";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: VideoParameters;
     }
   | {
@@ -629,6 +630,7 @@ export type OperationRequest =
       maxCreateAttempts: number;
       kind: "image";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: ImageParameters;
     }
   | {
@@ -642,6 +644,7 @@ export type OperationRequest =
       maxCreateAttempts: number;
       kind: "speech";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: SpeechParameters;
     }
   | {
@@ -742,6 +745,11 @@ export type AcceptanceBlocker =
       code: "CAPABILITY_UNAVAILABLE";
       message: string;
       action: "configure_capability";
+    }
+  | {
+      code: "MODEL_SELECTION_REQUIRED";
+      message: string;
+      action: "select_model";
     };
 /**
  * Run 表示本次编排（后续步骤与本地执行/等待）；Attempt 表示一次供应商或本地尝试，终态独立判定。cancelled 表示本次后续执行停止：本地执行/等待结束、已有收据处理完毕且剩余 unknown 无可用查询渠道时收敛；不保证远端尝试已取消，已提交 Attempt 保持 unknown、未知费用份额保留。
@@ -831,6 +839,7 @@ export type ToolOperationRequest =
       inputs: [InputRef, ...InputRef[]];
       kind: "video";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: VideoParameters;
     }
   | {
@@ -843,6 +852,7 @@ export type ToolOperationRequest =
       inputs: [InputRef, ...InputRef[]];
       kind: "image";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: ImageParameters;
     }
   | {
@@ -855,6 +865,7 @@ export type ToolOperationRequest =
       inputs: [InputRef, ...InputRef[]];
       kind: "speech";
       model: ModelBinding;
+      modelSource?: "default" | "user_named";
       parameters: SpeechParameters;
     }
   | {
@@ -1144,6 +1155,11 @@ export interface ContractPayloads {
   PrepareProposal: PrepareProposal;
   Proposal: Proposal;
   AcceptProposal: AcceptProposal;
+  ProposalDefaultsSnapshot: ProposalDefaultsSnapshot;
+  ProposalModelLabel: ProposalModelLabel;
+  OperationSelectionSource: OperationSelectionSource;
+  RebindOperationChange: RebindOperationChange;
+  RebindProposal: RebindProposal;
   RunState: RunState;
   RunOperation: RunOperation;
   Finance: Finance;
@@ -1329,6 +1345,7 @@ export interface ContractPayloads {
   BudgetPolicy: BudgetPolicy;
   BudgetPolicies: BudgetPolicies;
   SaveBudgetPolicy: SaveBudgetPolicy;
+  ExecutionStageTimingsMs: ExecutionStageTimingsMs;
   ProviderUsage: ProviderUsage;
   StatementLine: StatementLine;
   UpdateStudioAccount: UpdateStudioAccount;
@@ -1407,6 +1424,7 @@ export interface EdgeTtsSettings {
   revision: number;
   enabled: boolean;
   voice: string;
+  isDefault?: boolean;
 }
 /**
  * 全部免费服务（15 项）的当前配置快照；数组顺序固定为 pexels、pixabay、unsplash、coverr、wikimedia、nasa、met、cleveland、archive、freetouse、incompetech、douyin-music、tiktok-sounds、newsnow、edge-tts。单项形状与单服务读取一致，不含 Key 明文。
@@ -1579,6 +1597,7 @@ export interface SaveEdgeTtsSettings {
   expectedRevision: number;
   enabled: boolean;
   voice: string;
+  isDefault?: boolean;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2299,6 +2318,51 @@ export interface ModelEntry {
   availability: "configured" | "unavailable" | "unverified";
   verificationNote: string;
   isDefault: boolean;
+  /**
+   * 所属连接显示名（如火山方舟账号别名、Google Colab、免费服务），区分同名型号的不同账号，不含凭据。
+   */
+  connectionName?: string;
+  /**
+   * 面向确认界面的简短计费口径（如『¥1.51/秒 估价』『¥0.00 + Colab CU 估价』『¥0.00 免费配音』）。
+   */
+  costSummary?: string;
+  externalUnit?: "colab_cu" | "flow_video_credits" | "flow_music_credits";
+  /**
+   * @minItems 1
+   * @maxItems 32
+   */
+  voices?: [
+    {
+      id: string;
+      label: string;
+    },
+    ...{
+      id: string;
+      label: string;
+    }[]
+  ];
+  defaultVoiceId?: string;
+  capabilitySummary?: {
+    durationSecondsMin?: number;
+    durationSecondsMax?: number;
+    /**
+     * @minItems 1
+     * @maxItems 8
+     */
+    resolutions?: [string, ...string[]];
+    /**
+     * @minItems 1
+     * @maxItems 4
+     */
+    aspectRatios?: ["16:9" | "9:16" | "1:1", ...("16:9" | "9:16" | "1:1")[]];
+    requiresFirstFrame?: boolean;
+    supportsReferenceImages?: boolean;
+    /**
+     * @minItems 1
+     * @maxItems 2
+     */
+    audioModes?: ["none" | "native", ...("none" | "native")[]];
+  };
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2546,6 +2610,10 @@ export interface SpeechParameters {
    */
   voiceId: string;
   format: "mp3" | "wav";
+  /**
+   * 可选生成语速（仅支持可调语速的配音通道如 edge-tts 使用，缺省 +0%）。
+   */
+  rate?: string;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2622,6 +2690,17 @@ export interface ProductionSpec {
   scope: string;
   type: "paid_production";
   requestSource: RequestSource;
+  defaultsAtPrepare?: ProposalDefaultsSnapshot;
+  /**
+   * @minItems 0
+   * @maxItems 64
+   */
+  modelLabels?: ProposalModelLabel[];
+  /**
+   * @minItems 0
+   * @maxItems 24
+   */
+  selectionSources?: OperationSelectionSource[];
 }
 /**
  * 已有目标传准确身份；新组/项在同次交付或受理中声明并分配。key 仅本次调用内用于去重分配，返回稳定 id；不创建占位媒体。
@@ -2642,6 +2721,39 @@ export interface ReviewTarget {
 export interface RequestSource {
   requestId: Id;
   messageId: Id;
+}
+/**
+ * 准备提案快照时各涉及媒体类别的原默认绑定（null 表示准备当时该类未设默认）；历史提案省略时不回填。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ProposalDefaultsSnapshot".
+ */
+export interface ProposalDefaultsSnapshot {
+  image?: ModelBinding | null;
+  video?: ModelBinding | null;
+  speech?: ModelBinding | null;
+}
+/**
+ * 提案涉及的 configurationRevisionId 对应的脱敏可读展示快照。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ProposalModelLabel".
+ */
+export interface ProposalModelLabel {
+  configurationRevisionId: Id;
+  connectionName: string;
+  modelName: string;
+  costSummary?: string;
+  externalUnit?: "colab_cu" | "flow_video_credits" | "flow_music_credits";
+  defaultVoiceId?: string;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "OperationSelectionSource".
+ */
+export interface OperationSelectionSource {
+  operationId: Id;
+  source: "default" | "user_named" | "card_selected" | "pending_selection";
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -2788,6 +2900,30 @@ export interface AudioSummary {
 export interface AcceptProposal {
   commandId: Id;
   proposalDigest: Digest;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RebindOperationChange".
+ */
+export interface RebindOperationChange {
+  operationId: Id;
+  model: ModelBinding;
+  voiceId?: string;
+}
+/**
+ * 提案内确定性换绑与重报价命令：按准确原摘要锁定作品、输入与目标，仅变更指定媒体操作的模型绑定与可选音色。
+ *
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "RebindProposal".
+ */
+export interface RebindProposal {
+  commandId: Id;
+  expectedDigest: Digest;
+  /**
+   * @minItems 1
+   * @maxItems 24
+   */
+  changes: [RebindOperationChange, ...RebindOperationChange[]];
 }
 /**
  * 冻结规格里一个操作步骤的只读执行事实；media 仅在输出落盘后给出，media 为 null 不代表失败。
@@ -3485,6 +3621,26 @@ export interface ProviderUsage {
   height?: number;
   resolution?: string;
   providerReceiptId?: string;
+  externalUnit?: "colab_cu" | "flow_video_credits" | "flow_music_credits";
+  estimatedExternalAmount?: number;
+  observedBalanceDelta?: number;
+  accelerator?: string;
+  modelRevision?: string;
+  cacheSource?: "ephemeral_download" | "ephemeral_warm" | "drive_cache" | "warm_memory" | "sample_replay";
+  stageTimingsMs?: ExecutionStageTimingsMs;
+}
+/**
+ * This interface was referenced by `ContractPayloads`'s JSON-Schema
+ * via the `definition` "ExecutionStageTimingsMs".
+ */
+export interface ExecutionStageTimingsMs {
+  queueAllocMs?: number;
+  envSetupMs?: number;
+  weightFetchMs?: number;
+  modelLoadMs?: number;
+  inferenceMs?: number;
+  encodeTransferMs?: number;
+  releaseMs?: number;
 }
 /**
  * This interface was referenced by `ContractPayloads`'s JSON-Schema
@@ -3587,9 +3743,9 @@ export interface ProviderConnection {
   id: string;
   name: string;
   /**
-   * OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。
+   * OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相和 Google Colab（LTX-2.5）沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。
    */
-  protocol: "openai" | "openai-chat-completions" | "anthropic-messages" | "ark" | "minimax" | "wan";
+  protocol: "openai" | "openai-chat-completions" | "anthropic-messages" | "ark" | "minimax" | "wan" | "colab";
   baseUrl: string;
   /**
    * 读取时恒为 null，不回传明文 Key；保存时 null 表示保留已存 Key。

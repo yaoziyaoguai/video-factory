@@ -2,7 +2,7 @@
 export const contractsSchema: Record<string, unknown> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://frame.invalid/contracts/v1/payloads",
-  "title": "Frame contract payloads 0.1.59",
+  "title": "Frame contract payloads 0.1.61",
   "$defs": {
     "FreeServiceSettings": {
       "oneOf": [
@@ -675,6 +675,9 @@ export const contractsSchema: Record<string, unknown> = {
         "voice": {
           "type": "string",
           "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "isDefault": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -702,6 +705,9 @@ export const contractsSchema: Record<string, unknown> = {
         "voice": {
           "type": "string",
           "pattern": "^[a-z]{2}-[A-Za-z]{2}-[A-Za-z0-9]{1,64}$"
+        },
+        "isDefault": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2292,6 +2298,113 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "isDefault": {
           "type": "boolean"
+        },
+        "connectionName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "所属连接显示名（如火山方舟账号别名、Google Colab、免费服务），区分同名型号的不同账号，不含凭据。"
+        },
+        "costSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "面向确认界面的简短计费口径（如『¥1.51/秒 估价』『¥0.00 + Colab CU 估价』『¥0.00 免费配音』）。"
+        },
+        "externalUnit": {
+          "type": "string",
+          "enum": [
+            "colab_cu",
+            "flow_video_credits",
+            "flow_music_credits"
+          ]
+        },
+        "voices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "defaultVoiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "capabilitySummary": {
+          "type": "object",
+          "properties": {
+            "durationSecondsMin": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            },
+            "durationSecondsMax": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            },
+            "resolutions": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              }
+            },
+            "aspectRatios": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "16:9",
+                  "9:16",
+                  "1:1"
+                ]
+              }
+            },
+            "requiresFirstFrame": {
+              "type": "boolean"
+            },
+            "supportsReferenceImages": {
+              "type": "boolean"
+            },
+            "audioModes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "native"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3090,6 +3203,11 @@ export const contractsSchema: Record<string, unknown> = {
             "mp3",
             "wav"
           ]
+        },
+        "rate": {
+          "type": "string",
+          "pattern": "^[+-]\\d{1,3}%$",
+          "description": "可选生成语速（仅支持可调语速的配音通道如 edge-tts 使用，缺省 +0%）。"
         }
       },
       "required": [
@@ -3625,6 +3743,25 @@ export const contractsSchema: Record<string, unknown> = {
         },
         "requestSource": {
           "$ref": "#/$defs/RequestSource"
+        },
+        "defaultsAtPrepare": {
+          "$ref": "#/$defs/ProposalDefaultsSnapshot"
+        },
+        "modelLabels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProposalModelLabel"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        },
+        "selectionSources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationSelectionSource"
+          },
+          "minItems": 0,
+          "maxItems": 24
         }
       },
       "required": [
@@ -3775,6 +3912,155 @@ export const contractsSchema: Record<string, unknown> = {
       "required": [
         "commandId",
         "proposalDigest"
+      ],
+      "additionalProperties": false
+    },
+    "ProposalDefaultsSnapshot": {
+      "type": "object",
+      "description": "准备提案快照时各涉及媒体类别的原默认绑定（null 表示准备当时该类未设默认）；历史提案省略时不回填。",
+      "properties": {
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speech": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProposalModelLabel": {
+      "type": "object",
+      "description": "提案涉及的 configurationRevisionId 对应的脱敏可读展示快照。",
+      "properties": {
+        "configurationRevisionId": {
+          "$ref": "#/$defs/Id"
+        },
+        "connectionName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "modelName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "costSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "externalUnit": {
+          "type": "string",
+          "enum": [
+            "colab_cu",
+            "flow_video_credits",
+            "flow_music_credits"
+          ]
+        },
+        "defaultVoiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "configurationRevisionId",
+        "connectionName",
+        "modelName"
+      ],
+      "additionalProperties": false
+    },
+    "OperationSelectionSource": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "default",
+            "user_named",
+            "card_selected",
+            "pending_selection"
+          ]
+        }
+      },
+      "required": [
+        "operationId",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "RebindOperationChange": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Id"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelBinding"
+        },
+        "voiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "operationId",
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "RebindProposal": {
+      "type": "object",
+      "description": "提案内确定性换绑与重报价命令：按准确原摘要锁定作品、输入与目标，仅变更指定媒体操作的模型绑定与可选音色。",
+      "properties": {
+        "commandId": {
+          "$ref": "#/$defs/Id"
+        },
+        "expectedDigest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RebindOperationChange"
+          },
+          "minItems": 1,
+          "maxItems": 24
+        }
+      },
+      "required": [
+        "commandId",
+        "expectedDigest",
+        "changes"
       ],
       "additionalProperties": false
     },
@@ -5472,6 +5758,13 @@ export const contractsSchema: Record<string, unknown> = {
             "model": {
               "$ref": "#/$defs/ModelBinding"
             },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
+            },
             "parameters": {
               "$ref": "#/$defs/VideoParameters"
             }
@@ -5516,6 +5809,13 @@ export const contractsSchema: Record<string, unknown> = {
             "model": {
               "$ref": "#/$defs/ModelBinding"
             },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
+            },
             "parameters": {
               "$ref": "#/$defs/ImageParameters"
             }
@@ -5559,6 +5859,13 @@ export const contractsSchema: Record<string, unknown> = {
             },
             "model": {
               "$ref": "#/$defs/ModelBinding"
+            },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
             },
             "parameters": {
               "$ref": "#/$defs/SpeechParameters"
@@ -6320,14 +6627,15 @@ export const contractsSchema: Record<string, unknown> = {
           "maxLength": 100
         },
         "protocol": {
-          "description": "OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。",
+          "description": "OpenAI Responses、OpenAI 兼容 Chat Completions 和 Anthropic Messages 可承载文本。方舟支持文本、图片、视频，MiniMax 支持文本、配音、视频，万相和 Google Colab（LTX-2.5）沿媒体执行端口承载视频。具体用途以已实现的协议适配器为准。",
           "enum": [
             "openai",
             "openai-chat-completions",
             "anthropic-messages",
             "ark",
             "minimax",
-            "wan"
+            "wan",
+            "colab"
           ]
         },
         "baseUrl": {
@@ -7315,6 +7623,13 @@ export const contractsSchema: Record<string, unknown> = {
             "model": {
               "$ref": "#/$defs/ModelBinding"
             },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
+            },
             "parameters": {
               "$ref": "#/$defs/VideoParameters"
             }
@@ -7353,6 +7668,13 @@ export const contractsSchema: Record<string, unknown> = {
             "model": {
               "$ref": "#/$defs/ModelBinding"
             },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
+            },
             "parameters": {
               "$ref": "#/$defs/ImageParameters"
             }
@@ -7390,6 +7712,13 @@ export const contractsSchema: Record<string, unknown> = {
             },
             "model": {
               "$ref": "#/$defs/ModelBinding"
+            },
+            "modelSource": {
+              "type": "string",
+              "enum": [
+                "default",
+                "user_named"
+              ]
             },
             "parameters": {
               "$ref": "#/$defs/SpeechParameters"
@@ -10433,6 +10762,30 @@ export const contractsSchema: Record<string, unknown> = {
             "action"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "const": "MODEL_SELECTION_REQUIRED"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1200
+            },
+            "action": {
+              "type": "string",
+              "const": "select_model"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "action"
+          ],
+          "additionalProperties": false
         }
       ],
       "description": "由同一受理前置条件即时推导的只读说明，不是另存状态机。仅 state=ready 且 blocker=null 可确认制作。过期/受理/撤销继续沿原 state 解释。"
@@ -12249,6 +12602,48 @@ export const contractsSchema: Record<string, unknown> = {
       ],
       "additionalProperties": false
     },
+    "ExecutionStageTimingsMs": {
+      "type": "object",
+      "properties": {
+        "queueAllocMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "envSetupMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "weightFetchMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "modelLoadMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "inferenceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "encodeTransferMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "releaseMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "ProviderUsage": {
       "type": "object",
       "properties": {
@@ -12291,6 +12686,42 @@ export const contractsSchema: Record<string, unknown> = {
           "type": "string",
           "minLength": 1,
           "maxLength": 512
+        },
+        "externalUnit": {
+          "enum": [
+            "colab_cu",
+            "flow_video_credits",
+            "flow_music_credits"
+          ]
+        },
+        "estimatedExternalAmount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "observedBalanceDelta": {
+          "type": "number"
+        },
+        "accelerator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "modelRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "cacheSource": {
+          "enum": [
+            "ephemeral_download",
+            "ephemeral_warm",
+            "drive_cache",
+            "warm_memory",
+            "sample_replay"
+          ]
+        },
+        "stageTimingsMs": {
+          "$ref": "#/$defs/ExecutionStageTimingsMs"
         }
       },
       "required": [],

@@ -456,7 +456,7 @@ test("M3 本次MiniMax备选冻结准确型号和音色，OpenAI默认保留，�
   hub.close();
 });
 
-test("M1 移除默认清空当前且不回退：引用旧绑定的未受理提案在保存事务里失效", () => {
+test("M1 移除默认清空当前但不作废池内已启用提案；实际停用型号才在保存事务里使未受理提案失效", () => {
   const now = clock();
   db.prepare(`INSERT INTO conversations(id,owner_id,title,revision,created_seq,epoch,pi_session_id,created_at,updated_at)
     VALUES('conv-m1','owner','M1',1,1,0,'s1',?,?)`).run(now, now);
@@ -465,13 +465,20 @@ test("M1 移除默认清空当前且不回退：引用旧绑定的未受理提�
   db.prepare(`INSERT INTO proposals(id,conversation_id,owner_id,digest,spec_json,state,price_disclosure,expires_at,accepted_run_id,revision,created_seq,created_at,updated_at)
     VALUES('prop-m1','conv-m1','owner','dm1',?,'ready','{}','2030-01-01T00:00:00.000Z',NULL,1,1,?,?)`)
     .run(JSON.stringify({ operations: [{ model: binding }] }), now, now);
-  // 保存去掉默认（型号仍登记为备选）：当前行清空、ready 提案转 stale，不偷偷回退第一项。
+  // 保存去掉默认（型号仍在池内启用）：默认行清空、不偷偷回退第一项，池内可用绑定的 ready 提案保持 ready。
   const stored = readProviderConnections(db).connections.find(item => item.id === "provider-minimax")!;
-  const { changedConversations } = save({ ...stored, models: stored.models.map(model => ({ ...model, isDefault: false })) });
-  assert.deepEqual(changedConversations, ["conv-m1"]);
-  assert.equal((db.prepare("SELECT state FROM proposals WHERE id='prop-m1'").get() as { state: string }).state, "stale");
+  const cleared = save({ ...stored, models: stored.models.map(model => ({ ...model, isDefault: false })) });
+  assert.deepEqual(cleared.changedConversations, []);
+  assert.equal((db.prepare("SELECT state FROM proposals WHERE id='prop-m1'").get() as { state: string }).state, "ready");
   assert.equal(readAdditionalMediaCurrent(db, "minimax-speech"), null);
   assert.equal(readAdditionalMediaCurrent(db, "minimax-video"), null);
+  assert.equal(connectedMediaEnabled(db, "speech"), true);
+  // 实际停用型号：从模型池移出，引用该绑定的未受理 ready 提案在同一事务转 stale。
+  const latest = readProviderConnections(db).connections.find(item => item.id === "provider-minimax")!;
+  const disabled = save({ ...latest, models: latest.models.map(model => ({ ...model, isDefault: false, enabled: false })) });
+  assert.deepEqual(disabled.changedConversations, ["conv-m1"]);
+  assert.equal((db.prepare("SELECT state FROM proposals WHERE id='prop-m1'").get() as { state: string }).state, "stale");
+  assert.equal(connectedMediaEnabled(db, "speech"), false);
 });
 
 test("M1 MiniMax/万相目录同步返回本地已适配目录：不猜账号级列表端点、不发网络请求", async () => {
@@ -590,13 +597,15 @@ test("v13 迁移：追加通道 CHECK 扩展；不产生新当前选择、不回
 });
 
 
-test("F13 启动以统一选择纠偏：A→MiniMax→Wan→空→Ark，首次纠偏使ready失效、冻结不动、重启幂等", () => {
+test("F13 启动以统一选择纠偏：多余默认清理、池内停用使ready失效、冻结不动、重启幂等", () => {
   save(arkVideo());
   const ark = readArkVideoCurrent(db)!;
   const versionCount = () => db.prepare("SELECT COUNT(*) FROM ark_video_configuration_versions").pluck().get();
+  // Ark 连接已停用且统一默认切到 MiniMax，但旧 main 曾错误残留 ark_video_settings 派生单行。
+  const savedArk = readProviderConnections(db).connections.find(item => item.protocol === "ark")!;
+  save({ ...savedArk, enabled: false });
   save(minimaxConnection());
   assert.equal(readArkVideoCurrent(db), null);
-  // 模拟旧 main 曾错误复活的派生行；统一选择仍为 MiniMax，冻结版本和作品均不改。
   db.prepare("INSERT INTO ark_video_settings(id,revision,display_name,current_configuration_revision_id,updated_at) VALUES(1,0,'多余Ark',?,?)").run(ark.version.configuration_revision_id, clock());
   db.prepare("INSERT INTO conversations(id,owner_id,title,created_seq,pi_session_id,created_at,updated_at) VALUES('restart-conv','owner','重启',1,'restart-pi',?,?)").run(clock(), clock());
   for (const [id, state] of [["restart-ready", "ready"], ["restart-accepted", "accepted"]]) {
@@ -625,11 +634,17 @@ test("F13 启动以统一选择纠偏：A→MiniMax→Wan→空→Ark，首次�
   assert.equal(readArkVideoCurrent(db), null);
   assert.equal(readAdditionalMediaCurrent(db, "minimax-video"), null);
   assert.ok(readAdditionalMediaCurrent(db, "wan-video"));
+  // 清空默认但池内仍启用：默认单行清空，但模型池仍可用（可在确认卡选模）。
   const wan = readProviderConnections(db).connections.find(item => item.protocol === "wan")!;
   save({ ...wan, models: wan.models.map(model => ({ ...model, isDefault: false })) });
   initializeProviderConnections(db, [], clock);
+  assert.equal(readAdditionalMediaCurrent(db, "wan-video"), null);
+  assert.equal(connectedMediaEnabled(db, "video"), true);
+  // 全部视频连接停用后，视频模型池为空。
+  for (const conn of readProviderConnections(db).connections.filter(item => item.protocol === "minimax" || item.protocol === "wan")) {
+    save({ ...conn, enabled: false });
+  }
   assert.equal(connectedMediaEnabled(db, "video"), false);
-  assert.equal(additionalMediaModelViews(db, true).filter(view => view.kind === "video").length, 0);
   const count = versionCount();
   save(arkVideo());
   assert.equal(readArkVideoCurrent(db)!.version.configuration_revision_id, ark.version.configuration_revision_id, "切回沿用相同不可变版本");

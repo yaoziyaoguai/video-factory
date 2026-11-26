@@ -103,6 +103,8 @@ export interface MediaExecutionPort {
   readonly reconcileTerminalBilling?: boolean;
   /** 查询是否必须有供应商任务身份。为 true 时无 task ID 的 provider unknown 返回稳定未知，不再自动外查；缺省 false。 */
   readonly queryRequiresProviderTaskId?: boolean;
+  /** 按具体操作绑定判断查询与取消是否必须持有 providerTaskId（如 Colab 本地账本可凭 attemptId 恢复与安全停机）。 */
+  queryRequiresProviderTaskIdFor?(binding: import("./generated/contracts.js").ModelBinding): boolean;
   /** 异步清理钩子；本地渲染须等待受控进程结束与效果收据落盘后 resolves。 */
   close?(): void | Promise<void>;
 }

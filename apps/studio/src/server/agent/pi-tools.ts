@@ -27,7 +27,7 @@ import type { AgentDatabase } from "./db.js";
 import { AgentError, AgentToolError } from "./errors.js";
 import {
   bindReviewedVideoImages, applyDelivery, applyPrepareProposal, commitInvocationResult, deliveryDigest, getArtifactRow, getInvocation, getRevisionRow,
-  insertRevision, registerInvocation, rowToArtifactHead, rowToArtifactRevision, rowToProposal, hasProductionLock, requirePaidProduction,
+  insertRevision, registerInvocation, rowToArtifactHead, rowToArtifactRevision, rowToProposal, hasProductionLock, requirePaidProduction, lookupCatalogEntry,
   NARRATED_CATALOG_KEY, RENDER_CATALOG_KEY, TIMED_NARRATED_CATALOG_KEY,
   type ArtifactRow, type ProposalRow, type QuoteCatalog, type RenderFileProbe,
 } from "./artifact-store.js";
@@ -83,8 +83,7 @@ export function expandToolIntent(
   return {
     ...intent,
     operations: intent.operations.map((op): OperationRequest => {
-      const key = op.kind === "render" ? `render:${op.parameters.assembly}` : `${op.kind}:${op.model.modelId}`;
-      const attempts = catalog[key]?.maxCreateAttempts ?? 1;
+      const attempts = lookupCatalogEntry(catalog, op)?.maxCreateAttempts ?? 1;
       if (op.kind === "render") return { ...op, maxCreateAttempts: 1 };
       if (attempts !== 1 && attempts !== 2 && attempts !== 3) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "该通道的创建次数配置不可用，不能准备提案。");
       return { ...op, maxCreateAttempts: attempts };
@@ -114,6 +113,8 @@ export class BusinessTools implements PiBusinessTools {
     private readonly production?: ProductionService,
     /** 工程封存（publish_project）；缺省时该工具不可用。 */
     private readonly creative?: CreativeToolsOptions,
+    /** 生产装配开启：新生成配音（含免费配音）须走 prepare_production 用户确认门。 */
+    private readonly requireSpeechConfirmation = false,
   ) {}
 
   async readArtifact(context: RequestContext, input: ToolReadArtifact): Promise<ArtifactRevision> {
@@ -406,8 +407,17 @@ export class BusinessTools implements PiBusinessTools {
   }
 
   async prepareProduction(context: RequestContext, input: ToolPrepareProposal): Promise<Proposal> {
-    this.requireRequest(context);
+    const request = this.requireRequest(context);
     requirePaidProduction(input.spec);
+    if (
+      request.skill_id === "colab-ltx-video" &&
+      input.spec.operations.some(op => op.kind === "video" && op.model.providerId !== "colab")
+    ) {
+      throw new AgentToolError(
+        "INVALID_INPUT",
+        "本轮已指定 colab-ltx-video 技能，video 操作必须绑定 Google Colab（providerId=\"colab\"）；当前若未启用 Colab，请如实指引用户前往「模型配置 → 连接配置」开启或由用户改选其他模型，不能提交其他视频厂商提案。",
+      );
+    }
     const register = this.db.transaction(() =>
       registerInvocation(this.db, this.clock(), {
         ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId,
@@ -452,7 +462,7 @@ export class BusinessTools implements PiBusinessTools {
       }
       const { proposal } = applyPrepareProposal(this.db, this.clock(), {
         ownerId: context.actorId, conversationId: context.conversationId,
-      }, intent, catalog, { requestId: context.requestId, messageId: context.actionSourceMessageId }, probes, input.replacesProposal);
+      }, intent, catalog, { requestId: context.requestId, messageId: context.actionSourceMessageId }, probes, input.replacesProposal, request.skill_id);
       const result = { proposalId: proposal.id, digest: proposal.digest, state: proposal.state, expiresAt: proposal.expires_at };
       commitInvocationResult(this.db, this.clock(), {
         ownerId: context.actorId, requestId: context.requestId, toolCallId: context.toolCallId,
@@ -569,6 +579,12 @@ export class BusinessTools implements PiBusinessTools {
   async dubFree(context: RequestContext, input: ToolDubFree, signal?: AbortSignal): Promise<DubFreeResult> {
     const request = this.requireRunningRequest(context);
     if (request.delivery_closed) throw new AgentToolError("DELIVERY_CLOSED", "本请求已完成正式交付，不能再生成免费配音。");
+    if (this.requireSpeechConfirmation) {
+      throw new AgentToolError(
+        "AUTHORIZATION_REQUIRED",
+        "新生成配音（含 Edge 免费配音）须经提案确认门由用户核对默认/所选模型与音色后再执行：请改用 prepare_production 提交 kind=\"speech\" 操作（从 frame-current-state.mediaModels 选择 providerId=\"edge-tts\" 免费配音或其他已启用配音模型绑定），确认后系统会自动产出 MP3、词级边界与字幕。",
+      );
+    }
     if (input.workId) requireWork(this.db,context.actorId,context.conversationId,input.workId);
     const config = captureEdgeTtsConfig(this.db);
     if (!config) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "免费配音未启用，可在「免费服务 → 配音」中选择语音并打开。");
@@ -892,7 +908,7 @@ export function buildAgentTools(
       + "为已有视频准备新版本时，先用 read_run / read_proposal 核对上一版实际使用的输入与产出：未受影响的段落直接引用原有 blob 或产物修订作为 render 输入，只为受影响的段落新增生成操作；本会话已采用的素材同样优先复用。不为省事把所有片段重新生成，也不为复用重复安排付费操作。"
       + "需要指定片段区间/图片停留时用 timed_narrated_concat：segments 按成片顺序给出视频 inputSlot/startMs/durationMs 或图片 inputSlot/durationMs，narrationInputSlot 指定旁白；成片时长取片段之和，旁白替换原声、不足补静音、超过画面总长会如实失败。"
       + "三路声音用mixed_concat：segments与必需segmentIds逐段对应方案，video逐段originalGain（省略1）；可加一路已采用music（candidateId绑定该音频槽，明确选区/位置/播放长/repeat/gain/fades/duckUnderNarration）和完整narration（槽/位置/gain）。gain0–1，画面总长≤120s，全部输入合计≤24。音乐不足不暗循环；独立配音不裁词、不变速、不延长画面；未知原声不能假装分离人声和背景乐。"
-      + "换音乐或音量直接用 render_project：先 read_run 核对原片段与音轨，原运行来自提案时再用其 proposalId 读取准确提案，复用原始视觉段、原声设置和既有配音。不能用已经混旧曲的整片再叠新曲，也不重生相同画面/旁白。只换型号/音色/台词才有新speech。明确本次MiniMax时用frame-current-state.mediaModels中的准确binding和voice，不改全局默认或失败偷换OpenAI。新混音仍交视频草稿，等待用户认可。"
+      + "换音乐或音量直接用 render_project：先 read_run 核对原片段与音轨，原运行来自提案时再用其 proposalId 读取准确提案，复用原始视觉段、原声设置和既有配音。不能用已经混旧曲的整片再叠新曲，也不重生相同画面/旁白。只换型号/音色/台词才有新speech。明确本次 Colab（如选用 colab-ltx-video）或 MiniMax 时，必须用 frame-current-state.mediaModels 中对应 providerId 的准确 binding，不改全局默认，若该通道未启用或参数不满足则如实说明并给出现有可用选择，绝不偷换其他厂商提交提案。新混音仍交视频草稿，等待用户认可。"
       + "ordered_concat/narrated_concat 保持完整保留素材与旁白的原语义，不裁剪；无法满足时长差距时如实说明，不得声称可达成长度。",
     parameters: inlineSchema("ToolPrepareProposal"),
     async execute(toolCallId, args) {
@@ -1113,7 +1129,7 @@ export function buildAgentTools(
   const dubFree: ToolDefinition = {
     name: "dub_free",
     label: "免费配音",
-    description: "把一段文字合成为免费配音的音频修订（Edge 免费语音；优先用它，不占用付费 speech 型号）。voice 省略时用免费服务设置中的当前语音，rate 如 +10% 或 -5%。返回真实解码时长 durationMs 与词级边界（毫秒，相对该音频修订起点；granularity=none 表示本次没有边界事件，不要编造）。放进时间线前按片段的 offset、trim 与 speed 换算边界时间，并按 durationMs 实际时长安排片段，避免截尾。失败返回真实原因；不会自动改用付费配音或换语音重试。",
+    description: "仅在未装配统一媒体确认池的离线环境中直接合成 Edge 免费语音；常规创作请统一使用 prepare_production 提交 kind=speech 操作（可选用 mediaModels 中的 providerId=edge-tts 免费配音或付费配音），由用户在提案卡片核对默认/所选模型与音色并点击确认后，自动产出带真实解码时长 durationMs、词级时间边界与字幕的 MP3。",
     parameters: inlineSchema("ToolDubFree"),
     async execute(toolCallId, args, signal) {
       const context = requireContext(holder, toolCallId);

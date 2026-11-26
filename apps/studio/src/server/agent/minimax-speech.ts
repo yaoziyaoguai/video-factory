@@ -74,7 +74,7 @@ export class MiniMaxSpeechPort implements MediaExecutionPort {
         text,
         stream: false,
         output_format: "hex",
-        voice_setting: { voice_id: speech.voice },
+        voice_setting: { voice_id: input.operation.parameters.voiceId || speech.voice },
         audio_setting: {
           sample_rate: speech.output.sampleRateHz,
           bitrate: speech.output.bitrate,

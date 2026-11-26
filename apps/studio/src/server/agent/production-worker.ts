@@ -11,9 +11,12 @@ import { canonicalJson, digestOf, newAgentId, type AgentClock } from "./util.js"
 import { ProductionBlobs, type BlobRow } from "./production-blobs.js";
 import type { ProductionCrashHook } from "./production-service.js";
 import { aggregateSources, mergeSources, recordBlobSources } from "./material-store.js";
-import { attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, operationOutputRevision, quoteMinor, runRow, snapshotFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
+import { attemptOutput, attemptsFor, finances, heldLocalAttemptRuns, mergeBilling, operationsFor, operationOutputRevision, quoteMinor, runRow, snapshotFor, terminal, toRun, type AttemptRow, type OperationRow, type RunRow } from "./production-store.js";
 import { issueSubmitPermit } from "./submit-permit.js";
-import { parseCreationState, setReviewItemDraft, setVideoOutput, type WorkRow } from "./creative-work.js";
+import { getWorkRow, parseCreationState, setReviewItemDraft, setVideoOutput, type WorkRow } from "./creative-work.js";
+import { parseEdgeAttemptDub } from "./edge-speech.js";
+import { registerSubtitle, reviewedNarration } from "./subtitle-service.js";
+import { speechCues } from "./subtitle-track.js";
 
 interface Lease { runId: string; epoch: number }
 export interface ProductionWorkerOptions {
@@ -132,30 +135,36 @@ export class ProductionWorker {
     // 恢复查询——端口先读本地完成收据与落盘文件，无果时返回幂等的稳定 unknown，不会外呼。
     // 纯账务未核的终态尝试才按渠道判断是否续查，避免无意义的周期查询。
     const renderIds = renderOperationIds(operations);
+    const specByOpId = new Map(operations.map(op => [op.id, JSON.parse(op.spec_json) as OperationSpec]));
     // 操作值得继续处理：还没开始、有在途尝试（unknown 交端口核对）、或按次数与账务仍有重试空间。
     const actionable = (op: OperationRow): boolean => {
       const mine = attempts.filter(a => a.operation_id === op.id);
       if (mine.length === 0) return true;
-      const maxAttempts = (JSON.parse(op.spec_json) as OperationSpec).maxCreateAttempts;
+      const maxAttempts = specByOpId.get(op.id)!.maxCreateAttempts;
       return mine.some(a => !terminal(a.state) || a.phase === "prepared")
         || mine.some(a => a.state === "failed" && a.billing_final && !a.billing_conflict && a.ordinal < maxAttempts);
     };
     const incomplete = !terminal(run.state) && operations.find(op => !terminal(op.state) && actionable(op)
-      && (JSON.parse(op.spec_json) as OperationSpec).inputs.every(input =>
+      && specByOpId.get(op.id)!.inputs.every(input =>
         input.kind !== "operation_output" || operations.find(p => p.id === input.producerOperationId)?.output_blob_id));
     if (incomplete) return incomplete;
     // 纯账务未核的终态尝试：宿主不支持终态对账或已无查询渠道时不再作为查询理由。
-    const outstanding = attempts.find(a => this.billingQueryAlive(a, renderIds));
+    const outstanding = attempts.find(a => this.billingQueryAlive(a, renderIds, specByOpId.get(a.operation_id)));
     return outstanding ? operations.find(op => op.id === outstanding.operation_id) : undefined;
+  }
+  private requiresProviderTaskId(spec?: OperationSpec): boolean {
+    if (spec?.kind === "render") return false;
+    if (spec && this.port.queryRequiresProviderTaskIdFor) return this.port.queryRequiresProviderTaskIdFor(spec.model);
+    return this.port.queryRequiresProviderTaskId ?? false;
   }
   // 账务未核且仍有真实查询渠道的尝试（镜像 finances 的待核判定）：不支持终态对账的端口对
   // 终态尝试不再查询；无任务身份且查询必须带身份的 unknown 没有渠道。同一判定既决定 worker
   // 是否继续周期查询，也决定对用户说“费用仍在核对”还是“实际费用未取得”。
-  private billingQueryAlive(a: AttemptRow, renderIds: Set<string>): boolean {
+  private billingQueryAlive(a: AttemptRow, renderIds: Set<string>, spec?: OperationSpec): boolean {
     return a.phase !== "prepared" && (a.billing_final === 0 || a.billing_conflict !== 0)
       && (this.reconcileTerminalBilling || !terminal(a.state))
       && !(a.state === "unknown" && a.provider_task_id === null
-        && !renderIds.has(a.operation_id) && (this.port.queryRequiresProviderTaskId ?? false));
+        && !renderIds.has(a.operation_id) && this.requiresProviderTaskId(spec));
   }
   private async execute(lease: Lease, signal: AbortSignal): Promise<void> {
     const renewal = setInterval(() => {
@@ -239,7 +248,7 @@ export class ProductionWorker {
       if (!this.owns(lease)) return;
       const current = attemptsFor(this.db, lease.runId).find(row => row.id === attempt.id)!;
       if (!terminal(current.state) && !cancelUnsupported
-        && (op.kind === "render" || current.provider_task_id !== null || !this.port.queryRequiresProviderTaskId)) {
+        && (op.kind === "render" || current.provider_task_id !== null || !this.requiresProviderTaskId(op))) {
         this.observe(lease, await this.call(attempt.id, () => this.port.cancel(this.recoveryQuery(lease.runId, op, current))), true);
         if (!this.owns(lease)) return;
       }
@@ -407,6 +416,11 @@ export class ProductionWorker {
       : op.kind === "render" && op.parameters.assembly === "code_project" ? op.parameters.expectedMediaKind
       : "video";
     const content: MediaContent = { format: "media", blobId: blob.id, mimeType: blob.mime_type as MediaContent["mimeType"], durationMs: blob.duration_ms };
+    if (op.kind === "speech" && op.model.providerId === "edge-tts") {
+      const matchedAttempt = [...attemptsFor(this.db, run.id)].reverse().find(item => item.operation_id === op.operationId);
+      const dub = matchedAttempt ? parseEdgeAttemptDub(attemptOutput(this.db, matchedAttempt.id)?.detail) : null;
+      if (dub) content.dub = dub;
+    }
     if (op.kind === "render") {
       if((op.parameters.assembly==="mixed_concat" || op.parameters.assembly==="timed_narrated_concat") && op.parameters.subtitles) content.subtitles=op.parameters.subtitles;
       // 成片署名：按冻结输入的实际 blob 顺序聚合素材来源（去重、保持首次使用顺序），
@@ -486,21 +500,45 @@ export class ProductionWorker {
     }
     this.db.prepare("UPDATE production_operations SET output_blob_id=?,output_revision_id=? WHERE run_id=? AND id=?").run(blob.id, revisionId, run.id, op.operationId);
     insertEvent(this.db, now, { ownerId: run.owner_id, conversationId: run.conversation_id, kind: "artifact.delivered", entityId: artifactId, entityVersion: continued?.revision_number ?? 1, notification: "new_output" });
+    if (op.kind === "speech" && content.dub && content.dub.boundaries.length > 0 && blob.duration_ms) {
+      const realWork = snapshot.spec.workId ? (getWorkRow(this.db, run.owner_id, snapshot.spec.workId) ?? null) : null;
+      const sourceRef = { artifactId, revisionId };
+      registerSubtitle(
+        this.db,
+        now,
+        { ownerId: run.owner_id, conversationId: run.conversation_id },
+        realWork,
+        sourceRef,
+        {
+          format: "subtitles",
+          source: sourceRef,
+          alignment: "tts_word",
+          stylePreset: "clean_bottom",
+          cues: speechCues(
+            { words: content.dub.boundaries, starts: [], ends: [] },
+            blob.duration_ms,
+            reviewedNarration(this.db, realWork, content.dub.text),
+          ),
+        },
+        "requestSource" in snapshot.spec ? snapshot.spec.requestSource.requestId : null,
+      );
+    }
   }
   // unknown 的用户说明按事实来源区分：本地无退出证据、供应商无任务身份，或仍在正常查询原任务。
   private unknownIssueMessage(runId: string, ops: OperationRow[], attempts: AttemptRow[]): string {
-    const kindOf = new Map(ops.map(op => [op.id, (JSON.parse(op.spec_json) as OperationSpec).kind]));
+    const specOf = new Map(ops.map(op => [op.id, JSON.parse(op.spec_json) as OperationSpec]));
     for (const attempt of attempts) {
       if (attempt.state !== "unknown") continue;
       const row = this.db.prepare("SELECT observation_json FROM ledger_observations WHERE attempt_id=? AND applied=1 ORDER BY id DESC LIMIT 1")
         .get(attempt.id) as { observation_json: string } | undefined;
       const message = row ? (JSON.parse(row.observation_json) as ExecutionObservation).message : null;
       if (message) return message;
-      if (kindOf.get(attempt.operation_id) === "render") {
+      const spec = specOf.get(attempt.operation_id);
+      if (spec?.kind === "render") {
         if (!this.db.prepare("SELECT 1 FROM production_attempt_outputs WHERE attempt_id=?").get(attempt.id)) {
           return "本地渲染尚未取得退出证据，保留本地执行占用；不会重新渲染或重新提交。";
         }
-      } else if (!attempt.provider_task_id && (this.port.queryRequiresProviderTaskId ?? false)) {
+      } else if (!attempt.provider_task_id && this.requiresProviderTaskId(spec)) {
         return "缺少供应商任务身份，无法向供应商查询；结果与实际费用未取得；不会重新提交。";
       }
     }
@@ -539,9 +577,11 @@ export class ProductionWorker {
       const unknown = attempts.some(a => a.state === "unknown" && a.id !== submittingAttemptId);
       // 取消收敛只等“还能产生新事实”的尝试：本地渲染进程要等停止信号与退出收据；
       // 无任务身份的 unknown（本端口体系查询不到更多证据，如 OpenAI 单次会话）不再永久阻塞。
-      const renderOps = new Set(ops.filter(o => (JSON.parse(o.spec_json) as OperationSpec).kind === "render").map(o => o.id));
+      const specOf = new Map(ops.map(o => [o.id, JSON.parse(o.spec_json) as OperationSpec]));
+      const renderOps = new Set(ops.filter(o => specOf.get(o.id)!.kind === "render").map(o => o.id));
       const resolvable = (a: AttemptRow): boolean =>
-        renderOps.has(a.operation_id) || a.provider_task_id !== null || !this.port.queryRequiresProviderTaskId;
+        renderOps.has(a.operation_id) || a.provider_task_id !== null
+        || (!this.requiresProviderTaskId(specOf.get(a.operation_id)) && a.phase === "submit_started");
       const inFlight = attempts.some(a => !terminal(a.state) && a.phase !== "prepared" && resolvable(a));
       const unresolvedUnknown = attempts.some(a => a.state === "unknown" && a.phase !== "prepared" && !resolvable(a));
       if (run.state === "cancel_requested") {
@@ -577,8 +617,9 @@ export class ProductionWorker {
       // 费用说明按真实查询渠道区分（R2）：仍有会继续查询的账务未核尝试才说“正在核对”，
       // 没有渠道时如实说“实际费用未取得”，不把无从核对的待对账说成进行中的核对。
       // 本地免费运行没有付费快照与账务，不谈费用。
+      const specByOpId = new Map(ops.map(op => [op.id, JSON.parse(op.spec_json) as OperationSpec]));
       const feeNote = run.proposal_id === null || finances(this.db, run).state !== "pending_reconciliation" ? ""
-        : attempts.some(a => this.billingQueryAlive(a, renderOperationIds(ops))) ? "费用仍在核对。" : "实际费用未取得。";
+        : attempts.some(a => this.billingQueryAlive(a, renderOperationIds(ops), specByOpId.get(a.operation_id))) ? "费用仍在核对。" : "实际费用未取得。";
       insertMessage(this.db, this.clock(), {
         id: newAgentId("msg"), ownerId: run.owner_id, conversationId: run.conversation_id, requestId: null,
         role: "system_notice", kind: "notice", state: "completed", text: `“${run.title}”${state === "succeeded" ? "已完成" : state === "cancelled" ? "已停止" : "未完成"}。${feeNote}反馈保留，不会自动改稿或重做。`,

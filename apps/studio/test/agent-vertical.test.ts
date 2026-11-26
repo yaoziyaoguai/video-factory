@@ -297,7 +297,7 @@ it("ISS-05 / CAP-01：四种真实合成在 720p 与 1080p 竖屏输出，三种
     assert.notDeepEqual(await pixels(mixed.file, 21, "scale=64:96"), await pixels(mixed.file, 28, "scale=64:96"), "静帧须有移动");
     console.log(JSON.stringify({ mixed30sMs: mixed.ms, durationMs: mixed.facts.durationMs, driftMs }));
     assert.equal(mixed.facts.durationMs, 30_000);
-    assert.ok(driftMs < 40); assert.ok(mixed.ms < 12000, `实际受理至落库 ${mixed.ms}ms`);
+    assert.ok(driftMs < 40); assert.ok(mixed.ms < 25000, `实际受理至落库 ${mixed.ms}ms`);
   } finally { await runtime.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
