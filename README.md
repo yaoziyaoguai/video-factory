@@ -27,7 +27,7 @@ flowchart TB
   CHAT["对话<br/>选题 · 脚本<br/>画面与声音方案"]
   DRAFT["草稿区<br/>文稿 · 图片<br/>视频 · 字幕"]
   CONFIRMED["确认区<br/>你认可的版本"]
-  CONFIRM_MODEL["制作提案确认<br/>看默认 · 按镜换模<br/>分列费用与算力"]
+  CONFIRM_MODEL["制作提案确认<br/>默认 · 按镜选模<br/>分列费用与算力"]
   MAKE["后台制作<br/>厂商 API · Colab<br/>本地渲染 · 配音"]
   LIBRARY["作品库<br/>成片 · 文稿<br/>采用的素材<br/>工程文件"]
 
@@ -427,12 +427,12 @@ flowchart TB
   subgraph SERVER["服务器 · Docker"]
     direction TB
     NGINX["Nginx<br/>公网唯一入口<br/>TLS<br/>安全响应头"]
-    APP["应用容器<br/>Node.js 22 · uid 1001<br/>内置 Colab CLI<br/>只读根文件系统"]
+    APP["应用容器<br/>Node.js 22<br/>uid 1001<br/>内置 Colab CLI<br/>只读根文件系统"]
     RUNNER["创作宿主<br/>systemd 服务"]
     CREATIVE["创作容器<br/>禁网 · 只读根"]
-    OUT["出网按目标分流<br/>国内模型直连<br/>境外 API 与 Colab<br/>走 VPN 出口"]
+    OUT["出网按目标分流<br/>国内模型直连<br/>境外与 Colab<br/>走 VPN 出口"]
     NEWSNOW["NewsNow<br/>可选的选题榜单"]
-    DATA[("外部数据卷<br/>数据库 · 媒体<br/>Pi 会话 · 授权令牌")]
+    DATA[("外部数据卷<br/>数据库 · 媒体<br/>会话与授权令牌")]
     CREATIVE_VOL[("创作命名卷<br/>7 天未用回收")]
     BACKUP[("加密备份<br/>每次发布前生成")]
 
