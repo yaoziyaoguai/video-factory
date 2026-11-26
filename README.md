@@ -1,6 +1,6 @@
 # 帧间 Frame · Video Agent
 
-![审稿工作台：左侧是对话，中间是当前版本的成片，右侧是未确认与已确认](docs/images/readme/workbench-review.png)
+![帧间 Frame：从对话与分镜草稿，经多通道模型池与按镜确认，走向定稿成片](docs/images/readme/hero-banner.png)
 
 帧间是一个用对话做视频的桌面 Web 工作台。你可以先聊选题、问提示词、找素材，在同一段对话里做几条不同的视频。你明确开始创作后，Frame 才会引导你把一个想法做成作品。
 
@@ -27,13 +27,16 @@ flowchart TB
   CHAT["对话<br/>选题 · 脚本<br/>画面与声音方案"]
   DRAFT["草稿区<br/>文稿 · 图片<br/>视频 · 字幕"]
   CONFIRMED["确认区<br/>你认可的版本"]
-  MAKE["制作<br/>本地免费制作<br/>付费制作"]
+  CONFIRM_MODEL["制作提案确认<br/>看默认 · 按镜换模<br/>分列费用与算力"]
+  MAKE["后台制作<br/>厂商 API · Colab<br/>本地渲染 · 配音"]
   LIBRARY["作品库<br/>成片 · 文稿<br/>采用的素材<br/>工程文件"]
 
   CHAT -->|"每一步的产物"| DRAFT
   DRAFT -->|"提意见 · 比较版本"| CHAT
   DRAFT -->|"认可"| CONFIRMED
-  CONFIRMED -->|"明确的范围<br/>或确认过的预算"| MAKE
+  CONFIRMED -->|"纯本地合成<br/>按明确范围直执"| MAKE
+  CONFIRMED -->|"新生成媒体"| CONFIRM_MODEL
+  CONFIRM_MODEL -->|"确认本版模型与费用"| MAKE
   MAKE -->|"交付新版本"| DRAFT
   DRAFT -->|"定稿并入库"| LIBRARY
   LIBRARY -.->|"引用历史素材与作品"| CHAT
@@ -46,7 +49,7 @@ flowchart TB
   class CHAT cChat
   class DRAFT cWork
   class CONFIRMED cKeep
-  class MAKE cMake
+  class CONFIRM_MODEL,MAKE cMake
   class LIBRARY cStore
 ```
 
@@ -60,11 +63,23 @@ flowchart TB
 
 ## 界面一览
 
-截图来自本机离线演示：画面是内置样片，没有连接任何模型或媒体服务。
+截图来自本机隔离演示环境：画面使用仓库内置样片与合成演示配置，不含真实密钥或外部付费调用。
 
-**作品总览。** 同一段对话里的几件作品放在一起，每件作品带着待确认项，点「审阅」逐项看稿。
+**作品总览。** 同一段对话里的几件作品按行对齐未确认与已确认，输入框底部常驻当前配置的默认模型摘要，点「审阅」逐项看稿。
 
 ![本次对话的作品总览](docs/images/readme/works-overview.png)
+
+**媒体模型池配置。** 文本保持单个当前型号；图片、视频、配音可同时启用多个厂商连接与 Google Colab（`LTX-2.5`）进入模型池，每类可设一个默认或取消默认。
+
+![媒体模型池与默认模型配置](docs/images/readme/model-pool-settings.png)
+
+**制作前确认与按镜换模。** 提案卡常显本次涉及的连接、型号、音色与分列费用；既可一键沿用默认，也可整批调整或只把单个镜头切换为 Google Colab（`CU` 与人民币估价分开核算）。
+
+![制作提案确认与单镜切换模型](docs/images/readme/proposal-model-confirm.png)
+
+**审稿工作台。** 左侧继续对话，中间播放并比较成片版本，右侧常驻未确认与已确认双区。
+
+![审稿工作台：左侧是对话，中间是当前版本的成片，右侧是未确认与已确认](docs/images/readme/workbench-review.png)
 
 **认可之后。** 这一版进入已确认并保留认可记录，可以接着审下一项，或以这一版定稿并入库。
 
@@ -86,9 +101,9 @@ flowchart TB
     ROUTES["HTTP 路由<br/>鉴权 · 校验<br/>快照 · SSE"]
     SERVICE["AgentService<br/>受理 · 排队<br/>可随时停止"]
     RUNTIME["Pi 运行时<br/>与业务工具"]
-    DOMAIN["领域服务<br/>修订 · 认可<br/>提案 · 授权"]
+    DOMAIN["领域服务<br/>修订 · 认可<br/>提案 · 换绑<br/>制作授权"]
     WORKER["制作 Worker"]
-    LOCAL["本机处理"]
+    LOCAL["本机处理<br/>FFmpeg · 识音<br/>Edge 配音"]
     STORAGE[("SQLite<br/>与媒体文件")]
   end
 
@@ -98,7 +113,7 @@ flowchart TB
   DOMAIN --> LOCAL
   DOMAIN --> STORAGE
 
-  RUNTIME -.->|"文本模型"| VENDORS["模型与媒体<br/>供应商"]
+  RUNTIME -.->|"文本模型"| VENDORS["模型与媒体池<br/>厂商 API<br/>Google Colab"]
   WORKER -.-> VENDORS
   RUNTIME -.->|"素材 · 选题"| FREE["免费来源"]
   LOCAL -.->|"代码执行"| SANDBOX["隔离创作容器"]
@@ -189,10 +204,11 @@ stateDiagram-v2
   state "运行 cancel_requested" as Cancelling
   state "运行终态" as Final
 
-  [*] --> Ready: 模型给出范围与估价
-  Ready --> Dropped: 输入或连接变了，或过期
-  Ready --> Accepted: 你确认本次预算
-  Accepted --> Queued: 受理为运行，冻结输入
+  [*] --> Ready: 给出范围、默认与估价
+  Ready --> Ready: 卡内换模或改单镜<br/>重算报价与新摘要
+  Ready --> Dropped: 输入变化 · 连接停用或换Key<br/>或提案过期
+  Ready --> Accepted: 确认本版模型与费用
+  Accepted --> Queued: 受理并冻结输入与绑定
   Queued --> Running: Worker 领取
   Queued --> Final: 未发起尝试就失败
   Running --> Final: succeeded 或 failed
@@ -209,19 +225,22 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TB
-  RUN["受理并冻结输入<br/>按估价占用额度"] -->|"拆成操作"| ATTEMPT["供应商尝试<br/>每次请求记一行"]
-  ATTEMPT -->|"只有供应商上报的用量"| UNVERIFIED["未核实事实<br/>继续占用额度"]
+  RUN["受理并冻结输入<br/>按估价占用额度"] -->|"拆成操作"| ATTEMPT["外部或本机尝试<br/>每次请求记一行"]
+  ATTEMPT -->|"厂商上报用量"| UNVERIFIED["未核实事实<br/>继续占用额度"]
   UNVERIFIED -->|"列入待对账"| RECON["Worker<br/>定期读取账单"]
   RECON --> FINAL["权威事实<br/>实际金额结算"]
-  ATTEMPT -->|"拿到逐笔账单明细"| FINAL
-  ATTEMPT -->|"确定没有产生费用"| ZERO["零元结算<br/>当场释放额度"]
+  ATTEMPT -->|"逐笔账单明细"| FINAL
+  ATTEMPT -->|"真实 GPU 已发起"| COLAB_CU["Colab 算力记录<br/>留存卡型与 CU<br/>不伪造零元账单"]
+  ATTEMPT -->|"分配前拒绝<br/>或免费配音"| ZERO["零元结算<br/>当场释放额度"]
+  ZERO ~~~ PAD[" "]
+  style PAD fill:none,stroke:none
 
   classDef cMake fill:#FFF4E0,stroke:#B7791F,color:#1F2328
   classDef cKeep fill:#EAF5EC,stroke:#2E7D4F,color:#1F2328
   classDef cWork fill:#F3ECFB,stroke:#7A4FBF,color:#1F2328
   class RUN,ATTEMPT,RECON cMake
   class ZERO,FINAL cKeep
-  class UNVERIFIED cWork
+  class UNVERIFIED,COLAB_CU cWork
 ```
 
 额度以人民币分保存，每次受理同时核对会话、自然日、自然月三个上限，未结算的款项跨期继续占用。管理员在「我的 → 成员与预算」管理成员和额度。
@@ -408,12 +427,12 @@ flowchart TB
   subgraph SERVER["服务器 · Docker"]
     direction TB
     NGINX["Nginx<br/>公网唯一入口<br/>TLS<br/>安全响应头"]
-    APP["应用容器<br/>Node.js 22<br/>uid 1001<br/>只读根文件系统<br/>禁止提权"]
+    APP["应用容器<br/>Node.js 22 · uid 1001<br/>内置 Colab CLI<br/>只读根文件系统"]
     RUNNER["创作宿主<br/>systemd 服务"]
     CREATIVE["创作容器<br/>禁网 · 只读根"]
-    OUT["出网按目标分流<br/>国内模型与存储<br/>直连，境外服务<br/>走 VPN 出口"]
+    OUT["出网按目标分流<br/>国内模型直连<br/>境外 API 与 Colab<br/>走 VPN 出口"]
     NEWSNOW["NewsNow<br/>可选的选题榜单"]
-    DATA[("外部数据卷<br/>数据库<br/>媒体文件<br/>Pi 会话记录")]
+    DATA[("外部数据卷<br/>数据库 · 媒体<br/>Pi 会话 · 授权令牌")]
     CREATIVE_VOL[("创作命名卷<br/>7 天未用回收")]
     BACKUP[("加密备份<br/>每次发布前生成")]
 
