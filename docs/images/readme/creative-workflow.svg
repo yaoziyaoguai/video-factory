@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 894 332" width="894" height="332" role="img" aria-label="先审草稿再决定是否花钱：认可只保留版本，新生成媒体必过确认门">
+  
+  <style>
+    .canvas { fill: #FAF9F5; stroke: #DEDBD2; stroke-width: 1.25; }
+    .topbar { fill: #F2F1EB; }
+    .topline { stroke: #E2DFD7; stroke-width: 1; }
+    .kicker { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11px; font-weight: 700; fill: #60645E; letter-spacing: 0.08em; }
+    .heading { font-family: "Songti SC", "Noto Serif SC", "Noto Serif CJK SC", "Source Han Serif SC", serif; font-size: 16.5px; font-weight: 700; fill: #242522; }
+    .plane-chat { fill: #F4F3EE; stroke: #D8D5CB; stroke-width: 1.2; }
+    .plane-exec { fill: #EEF4F0; stroke: #B8D0C2; stroke-width: 1.25; }
+    .plane-amber { fill: #FBF6EC; stroke: #E2CCA5; stroke-width: 1.25; }
+    .plane-terra { fill: #FBF3EE; stroke: #DFB8A8; stroke-width: 1.25; }
+    .plane-title { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 13.5px; font-weight: 700; fill: #242522; }
+    .plane-caption { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 500; fill: #5C6059; }
+    .node { fill: #FFFFFF; stroke: #D8D5CB; stroke-width: 1.2; }
+    .node-green { fill: #FFFFFF; stroke: #90B8A1; stroke-width: 1.35; }
+    .node-amber { fill: #FFFFFF; stroke: #D6B882; stroke-width: 1.35; }
+    .node-terra { fill: #FFFFFF; stroke: #D49E8B; stroke-width: 1.35; }
+    .node-dark { fill: #242522; stroke: #242522; stroke-width: 1.2; }
+    .node-soft { fill: #F5F4EE; stroke: #D8D5CB; stroke-width: 1.15; }
+    .n-title { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 14px; font-weight: 700; fill: #242522; }
+    .n-title-inv { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 14px; font-weight: 700; fill: #FAF9F5; }
+    .n-sub { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 12px; font-weight: 400; fill: #5C6059; }
+    .n-sub-inv { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 400; fill: #D8D6CE; }
+    .tag-green { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 700; fill: #2F5D44; }
+    .tag-amber { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 700; fill: #7D5318; }
+    .tag-terra { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 700; fill: #98442D; }
+    .tag-ink { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11.5px; font-weight: 600; fill: #3E413C; }
+    .pill-green { fill: #EEF4F0; stroke: #A6C6B3; stroke-width: 1; }
+    .pill-amber { fill: #FBF6EC; stroke: #DFC492; stroke-width: 1; }
+    .pill-terra { fill: #FBF3EE; stroke: #DDB09E; stroke-width: 1; }
+    .pill-ink { fill: #ECEAE2; stroke: #D2CFC5; stroke-width: 1; }
+    .pill-paper { fill: #FAF9F5; stroke: #DCD9D0; stroke-width: 1; }
+    .line-ink { fill: none; stroke: #5C6059; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+    .line-green { fill: none; stroke: #2F5D44; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+    .line-amber { fill: none; stroke: #7D5318; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .line-terra { fill: none; stroke: #98442D; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .dash { stroke-dasharray: 5 4; }
+    .edge-txt { font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif; font-size: 11px; font-weight: 600; fill: #444742; }
+  </style>
+  <defs>
+    <marker id="m-ink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#5C6059"/>
+    </marker>
+    <marker id="m-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#2F5D44"/>
+    </marker>
+    <marker id="m-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#7D5318"/>
+    </marker>
+    <marker id="m-terra" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#98442D"/>
+    </marker>
+    <filter id="cardShadow" x="-4%" y="-4%" width="108%" height="114%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3.5" flood-color="#242522" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+
+  <rect x="1" y="1" width="892" height="330" rx="14" class="canvas"/>
+  <path d="M 1 15 Q 1 1 15 1 L 879 1 Q 893 1 893 15 L 893 58 L 1 58 Z" class="topbar"/>
+  <line x1="1" y1="58" x2="893" y2="58" class="topline"/>
+  <circle cx="26" cy="29" r="5" fill="#2F5D44"/>
+  <text x="40" y="24" class="kicker">WORKFLOW · 创作与确认路径</text>
+  <text x="40" y="45" class="heading">先审草稿再决定是否花钱：认可只保留版本，新生成媒体必过确认门</text>
+  <rect x="686" y="17" width="184" height="25" rx="12.5" class="pill-ink"/>
+  <text x="778" y="33.5" text-anchor="middle" class="tag-ink">同一会话可并行多部作品</text>
+  
+  <!-- Top return arc: finished preview returns to Drafts -->
+  <path d="M 800 106 L 800 78 Q 800 70 792 70 L 268 70 Q 260 70 260 78 L 260 104" class="line-green dash" marker-end="url(#m-green)"/>
+  <rect x="438" y="59" width="190" height="22" rx="11" class="pill-paper"/>
+  <text x="533" y="74" text-anchor="middle" class="edge-txt">生成完成先回草稿审片</text>
+
+  <!-- Node 1: 对话构思 -->
+  <g filter="url(#cardShadow)" data-box="26,106,138,106">
+    <rect x="26" y="106" width="138" height="106" rx="12" class="node"/>
+    <rect x="26" y="106" width="138" height="5" rx="2.5" fill="#242522"/>
+    <circle cx="50" cy="134" r="11" fill="#ECEAE2"/>
+    <path d="M 45 131 h 10 M 45 136 h 7" stroke="#242522" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="68" y="139" class="n-title">对话构思</text>
+    <text x="40" y="166" class="n-sub">聊选题、改脚本</text>
+    <text x="40" y="187" class="n-sub">找素材或试提示词</text>
+  </g>
+
+  <!-- Node 2: 草稿区 -->
+  <g filter="url(#cardShadow)" data-box="192,106,144,106">
+    <rect x="192" y="106" width="144" height="106" rx="12" class="node-terra"/>
+    <rect x="192" y="106" width="144" height="5" rx="2.5" fill="#98442D"/>
+    <circle cx="216" cy="134" r="11" fill="#FBF3EE"/>
+    <rect x="211" y="129" width="10" height="10" rx="2" fill="none" stroke="#98442D" stroke-width="1.6"/>
+    <text x="234" y="139" class="n-title">草稿区</text>
+    <text x="206" y="166" class="n-sub">文稿 · 首帧 · 视频</text>
+    <text x="206" y="187" class="tag-terra">保留 v1 / v2 对照</text>
+  </g>
+
+  <!-- Node 3: 确认区 -->
+  <g filter="url(#cardShadow)" data-box="372,106,144,106">
+    <rect x="372" y="106" width="144" height="106" rx="12" class="node-green"/>
+    <rect x="372" y="106" width="144" height="5" rx="2.5" fill="#2F5D44"/>
+    <circle cx="396" cy="134" r="11" fill="#EEF4F0"/>
+    <path d="M 391.5 134.5 l 3 3 l 6 -6.5" fill="none" stroke="#2F5D44" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="414" y="139" class="n-title">确认区</text>
+    <text x="386" y="166" class="n-sub">点过「认可」的版本</text>
+    <text x="386" y="187" class="tag-green">仅保留 · 不自动扣费</text>
+  </g>
+
+  <!-- Track 4A: 服务端内建合成 -->
+  <g filter="url(#cardShadow)" data-box="548,96,162,58">
+    <rect x="548" y="96" width="162" height="58" rx="10" class="node"/>
+    <rect x="548" y="96" width="5" height="58" rx="2.5" fill="#2F5D44"/>
+    <text x="564" y="121" class="n-title">服务端剪辑 / 渲染</text>
+    <text x="564" y="142" class="n-sub">免外部计费 · 直接执行</text>
+  </g>
+
+  <!-- Track 4B: 制作确认门 -->
+  <g filter="url(#cardShadow)" data-box="548,168,162,72">
+    <rect x="548" y="168" width="162" height="72" rx="10" class="node-amber"/>
+    <rect x="548" y="168" width="5" height="72" rx="2.5" fill="#7D5318"/>
+    <text x="564" y="193" class="n-title">制作提案确认门</text>
+    <text x="564" y="213" class="n-sub">默认或按单镜换模</text>
+    <text x="564" y="230" class="tag-amber">核对人民币与 Colab CU</text>
+  </g>
+
+  <!-- Node 5A: 冻结制作 -->
+  <g filter="url(#cardShadow)" data-box="736,106,134,82">
+    <rect x="736" y="106" width="134" height="82" rx="12" class="node-green"/>
+    <text x="750" y="134" class="n-title">后台冻结制作</text>
+    <text x="750" y="156" class="n-sub">锁定本版输入</text>
+    <text x="750" y="175" class="tag-green">改默认不串改</text>
+  </g>
+
+  <!-- Node 5B: 作品库 -->
+  <g filter="url(#cardShadow)" data-box="736,214,134,78">
+    <rect x="736" y="214" width="134" height="78" rx="12" class="node-dark"/>
+    <text x="750" y="243" class="n-title-inv">作品库定稿</text>
+    <text x="750" y="265" class="n-sub-inv">成片 · 文稿 · 素材</text>
+    <text x="750" y="282" class="n-sub-inv">与工程包归档</text>
+  </g>
+
+  <!-- Connectors -->
+  <line x1="164" y1="158" x2="190" y2="158" class="line-ink" marker-end="url(#m-ink)"/>
+  <!-- Revision feedback loop -->
+  <path d="M 254 212 L 254 236 Q 254 244 246 244 L 102 244 Q 94 244 94 236 L 94 214" class="line-terra dash" marker-end="url(#m-terra)"/>
+  <rect x="128" y="233" width="92" height="21" rx="10.5" class="pill-paper"/>
+  <text x="174" y="247.5" text-anchor="middle" class="edge-txt">提意见出新版</text>
+
+  <line x1="336" y1="158" x2="370" y2="158" class="line-green" marker-end="url(#m-green)"/>
+  <rect x="338" y="131" width="32" height="20" rx="10" class="pill-green"/>
+  <text x="354" y="145" text-anchor="middle" class="tag-green">认可</text>
+
+  <!-- Split from Confirmed -->
+  <path d="M 516 138 L 530 138 Q 536 138 536 130 L 536 125 L 546 125" class="line-green" marker-end="url(#m-green)"/>
+  <path d="M 516 178 L 530 178 Q 536 178 536 186 L 536 196 Q 536 204 546 204" class="line-amber" marker-end="url(#m-amber)"/>
+
+  <!-- Converge into Frozen Run -->
+  <line x1="710" y1="125" x2="734" y2="125" class="line-green" marker-end="url(#m-green)"/>
+  <path d="M 710 204 L 721 204 Q 726 204 726 196 L 726 168 Q 726 160 734 160" class="line-amber" marker-end="url(#m-amber)"/>
+
+  <!-- Confirmed video -> Finalize to Library -->
+  <path d="M 444 212 L 444 256 Q 444 264 452 264 L 734 264" class="line-green" marker-end="url(#m-green)"/>
+  <rect x="538" y="253" width="132" height="22" rx="11" class="pill-green"/>
+  <text x="604" y="268" text-anchor="middle" class="tag-green">满意后「定稿并入库」</text>
+
+  <!-- Library -> Conversation reuse -->
+  <path d="M 736 282 L 726 282 L 726 298 Q 726 306 718 306 L 62 306 Q 54 306 54 298 L 54 214" class="line-ink dash" marker-end="url(#m-ink)"/>
+  <rect x="316" y="295" width="198" height="21" rx="10.5" class="pill-paper"/>
+  <text x="415" y="309.5" text-anchor="middle" class="edge-txt">历史素材按准确版本带回新对话</text>
+  
+</svg>
