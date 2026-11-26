@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 894 346" width="894" height="346" role="img" aria-label="卡内换模即时重算，确认后锁定本版输入，按真实凭据分四路结算">
-  
+
   <style>
     .canvas { fill: #FAF9F5; stroke: #DEDBD2; stroke-width: 1.25; }
     .topbar { fill: #F2F1EB; }
@@ -64,7 +64,7 @@
   <text x="40" y="45" class="heading">卡内换模即时重算，确认后锁定本版输入，按真实凭据分四路结算</text>
   <rect x="686" y="17" width="184" height="25" rx="12.5" class="pill-ink"/>
   <text x="778" y="33.5" text-anchor="middle" class="tag-ink">人民币与 Colab CU 分列</text>
-  
+
   <!-- LEFT: Proposal & Freeze -->
   <rect x="26" y="74" width="402" height="250" rx="14" class="plane-chat"/>
   <text x="44" y="99" class="plane-title">1 · 提案换模与受理冻结</text>
@@ -127,5 +127,5 @@
   </g>
 
   <path d="M 412 258 L 442 258 Q 448 258 448 210 L 470 210" class="line-green" marker-end="url(#m-green)"/>
-  
+
 </svg>
